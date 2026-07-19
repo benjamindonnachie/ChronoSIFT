@@ -1,0 +1,2176 @@
+profiling:
+  hour_of_week:
+    smoothing_alpha: 1
+    neighbour_smooth: true
+    quiet_threshold: 0.8
+    emit_hour_rarity_signal: true
+    emit_quiet_time_signal: true
+profile_multipliers:
+- id: QUIET_TIME_PRIV
+  applies_to_signals:
+  - privileged_login
+  k: 0.5
+- id: QUIET_TIME_BOUNDARY
+  applies_to_signals:
+  - boundary_crossing
+  - new_country
+  - new_asn
+  - new_city
+  k: 0.5
+- id: QUIET_TIME_PERSIST
+  applies_to_signals:
+  - persistence_service
+  - persistence_scheduled_task
+  - persistence_runkey
+  - account_or_group_change
+  k: 0.75
+- id: QUIET_TIME_LOLBIN
+  applies_to_signals:
+  - lolbin_linux
+  - lolbin_windows
+  - lolbin_suspicious_args
+  k: 0.75
+- id: QUIET_TIME_EXFIL
+  applies_to_signals:
+  - large_archive_created
+  - staging_then_transfer
+  - sensitive_data_staged
+  - cross_border_transfer
+  - archive_after_sensitive_access
+  k: 0.75
+normalisation:
+- name: ssh_actor_user_auth
+  from: message
+  method: regex_first
+  pattern: (?i)\b(?:accepted|failed)\s+\S+(?:\s+for(?:\s+invalid\s+user)?)\s+([A-Za-z0-9._$@-]+)\b
+  group: 1
+- name: ssh_actor_user_session
+  from: message
+  method: regex_first
+  pattern: (?i)\bsession opened for user\s+([A-Za-z0-9._$@-]+)\b
+  group: 1
+- name: ssh_auth_method
+  from: message
+  method: regex_first
+  pattern: (?i)\b(?:accepted|failed)\s+([a-z0-9_-]+(?:/[a-z0-9_-]+)?)\b
+  group: 1
+- name: actor_user
+  method: coalesce
+  fields:
+  - actor_user
+  - target_user_name
+  - ssh_actor_user_auth
+  - ssh_actor_user_session
+  - user_name
+  - account_name
+  - target_username
+  - username
+  - user
+  - fullname
+  - subject_user_name
+  - user_sid
+  - account_rid
+  - requester
+  - reporter
+- name: actor_principal
+  method: coalesce
+  fields:
+  - actor_principal
+  - actor_user
+  - user_name
+  - account_name
+  - username
+  - user
+  - target_user_name
+  - subject_user_name
+  - user_sid
+- name: src_ip
+  method: coalesce
+  fields:
+  - src_ip
+  - rdp_client_address
+  - client_address
+  - source_network_address
+  - ip_address
+  - source_ip
+  - client_ip
+  - remote_ip
+  - ip
+- name: dst_ip
+  method: coalesce
+  fields:
+  - dst_ip
+  - destination_ip
+  - dest_ip
+  - server_ip
+  - target_ip
+- name: destination_ip
+  method: coalesce
+  fields:
+  - destination_ip
+  - dst_ip
+  - dest_ip
+  - server_ip
+  - target_ip
+- name: destination_fqdn
+  method: coalesce
+  fields:
+  - destination_fqdn
+  - dest_fqdn
+  - target_fqdn
+  - fqdn
+  - server_name
+  - dns_name
+- name: destination_hostname
+  method: coalesce
+  fields:
+  - destination_hostname
+  - dest_hostname
+  - target_hostname
+  - hostname
+  - host_name
+  - computer_name
+  - workstation_name
+- name: actor_ip
+  method: coalesce
+  fields:
+  - src_ip
+- name: actor_port
+  method: coalesce
+  fields:
+  - port
+- name: actor_proto
+  method: coalesce
+  fields:
+  - protocol
+- name: actor_ua
+  method: coalesce
+  fields:
+  - http_request_user_agent
+- name: actor_url
+  method: coalesce
+  fields:
+  - url
+  - http_request
+  - http_request_referer
+- name: actor_cmd
+  method: coalesce
+  fields:
+  - command_line_arguments
+  - command_line
+  - command
+- name: actor_auth_method
+  method: coalesce
+  fields:
+  - ssh_auth_method
+  - authentication_package
+  - logon_process
+  - authentication_method
+- name: auth_protocol
+  method: coalesce
+  fields:
+  - auth_protocol
+- name: auth_direction
+  method: coalesce
+  fields:
+  - auth_direction
+- name: auth_outcome
+  method: coalesce
+  fields:
+  - auth_outcome
+- name: session_id
+  method: coalesce
+  fields:
+  - session_id
+  - rdp_session_name
+- name: logon_id
+  method: coalesce
+  fields:
+  - logon_id
+- name: actor_exit_status
+  method: coalesce
+  fields:
+  - exit_status
+- name: ipv4_fallback
+  from: message
+  method: ipv4_first
+- name: actor_ip_final
+  method: coalesce
+  fields:
+  - actor_ip
+  - ipv4_fallback
+- name: file_ext
+  from: filename
+  method: file_extension
+rules:
+- id: CRON_EXEC_LINUX
+  description: Cron or scheduled command execution observed
+  priority: 78
+  scope:
+    any: []
+    all:
+      - field: parser
+        op: in_ci
+        value: [systemd_journal, syslog, text/syslog_traditional]
+  when:
+    any: []
+    all:
+      - field: message
+        op: contains_ci
+        value: cron
+      - field: message
+        op: contains
+        value: 'CMD ('
+  emit:
+    signals:
+      - name: scheduled_exec
+        value: 1
+    evidence:
+      - field: message
+      - field: parser
+      - field: actor_user
+  confidence: medium
+- id: INTERPRETER_EXEC_LINUX
+  description: Linux interpreter execution observed
+  priority: 76
+  scope:
+    any: []
+    all:
+      - field: parser
+        op: in_ci
+        value: [systemd_journal, syslog, text/bash_history, bash_history, zsh_extended_history, cron, text/syslog_traditional]
+  when:
+    any:
+      - field: actor_cmd
+        op: contains_ci
+        value: python
+      - field: command_line
+        op: contains_ci
+        value: python
+      - field: actor_cmd
+        op: contains_ci
+        value: perl
+      - field: command_line
+        op: contains_ci
+        value: perl
+      - field: actor_cmd
+        op: contains_ci
+        value: php
+      - field: command_line
+        op: contains_ci
+        value: php
+      - field: actor_cmd
+        op: contains_ci
+        value: ruby
+      - field: command_line
+        op: contains_ci
+        value: ruby
+      - field: actor_cmd
+        op: contains_ci
+        value: bash
+      - field: command_line
+        op: contains_ci
+        value: bash
+      - field: actor_cmd
+        op: regex
+        value: (?i)(?:^|[^A-Za-z0-9_./:-])sh(?:$|[^A-Za-z0-9_./:-])
+      - field: command_line
+        op: regex
+        value: (?i)(?:^|[^A-Za-z0-9_./:-])sh(?:$|[^A-Za-z0-9_./:-])
+      - field: message
+        op: contains
+        value: 'CMD ('
+    all: []
+  emit:
+    signals:
+      - name: interpreter_exec_linux
+        value: 1
+    evidence:
+      - field: actor_cmd
+      - field: command_line
+      - field: message
+      - field: parser
+  confidence: medium
+- id: PRIVILEGED_SCHEDULED_EXEC
+  description: Scheduled execution under privileged account
+  priority: 82
+  scope:
+    any: []
+    all:
+      - field: parser
+        op: in_ci
+        value: [systemd_journal, syslog, text/syslog_traditional]
+  when:
+    any:
+      - field: actor_user
+        op: in_ci
+        value: [root, administrator, admin]
+      - field: message
+        op: contains_ci
+        value: '(root)'
+      - field: message
+        op: contains_ci
+        value: '(administrator)'
+      - field: message
+        op: contains_ci
+        value: '(admin)'
+    all:
+      - field: message
+        op: contains_ci
+        value: cron
+      - field: message
+        op: contains
+        value: 'CMD ('
+  emit:
+    signals:
+      - name: privileged_scheduled_exec
+        value: 1
+    evidence:
+      - field: actor_user
+      - field: message
+      - field: parser
+  confidence: medium
+- id: AUTH_FAIL_GENERIC
+  description: Authentication failure indicated by message keywords (fallback)
+  priority: 80
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: failed
+    - field: message
+      op: contains_ci
+      value: failure
+    - field: message
+      op: contains_ci
+      value: invalid password
+    - field: message
+      op: contains_ci
+      value: failed publickey
+    - field: message
+      op: contains_ci
+      value: authentication failed
+    - field: message
+      op: contains_ci
+      value: logon failure
+    - field: message
+      op: contains_ci
+      value: invalid user
+    all: []
+  emit:
+    signals:
+    - name: auth_fail_generic
+      value: 1
+    evidence:
+    - field: message
+    - field: parser
+    - field: timestamp_desc
+    - field: event_identifier
+  confidence: medium
+- id: AUTH_SUCCESS_GENERIC
+  description: Authentication success indicated by message keywords (fallback)
+  priority: 80
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: accepted password
+    - field: message
+      op: contains_ci
+      value: accepted publickey
+    - field: message
+      op: contains_ci
+      value: accepted keyboard-interactive/pam
+    - field: message
+      op: contains_ci
+      value: authentication succeeded
+    - field: message
+      op: contains_ci
+      value: logged in
+    - field: message
+      op: contains_ci
+      value: logon success
+    - field: message
+      op: contains_ci
+      value: session opened
+    all: []
+  emit:
+    signals:
+    - name: auth_success_generic
+      value: 1
+    evidence:
+    - field: message
+    - field: parser
+    - field: timestamp_desc
+    - field: event_identifier
+  confidence: medium
+- id: SSH_SUCCESS_LINUX
+  description: SSH authentication or session establishment succeeded
+  priority: 88
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [systemd_journal, syslog, text/syslog_traditional]
+    - field: message
+      op: contains_ci
+      value: sshd
+    all: []
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: accepted password
+    - field: message
+      op: contains_ci
+      value: accepted publickey
+    - field: message
+      op: contains_ci
+      value: accepted keyboard-interactive/pam
+    - field: message
+      op: contains_ci
+      value: session opened for user
+    all: []
+  emit:
+    signals:
+    - name: ssh_success
+      value: 1
+    evidence:
+    - field: actor_user
+    - field: actor_ip
+    - field: actor_auth_method
+    - field: message
+    - field: parser
+  confidence: high
+- id: SSH_FAIL_LINUX
+  description: SSH authentication failed or invalid user attempted
+  priority: 88
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [systemd_journal, syslog, text/syslog_traditional]
+    - field: message
+      op: contains_ci
+      value: sshd
+    all: []
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: failed password
+    - field: message
+      op: contains_ci
+      value: failed publickey
+    - field: message
+      op: contains_ci
+      value: invalid user
+    all: []
+  emit:
+    signals:
+    - name: ssh_fail
+      value: 1
+    evidence:
+    - field: actor_user
+    - field: actor_ip
+    - field: actor_auth_method
+    - field: message
+    - field: parser
+  confidence: high
+- id: RDP_SUCCESS_WINDOWS_4624
+  description: Windows remote interactive logon succeeded (Security 4624 LogonType 10)
+  priority: 92
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: contains_ci
+      value: winevt
+  when:
+    any: []
+    all:
+    - field: event_identifier
+      op: eq
+      value: '4624'
+    - field: logon_type
+      op: eq
+      value: '10'
+  emit:
+    signals:
+    - name: rdp_success
+      value: 1
+    - name: auth_success_generic
+      value: 1
+    evidence:
+    - field: event_identifier
+    - field: logon_type
+    - field: actor_user
+    - field: rdp_client_address
+    - field: workstation_name
+    - field: provider_name
+  confidence: high
+- id: RDP_FAIL_WINDOWS_4625
+  description: Windows remote interactive logon failed (Security 4625 LogonType 10)
+  priority: 92
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: contains_ci
+      value: winevt
+  when:
+    any: []
+    all:
+    - field: event_identifier
+      op: eq
+      value: '4625'
+    - field: logon_type
+      op: eq
+      value: '10'
+  emit:
+    signals:
+    - name: rdp_fail
+      value: 1
+    - name: auth_fail_generic
+      value: 1
+    evidence:
+    - field: event_identifier
+    - field: logon_type
+    - field: actor_user
+    - field: rdp_client_address
+    - field: workstation_name
+    - field: provider_name
+  confidence: high
+- id: RDP_PRE_AUTH_WINDOWS_1149
+  description: Terminal Services authentication succeeded before full session establishment (1149)
+  priority: 84
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: contains_ci
+      value: winevt
+  when:
+    any: []
+    all:
+    - field: event_identifier
+      op: eq
+      value: '1149'
+  emit:
+    signals:
+    - name: rdp_pre_auth_success
+      value: 1
+    evidence:
+    - field: event_identifier
+    - field: actor_user
+    - field: rdp_client_address
+    - field: event_channel
+    - field: provider_name
+  confidence: medium
+- id: RDP_RECONNECT_WINDOWS_4778
+  description: Windows session reconnected (4778)
+  priority: 72
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: contains_ci
+      value: winevt
+  when:
+    any: []
+    all:
+    - field: event_identifier
+      op: eq
+      value: '4778'
+  emit:
+    signals:
+    - name: rdp_reconnect
+      value: 1
+    evidence:
+    - field: event_identifier
+    - field: actor_user
+    - field: rdp_client_address
+    - field: workstation_name
+  confidence: medium
+- id: RDP_DISCONNECT_WINDOWS_4779
+  description: Windows session disconnected (4779)
+  priority: 72
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: contains_ci
+      value: winevt
+  when:
+    any: []
+    all:
+    - field: event_identifier
+      op: eq
+      value: '4779'
+  emit:
+    signals:
+    - name: rdp_disconnect
+      value: 1
+    evidence:
+    - field: event_identifier
+    - field: actor_user
+    - field: rdp_client_address
+    - field: workstation_name
+  confidence: medium
+- id: PRIV_LOGIN
+  description: Privileged account observed in structured actor context
+  priority: 90
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: actor_user
+      op: in_ci
+      value:
+      - root
+      - administrator
+      - admin
+    all: []
+  emit:
+    signals:
+    - name: privileged_login
+      value: 1
+    evidence:
+    - field: actor_user
+    - field: message
+  confidence: medium
+- id: UA_OFFENSIVE
+  description: User-Agent suggests scanning/probing tooling
+  priority: 70
+  scope:
+    any:
+    - field: sourcetype
+      op: contains_ci
+      value: apache
+    all: []
+  when:
+    any:
+    - field: actor_ua
+      op: regex
+      value: \b(nmap|nikto|sqlmap|skipfish|masscan|dirb|gobuster|wpscan|acunetix|nessus|openvas|kali)\b
+    all: []
+  emit:
+    signals:
+    - name: offensive_user_agent
+      value: 1
+    evidence:
+    - field: actor_ua
+    - field: message
+    - field: url
+  confidence: medium
+- id: WEB_SUSPICIOUS_PATHS
+  description: Suspicious web request path indicators (webshell/traversal/exec hints)
+  priority: 75
+  scope:
+    any:
+    - field: sourcetype
+      op: contains_ci
+      value: apache
+    all: []
+  when:
+    any:
+    - field: actor_url
+      op: regex
+      value: (?i)(/cmd\.php|/shell\.php|/webshell|/c99|/r57|\.php\?cmd=|\.php\?exec=|\.php\?shell=|\.{2}/|/etc/passwd)
+    all: []
+  emit:
+    signals:
+    - name: web_exploitation_hint
+      value: 1
+    evidence:
+    - field: actor_url
+    - field: message
+    - field: http_response_code
+  confidence: low
+- id: PERSIST_SERVICE
+  description: Windows service artefact (potential persistence) indicated by parser
+  priority: 85
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value:
+      - windows_services
+    all: []
+  when:
+    any: []
+    all: []
+  emit:
+    signals:
+    - name: persistence_service
+      value: 1
+    evidence:
+    - field: service_type
+    - field: start_type
+    - field: image_path
+    - field: service_dll
+    - field: object_name
+    - field: message
+  confidence: medium
+- id: PERSIST_TASK
+  description: Scheduled task artefact (potential persistence) indicated by parser
+  priority: 85
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value:
+      - windows_task_cache
+    all: []
+  when:
+    any: []
+    all: []
+  emit:
+    signals:
+    - name: persistence_scheduled_task
+      value: 1
+    evidence:
+    - field: task_name
+    - field: trigger
+    - field: command
+    - field: message
+  confidence: medium
+- id: PERSIST_RUNKEY
+  description: Windows Run/RunOnce artefact (persistence hint) indicated by parser
+  priority: 85
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value:
+      - windows_run
+    all: []
+  when:
+    any: []
+    all: []
+  emit:
+    signals:
+    - name: persistence_runkey
+      value: 1
+    evidence:
+    - field: key_path
+    - field: value_name
+    - field: values
+    - field: message
+  confidence: medium
+- id: ACCOUNT_CHANGE_WINDOWS
+  description: Windows account/group change hint in messages
+  priority: 88
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value:
+      - winevtx
+      - winreg_default
+      - windows_sam_users
+    all: []
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: user account created
+    - field: message
+      op: contains_ci
+      value: user account changed
+    - field: message
+      op: contains_ci
+      value: user account enabled
+    - field: message
+      op: contains_ci
+      value: user account disabled
+    - field: message
+      op: contains_ci
+      value: added to local group
+    - field: message
+      op: contains_ci
+      value: added to group
+    - field: message
+      op: contains_ci
+      value: group membership
+    all: []
+  emit:
+    signals:
+    - name: account_or_group_change
+      value: 1
+    evidence:
+    - field: message
+    - field: event_identifier
+    - field: user_sid
+  confidence: medium
+- id: ACCOUNT_CHANGE_LINUX
+  description: Linux account/group change command observed in execution/history context
+  priority: 88
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: in_ci
+      value: [text/syslog_traditional, text/bash_history, bash_history, zsh_extended_history, cron]
+  when:
+    any:
+      - field: actor_cmd
+        op: contains_ci
+        value: useradd
+      - field: command_line
+        op: contains_ci
+        value: useradd
+      - field: message
+        op: contains_ci
+        value: useradd
+      - field: actor_cmd
+        op: contains_ci
+        value: usermod
+      - field: command_line
+        op: contains_ci
+        value: usermod
+      - field: message
+        op: contains_ci
+        value: usermod
+      - field: actor_cmd
+        op: contains_ci
+        value: groupadd
+      - field: command_line
+        op: contains_ci
+        value: groupadd
+      - field: message
+        op: contains_ci
+        value: groupadd
+      - field: actor_cmd
+        op: contains_ci
+        value: groupmod
+      - field: command_line
+        op: contains_ci
+        value: groupmod
+      - field: message
+        op: contains_ci
+        value: groupmod
+      - field: actor_cmd
+        op: contains_ci
+        value: adduser
+      - field: command_line
+        op: contains_ci
+        value: adduser
+      - field: message
+        op: contains_ci
+        value: adduser
+      - field: actor_cmd
+        op: contains_ci
+        value: addgroup
+      - field: command_line
+        op: contains_ci
+        value: addgroup
+      - field: message
+        op: contains_ci
+        value: addgroup
+    all: []
+  emit:
+    signals:
+    - name: account_or_group_change
+      value: 1
+    evidence:
+    - field: message
+    - field: actor_user
+  confidence: low
+- id: LOLBIN_WINDOWS_EXEC
+  description: Windows LOLBin observed in Windows-like execution context
+  priority: 72
+  scope:
+    any:
+      - field: parser
+        op: contains_ci
+        value: winevt
+      - field: image_path
+        op: contains
+        value: ':\'
+      - field: parser
+        op: contains_ci
+        value: winreg
+      - field: parser
+        op: contains_ci
+        value: prefetch
+    all: []
+  when:
+    any:
+      - field: actor_cmd
+        op: contains_ci
+        value: powershell
+      - field: actor_cmd
+        op: contains_ci
+        value: pwsh
+      - field: actor_cmd
+        op: contains_ci
+        value: cmd.exe
+      - field: actor_cmd
+        op: contains_ci
+        value: wscript
+      - field: actor_cmd
+        op: contains_ci
+        value: cscript
+      - field: actor_cmd
+        op: contains_ci
+        value: mshta
+      - field: actor_cmd
+        op: contains_ci
+        value: rundll32
+      - field: actor_cmd
+        op: contains_ci
+        value: regsvr32
+      - field: actor_cmd
+        op: contains_ci
+        value: certutil
+      - field: actor_cmd
+        op: contains_ci
+        value: bitsadmin
+      - field: actor_cmd
+        op: contains_ci
+        value: wmic
+      - field: actor_cmd
+        op: contains_ci
+        value: schtasks
+      - field: image_path
+        op: contains_ci
+        value: powershell.exe
+      - field: image_path
+        op: contains_ci
+        value: cmd.exe
+      - field: image_path
+        op: contains_ci
+        value: wscript.exe
+      - field: image_path
+        op: contains_ci
+        value: cscript.exe
+      - field: image_path
+        op: contains_ci
+        value: mshta.exe
+      - field: image_path
+        op: contains_ci
+        value: rundll32.exe
+      - field: image_path
+        op: contains_ci
+        value: regsvr32.exe
+      - field: image_path
+        op: contains_ci
+        value: certutil.exe
+      - field: image_path
+        op: contains_ci
+        value: bitsadmin.exe
+      - field: image_path
+        op: contains_ci
+        value: wmic.exe
+      - field: image_path
+        op: contains_ci
+        value: schtasks.exe
+    all: []
+  emit:
+    signals:
+      - name: lolbin_windows
+        value: 1
+    evidence:
+      - field: actor_cmd
+      - field: image_path
+      - field: message
+      - field: parser
+  confidence: medium
+- id: LOLBIN_WINDOWS_SUSPICIOUS_ARGS
+  description: Windows LOLBin with suspicious arguments (encoded/download/proxy exec)
+  priority: 74
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(powershell|pwsh)\b.*\b(-enc|-encodedcommand|-e\s)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(powershell|pwsh)\b.*\b(iwr|invoke-webrequest|wget|curl|downloadstring|new-object\s+net\.webclient)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\bcertutil\b.*\b(-urlcache|-decode|-decodehex)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(regsvr32|mshta|rundll32)\b.*\b(http|https|scrobj\.dll|javascript:|vbscript:)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\bbitsadmin\b.*\b(/transfer|/addfile)\b.*\b(http|https)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b[A-Za-z0-9+/]{80,}={0,2}\b
+    all: []
+  emit:
+    signals:
+    - name: lolbin_suspicious_args
+      value: 1
+    evidence:
+    - field: actor_cmd
+    - field: message
+    - field: parser
+  confidence: medium
+- id: LOLBIN_LINUX_EXEC
+  description: Linux LOLBin name observed in structured command context
+  priority: 70
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(curl|wget|nc|netcat|ncat|socat|bash|sh|python|python3|perl|php|ruby|openssl|base64|tar|zip|rsync|scp|sftp)\b
+    all: []
+  emit:
+    signals:
+    - name: lolbin_linux
+      value: 1
+    evidence:
+    - field: actor_cmd
+    - field: message
+    - field: parser
+  confidence: low
+- id: LOLBIN_LINUX_SUSPICIOUS_ARGS
+  description: Linux LOLBin with suspicious arguments (pipe-to-shell/reverse shell idioms)
+  priority: 72
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(curl|wget)\b.*\|\s*(sh|bash)\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(nc|netcat|ncat|socat)\b.*\b(-e\s|/bin/(sh|bash))\b
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(base64)\b.*\b(-d|--decode)\b
+    all: []
+  emit:
+    signals:
+    - name: lolbin_suspicious_args
+      value: 1
+    evidence:
+    - field: actor_cmd
+    - field: message
+    - field: parser
+  confidence: low
+- id: LARGE_ARCHIVE_CREATED
+  description: Large archive created/present (staging indicator)
+  priority: 66
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: file_ext
+      op: in_ci
+      value:
+      - .zip
+      - .7z
+      - .rar
+      - .tar
+      - .gz
+      - .tgz
+    all:
+    - field: file_size
+      op: gte
+      value: 20971520
+  emit:
+    signals:
+    - name: large_archive_created
+      value: 1
+    evidence:
+    - field: filename
+    - field: file_ext
+    - field: file_size
+    - field: is_allocated
+    - field: parser
+    - field: message
+  confidence: medium
+- id: DATA_TRANSFER_TOOL_EXEC
+  description: Data transfer tooling with remote indicator (structured cmd/proto aware)
+  priority: 67
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: actor_cmd
+      op: regex
+      value: (?i)\b(ftp|scp|sftp|rsync|curl|wget|nc|netcat|ncat|socat|bitsadmin|certutil|powershell|pwsh)\b
+    - field: actor_proto
+      op: in_ci
+      value:
+      - ftp
+      - sftp
+      - scp
+      - http
+      - https
+    all:
+    - field: actor_cmd
+      op: regex
+      value: (?i)(https?://|ftp://|sftp://|\b\d{1,3}(?:\.\d{1,3}){3}\b|\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b)
+  emit:
+    signals:
+    - name: data_transfer_tool_exec
+      value: 1
+    evidence:
+    - field: actor_cmd
+    - field: protocol
+    - field: port
+    - field: ip_address
+    - field: message
+    - field: parser
+  confidence: medium
+- id: DATA_TRANSFER_TOOL_EXEC_FALLBACK
+  description: Data transfer tooling with remote indicator in execution-history/log context
+  priority: 66
+  scope:
+    any: []
+    all:
+    - field: parser
+      op: in_ci
+      value: [systemd_journal, syslog, text/bash_history, bash_history, zsh_extended_history]
+  when:
+    any:
+    - field: message
+      op: contains_ci
+      value: curl
+    - field: message
+      op: contains_ci
+      value: wget
+    - field: message
+      op: contains_ci
+      value: scp
+    - field: message
+      op: contains_ci
+      value: sftp
+    - field: message
+      op: contains_ci
+      value: rsync
+    - field: message
+      op: contains_ci
+      value: ftp
+    - field: message
+      op: contains_ci
+      value: bitsadmin
+    - field: message
+      op: contains_ci
+      value: certutil
+    all:
+    - field: message
+      op: contains
+      value: '://'
+  emit:
+    signals:
+    - name: data_transfer_tool_exec
+      value: 1
+    evidence:
+    - field: message
+    - field: parser
+  confidence: low
+- id: LARGE_HTTP_TRANSFER
+  description: Large HTTP transfer observed in Apache logs (bytes threshold, success only)
+  priority: 65
+  scope:
+    any:
+    - field: sourcetype
+      op: contains_ci
+      value: apache
+    all: []
+  when:
+    any: []
+    all:
+    - field: http_response_code
+      op: eq
+      value: 200
+    - field: http_response_bytes
+      op: gte
+      value: 10485760
+  emit:
+    signals:
+    - name: large_http_transfer
+      value: 1
+    evidence:
+    - field: url
+    - field: http_response_bytes
+    - field: http_response_code
+    - field: http_request_user_agent
+    - field: message
+  confidence: medium
+- id: NEW_COUNTRY
+  description: Country change flag present (requires geo enrichment pre-step)
+  priority: 50
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: geo_new_country
+      op: eq
+      value: true
+    all: []
+  emit:
+    signals:
+    - name: new_country
+      value: 1
+    evidence:
+    - field: geo_country
+    - field: actor_ip_final
+  confidence: high
+- id: NEW_ASN
+  description: ASN change flag present (requires geo enrichment pre-step)
+  priority: 50
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: geo_new_asn
+      op: eq
+      value: true
+    all: []
+  emit:
+    signals:
+    - name: new_asn
+      value: 1
+    evidence:
+    - field: geo_asn
+    - field: actor_ip_final
+  confidence: high
+- id: BOUNDARY_CROSSING
+  description: Boundary crossing flag present (requires geo enrichment pre-step)
+  priority: 55
+  scope:
+    any: []
+    all: []
+  when:
+    any:
+    - field: geo_boundary_crossing
+      op: eq
+      value: true
+    all: []
+  emit:
+    signals:
+    - name: boundary_crossing
+      value: 1
+    evidence:
+    - field: actor_ip_final
+    - field: geo_country
+    - field: geo_asn
+  confidence: high
+
+# --- Plaso artifact presence rules (v2.30 gap closure) ---
+
+- id: PREFETCH_EXECUTION
+  description: Windows Prefetch artefact indicates program execution
+  priority: 80
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [winprefetch, prefetch]
+    all: []
+  when: {any: [], all: []}
+  emit:
+    signals:
+    - name: prefetch_execution
+      value: 1
+    evidence:
+    - field: filename
+    - field: display_name
+    - field: message
+  confidence: medium
+
+- id: AMCACHE_EXECUTION
+  description: Windows Amcache artefact indicates program installation or execution
+  priority: 80
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [amcache]
+    all: []
+  when: {any: [], all: []}
+  emit:
+    signals:
+    - name: amcache_execution
+      value: 1
+    evidence:
+    - field: filename
+    - field: display_name
+    - field: message
+  confidence: medium
+
+- id: SHIMCACHE_EXECUTION
+  description: Windows AppCompatCache (Shimcache) artefact indicates program presence
+  priority: 75
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [appcompatcache]
+    all: []
+  when: {any: [], all: []}
+  emit:
+    signals:
+    - name: shimcache_execution
+      value: 1
+    evidence:
+    - field: filename
+    - field: display_name
+    - field: message
+  confidence: low
+
+- id: USB_DEVICE_INSERTION
+  description: USB storage device connection detected via registry artefact
+  priority: 80
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [windows_usb_devices, windows_usbstor_devices]
+    all: []
+  when: {any: [], all: []}
+  emit:
+    signals:
+    - name: usb_device_connected
+      value: 1
+    evidence:
+    - field: display_name
+    - field: message
+  confidence: medium
+
+- id: BROWSER_DOWNLOAD
+  description: Browser download event from history artefact
+  priority: 70
+  scope:
+    any:
+    - field: parser
+      op: in_ci
+      value: [chrome_27_history, chrome_8_history, firefox_history, firefox_downloads, firefox_118_downloads, safari_history, safari_historydb, safari_downloads, edge_load_statistics, msie_webcache]
+    all: []
+  when:
+    any:
+    - field: timestamp_desc
+      op: contains_ci
+      value: download
+    - field: message
+      op: contains_ci
+      value: download
+    all: []
+  emit:
+    signals:
+    - name: browser_download
+      value: 1
+    evidence:
+    - field: url
+    - field: filename
+    - field: display_name
+    - field: message
+  confidence: low
+
+temporal_rules:
+- id: FAIL_THEN_SUCCESS_USER
+  description: Repeated remote authentication failures followed by remote success for same principal within lookback
+  priority: 80
+  key_by:
+  - actor_principal
+  lookback: 6h
+  sequence:
+  - signal: auth_remote_failure
+    min_count: 3
+  - signal: auth_remote_success
+    min_count: 1
+  emit:
+    signals:
+    - name: fail_then_success_user
+      value: 1
+  confidence: medium
+- id: FAIL_THEN_SUCCESS_IP
+  description: Repeated remote authentication failures followed by remote success from same source IP within lookback
+  priority: 80
+  key_by:
+  - src_ip
+  lookback: 6h
+  sequence:
+  - signal: auth_remote_failure
+    min_count: 3
+  - signal: auth_remote_success
+    min_count: 1
+  emit:
+    signals:
+    - name: fail_then_success_ip
+      value: 1
+  confidence: medium
+- id: LOCAL_FAIL_THEN_SUCCESS_USER
+  description: Local authentication failure followed by local success for same principal within lookback
+  priority: 68
+  key_by:
+  - actor_principal
+  lookback: 6h
+  sequence:
+  - signal: auth_local_failure
+    min_count: 1
+  - signal: auth_local_success
+    min_count: 1
+  emit:
+    signals:
+    - name: local_fail_then_success_user
+      value: 1
+  confidence: low
+- id: LUHN_THEN_LARGE_ARCHIVE
+  description: Sensitive data indicator (Luhn hit) followed by large archive staging (canonical principal keyed)
+  priority: 70
+  key_by:
+  - actor_principal
+  lookback: 2h
+  sequence:
+  - signal: luhn_hit
+    min_count: 1
+  - signal: staging_archive
+    min_count: 1
+  emit:
+    signals:
+    - name: sensitive_data_staged
+      value: 1
+  confidence: medium
+- id: LUHN_THEN_LARGE_ARCHIVE_IP
+  description: Sensitive data indicator (Luhn hit) followed by large archive staging (canonical source IP keyed)
+  priority: 69
+  key_by:
+  - src_ip
+  lookback: 2h
+  sequence:
+  - signal: luhn_hit
+    min_count: 1
+  - signal: staging_archive
+    min_count: 1
+  emit:
+    signals:
+    - name: sensitive_data_staged
+      value: 1
+  confidence: low
+- id: ARCHIVE_AFTER_SENSITIVE_ACCESS
+  description: Sensitive file access followed by archive creation on the same host
+  priority: 71
+  key_by:
+  - hostname
+  lookback: 2h
+  sequence:
+  - signal: sensitive_file_access
+    min_count: 1
+  - signal: staging_archive
+    min_count: 1
+  emit:
+    signals:
+    - name: archive_after_sensitive_access
+      value: 1
+  confidence: medium
+- id: STAGING_THEN_TRANSFER
+  description: Large archive staging followed by transfer tooling within lookback (canonical principal keyed)
+  priority: 75
+  key_by:
+  - actor_principal
+  lookback: 6h
+  sequence:
+  - signal: staging_archive
+    min_count: 1
+  - signal: transfer_execution
+    min_count: 1
+  emit:
+    signals:
+    - name: staging_then_transfer
+      value: 1
+  confidence: medium
+- id: STAGING_THEN_TRANSFER_IP
+  description: Large archive staging followed by transfer tooling within lookback (canonical source IP keyed)
+  priority: 74
+  key_by:
+  - src_ip
+  lookback: 6h
+  sequence:
+  - signal: staging_archive
+    min_count: 1
+  - signal: transfer_execution
+    min_count: 1
+  emit:
+    signals:
+    - name: staging_then_transfer
+      value: 1
+  confidence: low
+- id: STAGING_THEN_LARGE_HTTP
+  description: Large archive staging followed by large HTTP transfer within lookback (canonical principal keyed)
+  priority: 74
+  key_by:
+  - actor_principal
+  lookback: 6h
+  sequence:
+  - signal: staging_archive
+    min_count: 1
+  - signal: transfer_large_http
+    min_count: 1
+  emit:
+    signals:
+    - name: staging_then_transfer
+      value: 1
+  confidence: low
+- id: STAGING_THEN_LARGE_HTTP_IP
+  description: Large archive staging followed by large HTTP transfer within lookback (canonical source IP keyed)
+  priority: 73
+  key_by:
+  - src_ip
+  lookback: 6h
+  sequence:
+  - signal: staging_archive
+    min_count: 1
+  - signal: transfer_large_http
+    min_count: 1
+  emit:
+    signals:
+    - name: staging_then_transfer
+      value: 1
+  confidence: low
+- id: CROSS_BORDER_TRANSFER
+  description: Transfer tooling coincident with boundary crossing within lookback (canonical principal keyed)
+  priority: 60
+  key_by:
+  - actor_principal
+  lookback: 6h
+  cooccur:
+    all:
+    - signal: transfer_execution
+      min_count: 1
+    - signal: boundary_crossing
+      min_count: 1
+  emit:
+    signals:
+    - name: cross_border_transfer
+      value: 1
+  confidence: medium
+- id: CROSS_BORDER_TRANSFER_IP
+  description: Transfer tooling coincident with boundary crossing within lookback (canonical source IP keyed)
+  priority: 59
+  key_by:
+  - src_ip
+  lookback: 6h
+  cooccur:
+    all:
+    - signal: transfer_execution
+      min_count: 1
+    - signal: boundary_crossing
+      min_count: 1
+  emit:
+    signals:
+    - name: cross_border_transfer
+      value: 1
+  confidence: low
+- id: EXEC_PRIVILEGE_ESCALATION_SEQUENCE
+  description: Compiler activity followed by privilege-escalation artefact sequence on the same host/principal
+  priority: 76
+  key_by:
+  - hostname
+  - actor_principal
+  lookback: 2h
+  sequence:
+  - signal: exec_compiler_activity
+    min_count: 1
+  - signal: exec_new_suid_binary
+    min_count: 1
+  emit:
+    signals:
+    - name: exec_privilege_escalation_sequence
+      value: 1
+  confidence: medium
+- id: EXEC_STAGING_SEQUENCE
+  description: Archive tooling followed by network transfer tooling on the same host/principal
+  priority: 72
+  key_by:
+  - hostname
+  - actor_principal
+  lookback: 6h
+  sequence:
+  - signal: exec_archive_tool
+    min_count: 1
+  - signal: exec_network_tool
+    min_count: 1
+  emit:
+    signals:
+    - name: exec_staging_sequence
+      value: 1
+  confidence: medium
+- id: AUTH_PIVOT_ACCOUNTS_FROM_SAME_SRC
+  description: Remote authentication source changed principal within lookback
+  priority: 72
+  key_by:
+  - src_ip
+  lookback: 6h
+  condition:
+    kind: change_detected
+    field: actor_principal
+  emit:
+    signals:
+    - name: auth_pivot_accounts_from_same_src
+      value: 1
+  confidence: medium
+- id: AUTH_PIVOT_DESTINATION_FOR_SAME_USER
+  description: Same principal authenticated to a different destination identity within lookback
+  priority: 70
+  key_by:
+  - actor_principal
+  lookback: 6h
+  condition:
+    kind: change_detected
+    field: pivot_dest_key
+  emit:
+    signals:
+    - name: auth_pivot_destinations_for_same_user
+      value: 1
+  confidence: medium
+impossible_travel:
+  enabled: true
+  key_by:
+  - actor_principal
+  success_signal_keys:
+  - auth_remote_success
+  min_distance_km: 200
+  min_time_seconds: 60
+  velocity_kmh_threshold: 900
+  notes: Impossible travel is computed on canonical principal continuity (actor_principal) across canonical authentication
+    success events identified by success_signal_keys (matched case-insensitively in code). Thresholds are static for behavioural
+    stability; profile-based tuning may be introduced later.
+engine_notes:
+  temporal_profiling: 'ChronoSift can inject context signals derived from a dataset-wide hour-of-week activity profile: hour_rarity
+    (0..1, surprisal with smoothing) and quiet_time_event (0/1, bottom-quantile hours). These are computed from host-resident
+    events (excluding web access telemetry) and are injected into chronosift_signals after rule evaluation and before scoring.
+    No explicit DSL rules are required.'
+  geoip_metadata: When GeoLite2 City/ASN databases are provided, ChronoSift records input DB paths and file modification times
+    in df.attrs['chronosift_metadata']['geoip'] for reproducibility.
+  config_hygiene: ChronoSift lowercases signal keys during scoring to avoid case drift. Config validation checks (optional)
+    help ensure weights and emitted signals remain aligned.
+  profiling_nsrl_exclusion: For filesystem activity baselining, events whose nsrl_application_type contains 'Operating System'
+    should be excluded from the hour-of-week baseline. This reduces routine operating-system churn in the profiling set and
+    prevents OS artefacts from flattening temporal rarity.
+  profiling_package_exclusion: For filesystem activity baselining, package management and update-related activity should be
+    excluded from the hour-of-week baseline. Specifically, parser names containing 'apt_history' or 'dpkg', and filenames
+    containing 'WinSxS' or 'SoftwareDistribution', are excluded. This reduces routine maintenance bursts from flattening temporal
+    rarity.
+  yara_empty_list_handling: The YARA_HIT rule must key off yara_match_count > 0 rather than yara_match exists. This prevents
+    empty list values ([]) from being treated as hits while preserving the raw yara_match field for analyst-facing evidence.
+  message_context_hardening: Rules keyed on privileged-account names or transfer-tool names are restricted to structured actor
+    or execution-history contexts where possible, to avoid false positives from file paths or file content.
+  referenced_file_hit_propagation: The engine emits referenced_file_yara_hit, referenced_file_av_hit, and referenced_file_luhn_hit
+    when a row's message references an exact file path that has direct YARA, AV, or Luhn hits elsewhere in the timeline.
+  yara_strength: 'Binary YARA_HIT is removed. The engine derives yara_hit_strength from yara_match_count using bounded linear
+    scaling: min(1, yara_match_count / 3). One, two, and three-or-more matches therefore contribute one-third, two-thirds,
+    and full YARA support respectively.'
+  referenced_file_path_normalisation: Referenced-file correlation normalises extracted paths, trims shell punctuation, and
+    recognises relative execution forms such as ./tool and ../tool. Exact-path matching is used by default, with basename
+    fallback only for explicitly relative paths.
+  private_ip_continuity: When geolocation is unavailable because activity originates from private address space, the engine
+    falls back to actor-IP continuity analysis and emits user_changed_private_ip, user_crossed_private_subnet, user_private_to_public_ip,
+    and user_public_to_private_ip.
+  profile_multiplier_dedup: Profile multipliers are applied at most once per signal per event, and explanation entries are
+    deduplicated.
+  account_change_linux_scope: ACCOUNT_CHANGE_LINUX is restricted to execution/history contexts (text/syslog_traditional, shell
+    history, cron) to reduce benign metadata noise.
+engine_config:
+  # Path to YARA Forge .yar file for category-aware YARA signal scoring.
+  # When set, the engine parses rule metadata to classify YARA matches into
+  # forensic categories (offensive_tool, ransomware, webshell, apt, exploit,
+  # certificate, malware) and applies differential weighting.
+  # Download this file locally or override it with --yara-metadata-path. The
+  # upstream YARA Forge rule corpus is intentionally not redistributed here.
+  yara_forge_metadata_path: "rules/yara-forge-rules-extended.yar"
+
+  canonical_auth_signals:
+    success_target: auth_success
+    fail_target: auth_failure
+    success_sources:
+    - auth_success_generic
+    - ssh_success
+    - rdp_success
+    fail_sources:
+    - auth_fail_generic
+    - ssh_fail
+    - rdp_fail
+  config_validation:
+    enabled: true
+    strict: false
+    notes: If enabled, ChronoSift validates that emitted signal names have corresponding weights and optionally warns on unused
+      weights. Set strict=true to raise an error instead of warnings.
+  schema_aliases:
+    actor_principal:
+    - actor_user
+    - username
+    - user
+    - target_user_name
+    src_ip:
+    - ip_address
+    - source_ip
+    - client_ip
+    - remote_ip
+    - ip
+    - actor_ip_final
+    destination_ip:
+    - dst_ip
+    - dest_ip
+    - server_ip
+    - target_ip
+  path_taxonomy:
+    web_root_patterns:
+    - /var/www/
+    - /srv/www/
+    - /usr/share/nginx/html/
+    - /htdocs/
+    - /httpdocs/
+    - \inetpub\wwwroot\
+    - \xampp\htdocs\
+    sensitive_path_patterns:
+    - /etc/passwd
+    - /etc/shadow
+    - /etc/sudoers
+    - /root/.ssh/
+    - /.ssh/
+    - /.gnupg/
+    - /.bash_history
+    - /.zsh_history
+    - /.mysql_history
+    - /.psql_history
+    - id_rsa
+    - id_dsa
+    - id_ecdsa
+    - id_ed25519
+    - authorized_keys
+    - known_hosts
+    - \windows\system32\config\sam
+    - \windows\system32\config\system
+    - \windows\system32\config\security
+    - ntds.dit
+    - web.config
+    - \repair\sam
+    - \repair\system
+    database_dump_patterns:
+    - dump
+    - mysqldump
+    - pg_dump
+    - sqlite dump
+    cron_path_patterns:
+    - /etc/crontab
+    - /etc/anacrontab
+    - /etc/cron.d/
+    - /etc/cron.daily/
+    - /etc/cron.hourly/
+    - /etc/cron.monthly/
+    - /etc/cron.weekly/
+    - /var/spool/cron/
+    - /var/spool/cron/crontabs/
+    service_config_patterns:
+    - /etc/systemd/system/
+    - /lib/systemd/system/
+    - /usr/lib/systemd/system/
+    - /etc/init.d/
+    - \system\currentcontrolset\services\
+    firewall_path_patterns:
+    - /etc/firewalld/
+    - /etc/ufw/
+    - /etc/sysconfig/iptables
+    - /etc/iptables/
+    - \sharedaccess\parameters\firewallpolicy\
+    group_policy_path_patterns:
+    - \grouppolicy\
+    - \sysvol\
+    - \policies\
+    - registry.pol
+    winlogon_path_patterns:
+    - \microsoft\windows nt\currentversion\winlogon
+    com_hijack_path_patterns:
+    - \classes\clsid\
+    - \classes\wow6432node\clsid\
+    os_update_path_patterns:
+    - \winsxs\
+    - \softwaredistribution\
+    - \windows\assembly\
+    - \windows\installer\
+    - /usr/lib/
+    - /usr/share/doc/
+    - /usr/share/man/
+    - /var/cache/apt/
+    - /var/cache/dnf/
+    - /var/cache/yum/
+    - /var/lib/dpkg/
+    - /var/lib/rpm/
+  detection_vocabulary:
+    archive_extensions:
+    - .zip
+    - .7z
+    - .rar
+    - .tar
+    - .gz
+    - .tgz
+    - .bz2
+    - .xz
+    web_script_extensions:
+    - .php
+    - .phtml
+    - .php3
+    - .php4
+    - .php5
+    - .asp
+    - .aspx
+    - .ashx
+    - .jsp
+    - .jspx
+    - .cgi
+    - .pl
+    web_content_extensions:
+    - .php
+    - .phtml
+    - .php3
+    - .php4
+    - .php5
+    - .asp
+    - .aspx
+    - .jsp
+    - .jspx
+    - .cgi
+    - .pl
+    - .html
+    - .htm
+    - .js
+    - .css
+    database_dump_extensions:
+    - .sql
+    - .dump
+    - .bak
+    - .sqlite
+    - .db
+    suspicious_temp_web_name_tokens:
+    - tmp
+    - temp
+    defender_disable_tokens:
+    - disableantispyware
+    - disablerealtimemonitoring
+    - realtime protection disabled
+    - real-time protection disabled
+    - microsoft defender antivirus has been disabled
+    - windows defender has been turned off
+    windows_privileged_group_tokens:
+    - administrators
+    - domain admins
+    - enterprise admins
+    - remote desktop users
+    windows_remote_admin_pipe_tokens:
+    - svcctl
+    - atsvc
+    - winreg
+    - samr
+    - lsarpc
+    - srvsvc
+    - wkssvc
+    - spoolss
+    firewall_message_tokens:
+    - firewalld
+    - iptables
+    - ufw
+    - windows firewall
+    firewall_change_tokens:
+    - changed
+    - modified
+    - disabled
+    - added
+    - deleted
+    account_created_message_tokens:
+    - user account was created
+    - ' useradd['
+    - useradd[
+    systemd_unit_extensions:
+    - .service
+    - .socket
+    - .timer
+    - .mount
+    - .path
+    systemd_enable_tokens:
+    - systemctl enable
+    - systemctl start
+    - systemctl restart
+    - systemctl link
+    - systemctl preset
+    - daemon-reload
+    webshell_name_tokens:
+    - cmd
+    - shell
+    - webshell
+    - c99
+    - r57
+    - b374k
+    - wso
+    - filemanager
+    - upload
+    recovery_inhibit_command_tokens:
+    - vssadmin delete shadows
+    - wmic shadowcopy delete
+    - wbadmin delete
+    - bcdedit /set
+    - reagentc /disable
+    - delete catalog
+    - shadowcopy delete
+    cleanup_command_tokens:
+    - wevtutil cl
+    - history -c
+    - rm .bash_history
+    - rm ~/.bash_history
+    - truncate -s 0
+    - 'shred '
+    - sdelete
+    - clear-eventlog
+    credential_dump_command_tokens:
+    - procdump
+    - comsvcs.dll
+    - minidump
+    - ntdsutil
+    - reg save hklm\sam
+    - reg save hklm\system
+    - lsass.dmp
+    - sekurlsa
+    password_store_path_tokens:
+    - login data
+    - key4.db
+    - logins.json
+    - .kdbx
+    - credentials
+    - vault
+    - web.config
+    password_store_message_tokens:
+    - login data
+    - key4.db
+    - logins.json
+    - .kdbx
+    - credentials
+    - vault
+    - web.config
+    file_discovery_command_tokens:
+    - ' dir'
+    - 'dir '
+    - ' ls'
+    - 'ls '
+    - 'find '
+    - 'tree '
+    - 'locate '
+    - 'grep '
+    remote_discovery_command_tokens:
+    - net view
+    - quser
+    - qwinsta
+    - arp -a
+    - route print
+    - ip neigh
+    - 'nslookup '
+    - resolve-dnsname
+    - nltest /dclist
+    - nltest.exe /dclist
+    - ping -n 1
+    - ping -c 1
+    system_owner_discovery_command_tokens:
+    - whoami
+    - 'id '
+    - hostname
+    - uname -a
+    - ipconfig
+    - ifconfig
+    admin_share_tokens:
+    - \\c$
+    - \\admin$
+    - \\ipc$
+    - /admin$
+    - /ipc$
+    account_access_removed_message_tokens:
+    - user account disabled
+    - user account was disabled
+    - user account deleted
+    - removed from local group
+    - removed from group
+    - userdel
+    log_artifact_tokens:
+    - /var/log/
+    - \windows\system32\winevt\logs\
+    - .bash_history
+    - .zsh_history
+    - .psql_history
+    - .mysql_history
+    application_protocol_tokens:
+    - http://
+    - https://
+    - ftp://
+    - sftp://
+    - scp://
+    - smb://
+    - cifs://
+    - \\
+    web_upload_tokens:
+    - multipart/form-data
+    - filename=
+    - upload
+    web_upload_endpoint_tokens:
+    - upload
+    - filemanager
+    - connector
+    - ajaxfilemanager
+    - ckfinder
+    - elfinder
+    web_log_parser_tokens:
+    - apache
+    - nginx
+    - iis
+    - w3c
+    - msiis
+    credential_copy_command_tokens:
+    - 'copy '
+    - 'cp '
+    - 'xcopy '
+    - robocopy
+    - 'move '
+    - 'mv '
+    - copy-item
+    - 'tar '
+    - 'zip '
+    - '7z '
+    - 'rar '
+    - 'scp '
+    - 'sftp '
+    - 'curl '
+    - 'wget '
+    ransom_note_name_tokens:
+    - readme
+    - decrypt
+    - recover
+    - restore
+    - how_to
+    - ransom
+    ransom_extension_tokens:
+    - .locked
+    - .lockbit
+    - .encrypted
+    - .crypt
+    - .crypted
+    - .conti
+    - .akira
+    - .blackcat
+    - .cl0p
+    - .clop
+    - .zepto
+    - .cerber
+    - .deadbolt
+    - .wannacry
+    - .wncry
+    - .play
+    - .royal
+    - .phobos
+    service_stop_command_tokens:
+    - sc stop
+    - sc.exe stop
+    - net stop
+    - net.exe stop
+    - stop-service
+    - taskkill /f
+    - taskkill.exe /f
+    - systemctl stop
+    winlogon_persistence_value_tokens:
+    - shell
+    - userinit
+    - notify
+    - appinit_dlls
+    - taskman
+    remote_service_message_tokens:
+    - rdp
+    - remote desktop
+    - ssh
+    - winrm
+    - terminalservices
+    - session opened
+  detection_event_ids:
+    account_created:
+    - '4720'
+    account_disabled:
+    - '4725'
+    account_deleted:
+    - '4726'
+    privileged_group_change:
+    - '4728'
+    - '4732'
+    - '4756'
+    group_removal_change:
+    - '4729'
+    - '4733'
+    - '4757'
+    share_access:
+    - '5140'
+    - '5145'
+    explicit_credential_logon:
+    - '4648'
+    service_stopped:
+    - '7036'
+    service_start_type_changed:
+    - '7040'
+  detection_thresholds:
+    short_lived_file_window: 2h
+    mass_file_modification_window: 10m
+    mass_file_modification_threshold: 25
+    ransom_extension_burst_window: 15m
+    ransom_extension_burst_threshold: 6
+    repeated_scheduled_exec_window: 10m
+    repeated_scheduled_exec_threshold: 3
+    download_exec_window: 2h
+    webshell_activity_window: 30m
+    automated_exfiltration_window: 30m
+    automated_exfiltration_threshold: 2
+    credential_collection_window: 1h
+  profiling:
+    exclude_nsrl_application_type_contains:
+    - Operating System
+    exclude_parser_contains:
+    - apt_history
+    - dpkg
+    exclude_filename_contains:
+    - WinSxS
+    - SoftwareDistribution
+  referenced_file_hit_propagation:
+    propagated_multiplier: 0.5
+  trust_dampening:
+    enabled: false
+    multiplier: 0.5
+    signals:
+    - impossible_travel
+    - fail_then_success_user
+    - fail_then_success_ip
+    - auth_pivot_accounts_from_same_src
+    - auth_pivot_destinations_for_same_user
+    - boundary_crossing
+    - new_country
+    - new_asn
+    - cross_border_transfer
+    trusted_actor_principals: []
+    trusted_actor_principal_regex: []
+    trusted_ips: []
+    trusted_asns: []
+private_ip_continuity:
+  enabled: true
+  key_by:
+  - actor_principal
+  lookback: 24h
+  subnet_prefix_v4: 24
+  subnet_prefix_v6: 64

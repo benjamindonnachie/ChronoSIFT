@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chronosift"
+version = "2.31.0"
+description = "Work-in-progress behavioural scoring component for Plaso forensic research pipelines"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "CC-BY-NC-SA-4.0"}
+authors = [
+  {name = "Benjamin Donnachie", email = "benjamin.donnachie@open.ac.uk"},
+]
+keywords = ["digital forensics", "incident response", "Plaso", "MITRE ATT&CK"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "duckdb>=1.1",
+  "geoip2>=4.8",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyarrow>=15",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+telemetry = ["psutil>=5.9"]
+dev = ["Cython>=3.0"]
+
+[tool.setuptools]
+py-modules = [
+  "chronoSIFT_v2_31",
+  "jsonl_to_parquet_cli_logging",
+  "run_chronosift_sidecar_cli",
+  "summarize_chronosift_telemetry",
+]

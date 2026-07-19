@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use ChronoSIFT in research, please cite this software and the relevant synthetic dataset(s)."
+title: "ChronoSIFT: behavioural scoring for dead-box forensic timelines"
+type: software
+authors:
+  - family-names: Donnachie
+    given-names: Benjamin
+version: 2.31.0
+date-released: 2026-07-19
+license: CC-BY-NC-SA-4.0
+keywords:
+  - digital forensics
+  - incident response
+  - Plaso
+  - log2timeline
+  - MITRE ATT&CK
+  - behavioural scoring
+references:
+  - type: dataset
+    title: "Synthetic forensic dataset collection 26038642"
+    doi: 10.21954/ou.rd.26038642
+  - type: dataset
+    title: "Synthetic forensic dataset collection 26038669"
+    doi: 10.21954/ou.rd.26038669

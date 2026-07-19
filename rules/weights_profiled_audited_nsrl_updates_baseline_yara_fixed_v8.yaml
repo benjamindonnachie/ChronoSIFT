@@ -1,0 +1,203 @@
+max_event_score: 50
+weights:
+
+  auth_fail_generic: 2
+  auth_success_generic: 0
+  auth_success: 0
+  auth_failure: 0
+  auth_remote_success: 0
+  auth_remote_failure: 0
+  auth_local_success: 0
+  auth_local_failure: 0
+  auth_remote_interactive_success: 0
+  auth_remote_shell_success: 0
+  auth_invalid_user: 2
+  auth_newcredentials_logon: 0
+  auth_service_logon: 0
+  auth_ntlm_remote: 0
+  lateral_movement_indicator: 7
+  suspicious_execution: 0
+  # Execution taxonomy policy in v2.30:
+  # - source signals keep their existing non-zero weights for provenance-driven scoring
+  # - canonical execution_* signals are emitted additively for taxonomy stability
+  #   and future temporal targeting, but stay zero-weighted to avoid double-counting
+  ssh_fail: 2
+  ssh_success: 0
+  rdp_fail: 3
+  rdp_success: 0
+  rdp_pre_auth_success: 0
+  rdp_reconnect: 0
+  rdp_disconnect: 0
+  fail_then_success_user: 8
+  fail_then_success_ip: 6
+  local_fail_then_success_user: 4
+  auth_pivot_accounts_from_same_src: 7
+  auth_pivot_destinations_for_same_user: 6
+
+  privileged_login: 6
+
+  offensive_user_agent: 4
+  web_exploitation_hint: 6
+
+  persistence_service: 8
+  persistence_scheduled_task: 8
+  persistence_runkey: 7
+  account_or_group_change: 9
+  # Persistence taxonomy policy in v2.30 mirrors execution taxonomy:
+  # - source persistence signals remain the scored provenance layer
+  # - canonical persistence_* signals are emitted additively for stable
+  #   taxonomy and future temporal/contextual use, but stay zero-weighted
+  #   to avoid accidental double-counting
+  persistence_mechanism: 0
+  persistence_scheduled: 0
+  persistence_registry: 0
+  persistence_service_install: 0
+  identity_persistence_change: 0
+
+  lolbin_windows: 4
+  lolbin_linux: 4
+  lolbin_suspicious_args: 8
+  execution_lolbin: 0
+  execution_lolbin_suspicious_args: 0
+  execution_interpreter: 0
+  execution_scheduled: 0
+  execution_privileged_scheduled: 0
+  # Execution-context signals are canonical, scored, and intentionally overlap
+  # with some provenance signals. They capture path/context semantics that the
+  # source LOLBin/archive/transfer signals do not express on their own.
+  exec_from_tmp: 4
+  exec_from_user_writable: 4
+  exec_suspicious_path: 4
+  exec_system_binary_in_user_path: 8
+  exec_compiler_activity: 5
+  exec_shell_spawn: 3
+  exec_network_tool: 4
+  exec_archive_tool: 3
+  exec_privileged_context: 5
+  exec_new_suid_binary: 9
+  exec_privilege_escalation_sequence: 10
+  exec_staging_sequence: 7
+
+  large_archive_created: 5
+  archive_created: 3
+  data_transfer_tool_exec: 6
+  large_http_transfer: 5
+  file_created: 0
+  file_modified: 0
+  file_deleted: 0
+  short_lived_file: 8
+  web_executable_file_created: 9
+  mass_file_modification: 10
+  ransomware_extension_burst: 6
+  sensitive_file_access: 6
+  database_dump_candidate: 7
+  defacement_candidate: 8
+  archive_after_sensitive_access: 8
+  account_created: 4
+  privileged_account_created: 8
+  cron_persistence: 7
+  firewall_modified: 7
+  defender_disabled: 10
+  group_policy_modified: 8
+  service_configuration_changed: 7
+
+  sensitive_data_staged: 10
+  staging_then_transfer: 12
+  cross_border_transfer: 10
+  # Transfer/exfiltration taxonomy policy in v2.30:
+  # - source and composite transfer signals remain the scored provenance layer
+  # - canonical transfer_* signals are emitted additively for stable taxonomy
+  #   and future temporal/contextual use, but stay zero-weighted to avoid
+  #   accidental double-counting
+  staging_archive: 0
+  transfer_execution: 0
+  transfer_large_http: 0
+  transfer_exfiltration_pattern: 0
+  transfer_cross_border: 0
+  transfer_sensitive_staging: 0
+
+  boundary_crossing: 6
+  new_country: 6
+  new_asn: 5
+  new_city: 3    # City-level geo continuity — low weight, high noise potential
+
+  hour_rarity: 0
+  quiet_time_event: 0
+
+  impossible_travel: 10
+
+  referenced_file_yara_hit: 7
+  referenced_file_av_hit: 9
+  referenced_file_luhn_hit: 3
+
+  yara_hit_strength: 8
+  av_hit: 8
+  luhn_hit: 0
+
+  user_changed_private_ip: 2
+  user_crossed_private_subnet: 4
+  user_private_to_public_ip: 3
+  user_public_to_private_ip: 3
+
+  scheduled_exec: 3
+  interpreter_exec_linux: 3
+  privileged_scheduled_exec: 7
+  repeated_scheduled_exec: 7
+
+  prefetch_execution: 2
+  amcache_execution: 2
+  shimcache_execution: 1
+  usb_device_connected: 3
+  browser_download: 1
+  systemd_service_persistence: 6
+  authorized_keys_persistence: 6
+  authorized_keys_root_persistence: 8
+  webshell_artifact: 6
+  webshell_activity: 9
+  masquerading: 4
+  inhibit_system_recovery: 9
+  ingress_tool_transfer: 5
+  user_execution_after_download: 5
+  smb_admin_share: 3
+  indicator_removal_on_host: 5
+  ransomware_impact: 9
+  exploit_public_facing_app: 3
+  external_remote_service: 1
+  credential_dumping: 3
+  password_store_access: 2
+  file_and_directory_discovery: 0
+  remote_system_discovery: 0
+  system_owner_user_discovery: 0
+  automated_collection: 2
+  application_layer_protocol: 0
+  automated_exfiltration: 3
+  account_access_removal: 2
+  alternate_auth_material: 1
+  credential_dump_collection: 4
+  password_store_exfil_chain: 4
+  web_upload_execution_chain: 5
+  winlogon_helper_persistence: 9
+  com_hijack_persistence: 7
+  service_stop: 3
+  timestomping: 10
+
+  # YARA Forge category-specific signals.  When a YARA Forge metadata index
+  # is loaded, the engine classifies each YARA match by forensic category
+  # and emits category-specific signals alongside the existing yara_hit_strength.
+  yara_offensive_tool: 10   # Mimikatz, Cobalt Strike, Rubeus, hacktools — confirms compromise
+  yara_ransomware: 8        # Ransomware family binary — confirms impact context
+  yara_webshell: 9           # Webshell detection — directly actionable
+  yara_apt: 9                # APT-attributed malware — attribution-grade signal
+  yara_exploit: 7            # Exploit/shellcode — confirms initial access or priv-esc
+  yara_malware: 7            # Generic malware (trojan, backdoor, infostealer)
+  yara_certificate_blocklist: 0  # Informational only — revoked cert, not inherently malicious
+
+  # ClamAV category-specific signals.  When av_signature is present, the engine
+  # parses the structured ClamAV name into forensic categories and emits
+  # category-specific signals alongside the existing av_hit.
+  av_offensive_tool: 10   # Mimikatz, Cobalt Strike, hacktools — confirms compromise
+  av_ransomware: 9        # Ransomware family — confirms impact context
+  av_exploit: 8            # Exploit/shellcode payload
+  av_malware: 8            # Generic malware (trojan, backdoor, infostealer, RAT)
+  av_pua: 2                # PUA/adware/coinminer — low forensic relevance
+  av_webshell: 9            # Webshell detection — directly actionable
