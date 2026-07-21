@@ -181,7 +181,9 @@ def normalise_chunk(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["datetime"])
     df = df.set_index("datetime").sort_index()
 
-    df["year"] = pd.Series(df.index.year, index=df.index, dtype="Int16")
+    # datetime64[us] can represent forensic timestamps far beyond year 32767.
+    # Preserve those rows and use Int32 for the corresponding partition value.
+    df["year"] = pd.Series(df.index.year, index=df.index, dtype="Int32")
     df["month"] = pd.Series(df.index.month, index=df.index, dtype="Int8")
 
     for col in DROP_COLS_IF_PRESENT:

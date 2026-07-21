@@ -2,6 +2,20 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## Wide Forensic Year Partitioning — July 2026
+
+Preserved parseable forensic timestamps whose derived years exceed the signed
+16-bit range during JSONL.XZ-to-Parquet conversion.
+
+- Widened derived `year` partition columns from nullable `Int16` to `Int32` in
+  both `jsonl_to_parquet_cli_logging.normalise_chunk()` and
+  `chronoSIFT_v2_31.normalise_for_parquet()`.
+- Retained implausible-but-parseable timestamps as evidence rather than
+  clipping or silently discarding them. The triggering ENISA LOT3 record was a
+  `utmp` false positive over an Office font with a derived year of `44567`.
+- Added regression coverage for the triggering microsecond timestamp and its
+  expected partition year.
+
 ## Nested Explain Write Hardening — March 2026
 
 Fixed a targeted nested Parquet write failure that showed up in a single `20240212-decrypted-Windows_Server_2022.E01` partition under Arrow nested encoding. The failure was caused by mixed `str`/numeric `file_size` values inside `chronosift_explain` payloads, which forced per-subchunk JSON fallback for `chronosift_signals` / `chronosift_explain`.

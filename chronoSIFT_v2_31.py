@@ -11559,7 +11559,9 @@ def normalise_for_parquet(df: pd.DataFrame, verbose: bool = True) -> Tuple[pd.Da
     df = _stable_sort_datetime_frame(df)
 
     # Partition columns must be regular columns, derived from the index
-    df["year"] = pd.Series(df.index.year, index=df.index, dtype="Int16")
+    # datetime64[us] can represent forensic timestamps far beyond year 32767.
+    # Preserve those rows and use Int32 for the corresponding partition value.
+    df["year"] = pd.Series(df.index.year, index=df.index, dtype="Int32")
     df["month"] = pd.Series(df.index.month, index=df.index, dtype="Int8")
 
     # PID stays as existing column, coerced to string
@@ -11851,4 +11853,3 @@ def write_time_partitioned_parquet(
         
     logger.info("Write stage: complete for %s", outdir)
     return report
-

@@ -579,6 +579,20 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertEqual(json.loads(normalised.iloc[0]["nested_obj"]), {"alpha": 1})
         self.assertTrue(pd.isna(normalised.iloc[1]["nested_obj"]))
 
+    def test_normalise_for_parquet_preserves_timestamp_with_wide_year(self):
+        source = pd.DataFrame({
+            "timestamp": [1718562120000000, 1344260469241068412],
+            "parser": ["filestat", "utmp"],
+        })
+
+        normalised, _ = MODULE.normalise_for_parquet(
+            source, verbose=False
+        )
+
+        self.assertEqual(len(normalised), 2)
+        self.assertEqual(str(normalised["year"].dtype), "Int32")
+        self.assertEqual(normalised["year"].tolist(), [2024, 44567])
+
     def test_hash_enrichment_csv_aligns_once_and_preserves_unmatched_existing_values(self):
         sha_a = "A" * 64
         sha_b = "B" * 64
