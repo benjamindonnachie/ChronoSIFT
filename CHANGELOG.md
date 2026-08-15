@@ -2,6 +2,17 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## 2.31.1 — August 2026
+
+Released as `2.31.1` because web request evidence is now interpreted
+differently: sidecars written by `2.31.0` and by this version can disagree on
+which rows carry web attack indicators and the derived ATT&CK labels, so runs
+should not be compared across the two versions without re-processing. The
+sidecar column set and the `chronosift_row_id` join key are unchanged.
+
+Covers the three sections below: web attack indicator precision, web-server
+file-identity propagation, and the whole-partition contextual optimisation.
+
 ## Web Attack Indicator Precision — August 2026
 
 Corrected four web attack indicators that fired on ordinary request syntax.
