@@ -33,6 +33,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--av-csv-path", default=None, help="Optional hash-keyed ClamAV results CSV")
     p.add_argument("--luhn-csv-path", default=None, help="Optional hash-keyed Luhn results CSV")
     p.add_argument("--nsrl-parquet-path", default=None, help="Optional locally prepared NSRL Parquet lookup")
+    p.add_argument(
+        "--retain-zero-weight-lifecycle-signals",
+        action="store_true",
+        help="Retain generic file_created/file_modified/file_deleted payloads even when their configured weight is zero",
+    )
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     return p
 
@@ -193,6 +198,7 @@ def main() -> int:
                 profile_manifest_path=profile_manifest_path,
                 file_hit_manifest_path=file_hit_manifest_path,
                 telemetry_jsonl_path=telemetry_jsonl,
+                retain_zero_weight_lifecycle_signals=args.retain_zero_weight_lifecycle_signals,
             )
     else:
         reports = engine.process_parquet_dataset_partitioned(
@@ -210,6 +216,7 @@ def main() -> int:
             profile_manifest_path=profile_manifest_path,
             file_hit_manifest_path=file_hit_manifest_path,
             telemetry_jsonl_path=telemetry_jsonl,
+            retain_zero_weight_lifecycle_signals=args.retain_zero_weight_lifecycle_signals,
         )
 
     reports_path = Path(reports_json)

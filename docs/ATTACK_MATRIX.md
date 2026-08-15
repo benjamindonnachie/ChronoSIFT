@@ -25,7 +25,7 @@ The mapping is based on:
 | Tactic | ATT&CK ID | Technique | Dead-box identifiable? | Detectable from Plaso output? | ChronoSift v2.31 status | Notes |
 |---|---|---|---|---|---|---|
 | Initial Access | T1078 | Valid Accounts | Yes | Yes | Covered | Successful SSH/RDP/auth patterns plus contextual anomaly logic |
-| Initial Access | T1190 | Exploit Public-Facing Application | Partial | Partial | Covered | Conservative web request, upload, traversal, and command-exec correlation |
+| Initial Access | T1190 | Exploit Public-Facing Application | Partial | Partial | Covered | Decoded SQLi, traversal/LFI/RFI, command-injection, and web-shell command syntax; attempts and probable outcomes remain distinct |
 | Initial Access | T1133 | External Remote Services | Partial | Partial | Covered | Remote-service success semantics are modeled, but confidence remains low |
 | Execution | T1059 | Command and Scripting Interpreter | Yes | Yes | Covered | Linux interpreters, shell history, and command-line artefacts |
 | Execution | T1218 | System Binary Proxy Execution | Yes | Yes | Covered | Windows LOLBins and suspicious argument patterns |
@@ -40,7 +40,7 @@ The mapping is based on:
 | Persistence | T1546.015 | Component Object Model Hijacking | Yes | Yes | Covered | CLSID InprocServer32 and TreatAs registry modification detection |
 | Persistence | T1543.002 | Systemd Service | Yes | Yes | Covered | Filesystem and command/log semantics for unit management are modeled |
 | Persistence | T1098.004 | SSH Authorized Keys | Yes | Yes | Covered | File create/modify/delete evidence is modeled directly |
-| Persistence | T1505.003 | Web Shell | Partial | Partial | Covered | Web-root script artefacts, suspicious requests, temporal webshell activity chains, and YARA `webshell` category hits (551 rules) |
+| Persistence | T1505.003 | Web Shell | Partial | Partial | Covered | Requires web-accessible file identity classified as `webshell` by AV or strong YARA evidence, or an existing artefact/activity chain; a generic malicious upload is not sufficient |
 | Privilege Escalation | T1548.001 | Setuid and Setgid | Yes | Yes | Covered | SUID-related command and path heuristics |
 | Privilege Escalation | T1543.003 | Windows Service | Yes | Yes | Covered | Service installation/change may also support escalation narratives |
 | Privilege Escalation | T1055 | Process Injection | No | No | Not realistic | Normally requires volatile memory or detailed endpoint telemetry |
@@ -64,11 +64,12 @@ The mapping is based on:
 | Collection | T1074 | Data Staged | Yes | Yes | Covered | Archive and staging temporal composites are present |
 | Collection | T1560.001 | Archive via Utility | Yes | Yes | Covered | Archive creation and archive-tool execution context |
 | Collection | T1119 | Automated Collection | Partial | Partial | Covered | Scheduled/repeated collection with archive context is modeled conservatively |
+| Collection | T1213.006 | Data from Information Repositories: Databases | Partial | Partial | Covered | Requires probable successful SQLi plus database-enumeration or file-access syntax; an SQLi attempt alone is not mapped |
 | Command and Control | T1071 | Application Layer Protocol | Partial | Partial | Covered | URLs, HTTP artefacts, and transfer tooling are represented where artefacts preserve them |
-| Command and Control | T1105 | Ingress Tool Transfer | Partial | Partial | Covered | Browser downloads, transfer tooling, and later execution correlations are explicit |
+| Command and Control | T1105 | Ingress Tool Transfer | Partial | Partial | Covered | Browser downloads, transfer tooling, and later execution correlations are explicit; a malicious web upload maps here only when the server records a 2xx acceptance |
 | Command and Control | T1573 | Encrypted Channel | No | No | Not realistic | Dead-box Plaso lacks session fidelity for confident encrypted-channel detection |
 | Exfiltration | T1048 | Exfiltration Over Alternative Protocol | Partial | Partial | Covered | Transfer tooling is covered, but destination semantics remain weaker |
-| Exfiltration | T1567 | Exfiltration Over Web Service | Partial | Partial | Covered | Large HTTP transfer, staging, and boundary-crossing logic help where web fields exist |
+| Exfiltration | T1567 | Exfiltration Over Web Service | Partial | Partial | Covered | Large HTTP transfer plus document-root file identity can mark successful retrieval of Luhn-positive files where method/status fields exist |
 | Exfiltration | T1020 | Automated Exfiltration | Partial | Partial | Covered | Recurring transfer and staging behaviour is modeled conservatively |
 | Impact | T1491.001 | Internal Defacement | Yes | Yes | Covered | Web-root file modification and creation heuristics |
 | Impact | T1486 | Data Encrypted for Impact | Partial | Partial | Covered | Ransomware-style mass-modification composite plus YARA `ransomware` and ClamAV `av_ransomware` category hits feed ransomware impact detection |
@@ -76,11 +77,16 @@ The mapping is based on:
 | Impact | T1490 | Inhibit System Recovery | Yes | Yes | Covered | Commands, logs, and configuration artefacts are modeled directly |
 | Impact | T1531 | Account Access Removal | Yes | Yes | Covered | Account disable/delete and group-removal events are modeled |
 
+Web exploitation coverage also distinguishes decoded SQLi attempts from
+probable successful SQLi. The latter requires a 2xx response-size anomaly
+relative to successful non-SQLi traffic for the same endpoint; it is an
+analyst-prioritisation inference, not proof that returned content was valid.
+
 ## Remaining Depth Targets
 
 These are no longer missing breadth items; they are the highest-value areas for improving precision and parser depth:
 
-- parser-specific IIS, W3C, Apache, and nginx web request parsing
+- deeper parser-specific IIS, W3C, Apache, and nginx field recovery beyond the shared request-line/URL canonicalisation layer
 - richer credential-theft to archive/transfer correlation for `T1003` and `T1555`
 - broader Windows EVTX coverage for share access, alternate auth, and account removal/manipulation edge cases
 - stronger ransomware/impact modeling beyond the current conservative composite

@@ -647,13 +647,16 @@ rules:
     - field: message
   confidence: medium
 - id: UA_OFFENSIVE
-  description: User-Agent suggests scanning/probing tooling
+  description: User-Agent in a web-server log suggests scanning/probing tooling
   priority: 70
   scope:
     any:
+    - field: parser
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     - field: sourcetype
-      op: contains_ci
-      value: apache
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     all: []
   when:
     any:
@@ -675,9 +678,12 @@ rules:
   priority: 75
   scope:
     any:
+    - field: parser
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     - field: sourcetype
-      op: contains_ci
-      value: apache
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     all: []
   when:
     any:
@@ -1184,13 +1190,16 @@ rules:
     - field: parser
   confidence: low
 - id: LARGE_HTTP_TRANSFER
-  description: Large HTTP transfer observed in Apache logs (bytes threshold, success only)
+  description: Large HTTP transfer observed in web-server logs (bytes threshold, success only)
   priority: 65
   scope:
     any:
+    - field: parser
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     - field: sourcetype
-      op: contains_ci
-      value: apache
+      op: regex
+      value: (?i)(apache|nginx|iis|w3c|msiis)
     all: []
   when:
     any: []
@@ -1674,13 +1683,21 @@ engine_notes:
   message_context_hardening: Rules keyed on privileged-account names or transfer-tool names are restricted to structured actor
     or execution-history contexts where possible, to avoid false positives from file paths or file content.
   referenced_file_hit_propagation: The engine emits referenced_file_yara_hit, referenced_file_av_hit, and referenced_file_luhn_hit
-    when a row's message references an exact file path that has direct YARA, AV, or Luhn hits elsewhere in the timeline.
+    when a row references an exact file path that has direct YARA, AV, or Luhn hits elsewhere in the timeline. For web-server
+    logs, configurable document roots add canonical URL-path aliases; successful Luhn-positive GET downloads and access or upload
+    of AV/strong-YARA files receive direction-aware signals without a maximum time window. Manifest schema v4 retains AV
+    signature/family/category and strong YARA rule/category/score/quality metadata for evidence-qualified downstream mapping,
+    and adds SHA-256 hit/identity indexes for hash-based upload correlation. Older manifests are rebuilt automatically.
   yara_strength: 'Binary YARA_HIT is removed. The engine derives yara_hit_strength from yara_match_count using bounded linear
     scaling: min(1, yara_match_count / 3). One, two, and three-or-more matches therefore contribute one-third, two-thirds,
     and full YARA support respectively.'
   referenced_file_path_normalisation: Referenced-file correlation normalises extracted paths, trims shell punctuation, and
     recognises relative execution forms such as ./tool and ../tool. Exact-path matching is used by default, with basename
     fallback only for explicitly relative paths.
+  web_sqli_inference: SQL injection syntax is evaluated after bounded URL decoding. A probable-success signal additionally
+    requires a 2xx response whose byte count is anomalously large against successful non-SQLi responses for the same host,
+    HTTP method, and canonical endpoint. Large responses without SQLi syntax do not imply successful exploitation; redirects and error responses remain
+    attempts only.
   private_ip_continuity: When geolocation is unavailable because activity originates from private address space, the engine
     falls back to actor-IP continuity analysis and emits user_changed_private_ip, user_crossed_private_subnet, user_private_to_public_ip,
     and user_public_to_private_ip.
@@ -2139,6 +2156,11 @@ engine_config:
     automated_exfiltration_window: 30m
     automated_exfiltration_threshold: 2
     credential_collection_window: 1h
+    web_sqli_baseline_min_samples: 2
+    web_sqli_response_ratio: 1.5
+    web_sqli_response_delta_bytes: 2048
+    web_sqli_response_min_bytes: 4096
+    web_sqli_absolute_large_response_bytes: 65536
   profiling:
     exclude_nsrl_application_type_contains:
     - Operating System
@@ -2150,6 +2172,24 @@ engine_config:
     - SoftwareDistribution
   referenced_file_hit_propagation:
     propagated_multiplier: 0.5
+    web_document_roots:
+    - /var/www/html
+    - /srv/www
+    - /usr/share/nginx/html
+    - /htdocs
+    - /httpdocs
+    - inetpub/wwwroot
+    - xampp/htdocs
+    web_yara_min_score: 75
+    web_yara_min_quality: 70
+    web_yara_categories:
+    - offensive_tool
+    - ransomware
+    - webshell
+    - apt
+    - exploit
+    - malware
+    web_yara_allow_unnamed: false
   trust_dampening:
     enabled: false
     multiplier: 0.5

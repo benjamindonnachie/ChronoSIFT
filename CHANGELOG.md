@@ -2,6 +2,136 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## Web Attack Indicator Precision — August 2026
+
+Corrected four web attack indicators that fired on ordinary request syntax.
+ChronoSIFT prioritises artefacts for later pipeline stages rather than acting
+as a standalone detector, so an indicator that fires on routine traffic
+displaces genuine evidence in the ranking.
+
+- `command_injection` now requires a command token in *command position* —
+  directly after a shell separator, optionally via a program path. The previous
+  form treated the `&` query delimiter as a shell separator and matched `id`,
+  `cat`, `type`, and `sh` anywhere in the request; because those are among the
+  most common query-parameter names, a stock CMS URL such as
+  `/index.php?option=com_content&view=article&id=5` was flagged, contributing
+  `exploit_public_facing_app` and a T1190 label. On the Case1 Apache logs this
+  affected 2,144 rows, including all 29 unambiguously benign
+  `?id=<n>&Submit=Submit` lookups; after the change none are flagged.
+- `boolean_tautology` now requires a quote/paren breakout artefact, or a
+  numeric operand compared against a number, subquery, or function call.
+  `+`-decoded prose such as `?q=cats+and+dogs=1` previously matched the generic
+  `and X=Y` shape and emitted `web_sqli_attempt`.
+- `path_traversal` now requires an encoded *double* dot in the raw request.
+  Bounded decoding already covers singly and doubly encoded traversal, so the
+  previous bare `%2e` test only added false positives on ordinary escaped
+  filename dots such as `/img/logo%2Epng`.
+- `remote_file_inclusion` now requires an inclusion-shaped parameter name or a
+  remote target that is itself a script, so redirect and OAuth callback
+  parameters carrying absolute URLs no longer match.
+- Added `sqli:inline_subquery` for parameter values that open with a subquery,
+  such as `?id=(select concat(...))`. These were previously caught only
+  incidentally, because `concat` contains the `cat` command token.
+- Restricted the referenced-file manifest's SHA-256 index to hit-carrying rows
+  in the chunked build path. It previously accumulated every hashed row into a
+  dataset-wide `sha256 -> filenames` dict retained across all partitions, with
+  a regex per row, even though `_finalise_referenced_file_hit_manifest`
+  discards non-hit hashes. The DuckDB fast path already applied this
+  restriction through its `WHERE` clause.
+- Net effect on the Case1 Apache corpus: flagged rows fall from 2,171 to 2,115
+  of 6,243. Every dropped row was flagged solely by the previous
+  `command_injection` rule and is either a benign lookup or a quote-breakout
+  fuzz probe carrying no SQL syntax; `union_select`, `time_delay`,
+  `ordered_probe`, `schema_enumeration`, `stacked_query`, `file_access`,
+  `database_function`, and `path_traversal` counts are unchanged.
+- Added regression coverage for the benign and exploitation cases in both
+  directions, and for the manifest hash-index restriction.
+
+## Whole-Partition Contextual Optimisation — August 2026
+
+Reduced the time and memory cost of non-temporal contextual processing without
+changing its whole-partition coverage.
+
+- Reused normalised path, parser, message, hostname, and timestamp-kind arrays
+  through an ephemeral per-partition cache. The cache is discarded after the
+  contextual stage and does not copy or attach state to the source DataFrame.
+- Added conservative vector prefilters to direct dead-box and MFT timestomping
+  detection so Python-level interpretation is limited to rows that can match a
+  detector or already carry relevant sparse state.
+- Hoisted lifecycle taxonomy sets and vectorised path classifications that were
+  previously rebuilt or interpreted per row.
+- Stopped materialising generic `file_created`, `file_modified`, and
+  `file_deleted` signal/explanation payloads in partition mode when the
+  individual configured weight is zero. Scored, specialised, and downstream
+  lifecycle evidence remains intact. Direct contextual API calls retain the
+  legacy payloads by default, and the partition CLI exposes
+  `--retain-zero-weight-lifecycle-signals` for compatibility exports.
+- On a synthetic 100,000-row ordinary-filestat partition, suppressing those
+  score-neutral payloads reduced traced Python peak allocation from 164.4 MB to
+  75.8 MB. Shared normalisation reduced the four affected core passes by 11%,
+  and the complete optimised non-temporal stage ran in 3.29 seconds. These
+  figures describe the synthetic benchmark and are not a projection for a full
+  forensic partition.
+- Added regression coverage for specialised-signal preservation, optional
+  legacy retention, and working-array identity reuse without DataFrame copies.
+
+## Web-Server File-Identity Propagation — August 2026
+
+Extended dataset-wide referenced-file propagation into Apache, nginx, IIS,
+MS-IIS, and W3C request records without imposing a temporal proximity window.
+
+- Canonicalised request paths by removing query strings/fragments, decoding
+  URL escapes, normalising separators, and resolving dot segments.
+- Added configurable document-root aliases that correlate filesystem paths
+  such as `/var/www/html/exports/data.sql` with later `/exports/data.sql`
+  requests.
+- Added direction-aware `web_file_access`, `web_malicious_file_access`,
+  `web_sensitive_file_download`, and `web_malicious_file_upload` signals.
+  Successful download inference requires a GET response in the 2xx
+  range; the base access signal remains available when status is absent or an
+  error is recorded.
+- Limited web YARA propagation by configurable score, quality, and category
+  thresholds; certificate-only and lower-quality matches remain excluded.
+- Versioned referenced-file manifests and automatically rebuild older cached
+  manifests that lack web-path indexes.
+- Added referenced-file manifest schema v3, preserving propagated AV
+  signatures/families/categories and strong YARA rule/category/score/quality
+  metadata for later web accesses and uploads.
+- Advanced the referenced-file manifest to schema v4 with SHA-256 hit and
+  identity indexes for hash-first upload correlation. Older v3 manifests are
+  rebuilt automatically.
+- Added bounded structured multipart/request-body metadata extraction for
+  multiple quoted or RFC 5987 filenames, part MIME types, content length and
+  SHA-256 values. Stable scalar sidecar columns record these values and classify
+  upload outcomes as accepted, redirected, rejected or unknown.
+- Added typed, sidecar-stable `chronosift_web_*` feature columns and qualified
+  outcomes. SQLi response baselines are now separated by host, HTTP method and
+  canonical endpoint.
+- Added score-neutral evidence-qualified ATT&CK mappings for T1190,
+  T1505.003, T1105 and T1213.006. Successful public sensitive-file responses
+  remain an internal transfer signal rather than being over-mapped to an
+  exfiltration technique without channel evidence. Web-upload T1105 now
+  requires an accepted 2xx response; rejected and status-unknown malicious
+  upload attempts retain their source signal without asserting transfer.
+- Corrected web atomic-rule scopes to recognise Plaso `parser` values rather
+  than relying only on a usually absent `sourcetype` field.
+- Added bounded decoding and high-confidence SQLi syntax detection. Probable
+  success requires SQLi syntax, a 2xx response, and a response-size anomaly
+  against successful non-SQLi responses for the same canonical endpoint;
+  redirects, errors, and large unrelated responses are not promoted.
+- Fixed candidate-window expansion across pandas datetime resolutions by using
+  `DatetimeIndex.searchsorted()` with timestamps and timedeltas directly rather
+  than combining resolution-dependent `asi8` values with nanoseconds.
+- Declared `pytz` as a runtime dependency because DuckDB requires it when
+  materialising timezone-aware Parquet values into Python.
+- Made sidecar nested payload schemas deterministic across partitions:
+  `chronosift_signals` is now Arrow `MAP<string,double>` and
+  `chronosift_explain` is Arrow `LIST<string>` containing canonical JSON
+  explanation entries. Heterogeneous web evidence therefore remains nested and
+  queryable without switching an entire partition to JSON-text columns.
+- Restored those stable on-disk payloads to the existing Python dict/list API
+  in ChronoSIFT's DuckDB loaders.
+
 ## Wide Forensic Year Partitioning — July 2026
 
 Preserved parseable forensic timestamps whose derived years exceed the signed

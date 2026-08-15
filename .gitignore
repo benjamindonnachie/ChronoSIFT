@@ -1,0 +1,36 @@
+# Python bytecode and build artefacts
+__pycache__/
+*.py[cod]
+*.so
+*.c
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+
+# Cython/profiling output
+*.prof
+*.lprof
+
+# Run outputs: sidecars, manifests, telemetry and logs are produced per case
+# and are never part of the released engine.
+*.parquet
+*.jsonl
+*.jsonl.xz
+*.log
+*.log.gz
+*.reports.json
+*.telemetry.jsonl
+*.profile_manifest.json
+*.file_hit_manifest.json
+
+# Local enrichment bundles (YARA Forge, NSRL, GeoLite2, AV/Luhn results)
+rules/GeoLite2-*/
+rules/*.yar
+rules/*.csv
+
+# OS metadata
+.DS_Store

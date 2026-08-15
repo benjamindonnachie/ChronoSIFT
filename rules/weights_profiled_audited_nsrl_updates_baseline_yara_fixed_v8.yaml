@@ -129,6 +129,20 @@ weights:
   referenced_file_yara_hit: 7
   referenced_file_av_hit: 9
   referenced_file_luhn_hit: 3
+  web_file_access: 0
+  web_malicious_file_access: 3
+  web_sensitive_file_download: 4
+  web_malicious_file_upload: 4
+  web_confirmed_webshell_access: 0
+  web_external_sensitive_transfer: 0
+  web_sqli_attempt: 4
+  web_sqli_response_anomaly: 4
+  web_sqli_probable_success: 8
+  # ATT&CK mappings are labels, not additional evidence; keep them score-neutral.
+  mitre_t1190: 0
+  mitre_t1505_003: 0
+  mitre_t1105: 0
+  mitre_t1213_006: 0
 
   yara_hit_strength: 8
   av_hit: 8
