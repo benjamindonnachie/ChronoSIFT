@@ -2,6 +2,38 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## 2.31.2 — August 2026
+
+Adds injection-probe evidence and removes the whole-partition cost of web
+feature materialisation.
+
+- Added the `injection_probe` indicator and the `web_injection_probe` signal
+  for requests that test whether a parameter can be broken out of quoting
+  without yet forming valid injection syntax — for example
+  `?id=2'gejf<'">skpv`. This is recorded at `low` confidence with weight `1`,
+  well below `web_sqli_attempt` (4), and is deliberately excluded from
+  `exploit_public_facing_app` so probing cannot raise the scored exploitation
+  signal. It is emitted only when no stronger web evidence exists on the row,
+  so a full payload is never counted twice. Probes map to T1190 as an attempt
+  through the usual zero-weight label path.
+- On the Case1 Apache corpus this recovers 26 rows that carried no indicator
+  at all after the `2.31.1` precision fixes, while all 29 benign
+  `?id=<n>&Submit=Submit` lookups remain unflagged.
+- Added a vectorised prefilter to `_materialise_normalised_web_features()`.
+  The candidate test — non-empty `http_request`/`url`, or a web parser token —
+  is the same condition the row loop previously applied one row at a time. On
+  a partition with no web records the loop is skipped entirely and the 25
+  `chronosift_web_*` columns are created by broadcasting the NA scalar rather
+  than validating per-row object arrays.
+- On 200,000 non-web rows this reduced the pass from 1,339 ms to 185 ms
+  (7.2x) and traced peak allocation from 101.4 MB to 76.1 MB. The column set
+  and dtypes are identical between web and non-web partitions, so the sidecar
+  schema is unchanged.
+- Corrects a measurement error in the `2.31.1` notes below: the figure given
+  there as "3.45 s / 101 MB" was recorded with `tracemalloc` active during the
+  timed call, which inflates allocation-heavy code. The true `2.31.1` cost of
+  that pass was 1,339 ms.
+
 ## 2.31.1 — August 2026
 
 Released as `2.31.1` because web request evidence is now interpreted

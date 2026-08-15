@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chronosift"
-version = "2.31.1"
+version = "2.31.2"
 description = "Work-in-progress behavioural scoring component for Plaso forensic research pipelines"
 readme = "README.md"
 requires-python = ">=3.11"

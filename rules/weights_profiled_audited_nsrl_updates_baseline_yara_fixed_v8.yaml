@@ -135,6 +135,9 @@ weights:
   web_malicious_file_upload: 4
   web_confirmed_webshell_access: 0
   web_external_sensitive_transfer: 0
+  # Probing is evidence of an attempt only; kept well below a real
+  # injection attempt so scanner noise cannot dominate a ranking.
+  web_injection_probe: 1
   web_sqli_attempt: 4
   web_sqli_response_anomaly: 4
   web_sqli_probable_success: 8

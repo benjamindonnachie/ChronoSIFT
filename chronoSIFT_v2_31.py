@@ -1002,6 +1002,33 @@ _WEB_RFI_REMOTE_SCRIPT_RE = re.compile(
     r"(?i)(?:^|[?&])[^=&]+\s*=\s*https?://[^\s&]+"
     r"\.(?:php|phtml|php[345]|asp|aspx|ashx|jsp|jspx|cgi|pl|py|rb|sh|txt)\b"
 )
+# Injection probing: a scanner testing whether a parameter can be broken out of
+# quoting, without yet forming valid SQL.  This is evidence of an attempt only,
+# never of success, and is scored accordingly.
+_WEB_PROBE_BREAKOUT_RE = re.compile(r"['\"`]\s*[<>\"'`]|[<>]\s*['\"`]")
+_WEB_PROBE_METACHAR_RE = re.compile(r"['\"`()<>]")
+_WEB_PROBE_QUOTE_RE = re.compile(r"['\"`]")
+
+
+def _http_injection_probe(decoded: str) -> bool:
+    """Detect quote/metacharacter breakout probing in a decoded request target."""
+    for parameter in re.split(r"[?&]", decoded):
+        value = parameter.split("=", 1)[1] if "=" in parameter else parameter
+        if not value:
+            continue
+        if _WEB_PROBE_BREAKOUT_RE.search(value):
+            return True
+        metacharacters = _WEB_PROBE_METACHAR_RE.findall(value)
+        # A dense mix of metacharacters counts only when a quote is among them.
+        # Balanced parentheses alone are ordinary in URLs such as
+        # /wiki/Foo_(bar) or /calc?expr=(1+2)*(3+4).
+        if (
+            len(metacharacters) >= 4
+            and len(set(metacharacters)) >= 2
+            and _WEB_PROBE_QUOTE_RE.search(value)
+        ):
+            return True
+    return False
 
 
 def _http_attack_indicators(value: Any) -> Tuple[str, ...]:
@@ -1037,6 +1064,8 @@ def _http_attack_indicators(value: Any) -> Tuple[str, ...]:
         indicators.append("remote_file_inclusion")
     if _WEB_COMMAND_INJECTION_RE.search(decoded):
         indicators.append("command_injection")
+    if _http_injection_probe(decoded):
+        indicators.append("injection_probe")
     if re.search(r"(?i)(?:^|[?&])(?:cmd|exec|command|shell)=", decoded):
         indicators.append("webshell_command_parameter")
     return tuple(dict.fromkeys(indicators))
@@ -2580,6 +2609,7 @@ def _collect_emitted_signals_from_rules(rules_cfg: dict) -> set[str]:
         "web_sqli_attempt",
         "web_sqli_response_anomaly",
         "web_sqli_probable_success",
+        "web_injection_probe",
         "mitre_t1190",
         "mitre_t1505_003",
         "mitre_t1105",
@@ -4324,41 +4354,75 @@ class ChronoSiftEngine:
         request_length_vals = _column_values_or_none(df, "http_request_content_length")
         web_log_parser_tokens = self._detection_terms("web_log_parser_tokens")
 
-        string_fields: Dict[str, List[Any]] = {
-            "chronosift_web_method": [pd.NA] * nrows,
-            "chronosift_web_request_target": [pd.NA] * nrows,
-            "chronosift_web_endpoint": [pd.NA] * nrows,
-            "chronosift_web_query": [pd.NA] * nrows,
-            "chronosift_web_host": [pd.NA] * nrows,
-            "chronosift_web_source_ip": [pd.NA] * nrows,
-            "chronosift_web_user_agent": [pd.NA] * nrows,
-            "chronosift_web_referer": [pd.NA] * nrows,
-            "chronosift_web_content_type": [pd.NA] * nrows,
-            "chronosift_web_upload_name": [pd.NA] * nrows,
-            "chronosift_web_upload_names": [pd.NA] * nrows,
-            "chronosift_web_upload_hashes": [pd.NA] * nrows,
-            "chronosift_web_upload_content_types": [pd.NA] * nrows,
-            "chronosift_web_upload_outcome": [pd.NA] * nrows,
-            "chronosift_web_attack_indicators": [pd.NA] * nrows,
-            "chronosift_web_outcome": [pd.NA] * nrows,
-            "chronosift_web_file_hit_types": [pd.NA] * nrows,
-            "chronosift_web_file_categories": [pd.NA] * nrows,
-            "chronosift_web_file_rules": [pd.NA] * nrows,
-            "chronosift_web_file_families": [pd.NA] * nrows,
-            "chronosift_attack_techniques": [pd.NA] * nrows,
+        # Vectorised prefilter. A forensic partition is overwhelmingly filestat
+        # and registry rows, so interpreting every row in Python to discover it
+        # is not a web event dominated this pass. The candidate test below is
+        # exactly the condition the row loop used to apply one row at a time.
+        request_text = _normalised_text_array(df, "http_request")
+        url_text = _normalised_text_array(df, "url")
+        parser_lower = _normalised_text_array(df, "parser", lower=True)
+        web_candidates = (request_text != "") | (url_text != "")
+        if web_log_parser_tokens:
+            web_candidates |= _text_array_contains_any(parser_lower, web_log_parser_tokens)
+        candidate_rows = np.flatnonzero(web_candidates)
+
+        # Columns are always created, even when no row qualifies, so the
+        # sidecar schema stays identical across partitions. Object arrays are
+        # allocated at C level rather than as Python lists of pd.NA.
+        string_field_names = (
+            "chronosift_web_method",
+            "chronosift_web_request_target",
+            "chronosift_web_endpoint",
+            "chronosift_web_query",
+            "chronosift_web_host",
+            "chronosift_web_source_ip",
+            "chronosift_web_user_agent",
+            "chronosift_web_referer",
+            "chronosift_web_content_type",
+            "chronosift_web_upload_name",
+            "chronosift_web_upload_names",
+            "chronosift_web_upload_hashes",
+            "chronosift_web_upload_content_types",
+            "chronosift_web_upload_outcome",
+            "chronosift_web_attack_indicators",
+            "chronosift_web_outcome",
+            "chronosift_web_file_hit_types",
+            "chronosift_web_file_categories",
+            "chronosift_web_file_rules",
+            "chronosift_web_file_families",
+            "chronosift_attack_techniques",
+        )
+        integer_field_names = (
+            "chronosift_web_status_code",
+            "chronosift_web_response_bytes",
+            "chronosift_web_upload_count",
+            "chronosift_web_request_body_bytes",
+        )
+
+        if candidate_rows.size == 0:
+            # Nothing to interpret. Broadcasting the NA scalar lets pandas build
+            # each column directly instead of validating a per-row object array,
+            # which is an order of magnitude cheaper on a partition that holds
+            # no web records at all — the common case in a forensic timeline.
+            for name in string_field_names:
+                df[name] = pd.Series(pd.NA, index=df.index, dtype="string")
+            for name in integer_field_names:
+                df[name] = pd.Series(pd.NA, index=df.index, dtype="Int64")
+            df["chronosift_web_is_event"] = pd.Series(False, index=df.index, dtype="boolean")
+            return
+
+        string_fields: Dict[str, np.ndarray] = {
+            name: np.full(nrows, None, dtype=object) for name in string_field_names
         }
-        status_codes: List[Any] = [pd.NA] * nrows
-        response_sizes: List[Any] = [pd.NA] * nrows
-        upload_counts: List[Any] = [pd.NA] * nrows
-        request_body_sizes: List[Any] = [pd.NA] * nrows
+        status_codes = np.full(nrows, None, dtype=object)
+        response_sizes = np.full(nrows, None, dtype=object)
+        upload_counts = np.full(nrows, None, dtype=object)
+        request_body_sizes = np.full(nrows, None, dtype=object)
         is_web_event = np.zeros(nrows, dtype=bool)
 
-        for row_i in range(nrows):
-            parser = _safe_str(parser_vals[row_i]).strip().lower()
-            request = _safe_str(request_vals[row_i]).strip()
-            url = _safe_str(url_vals[row_i]).strip()
-            if not (request or url or any(token in parser for token in web_log_parser_tokens)):
-                continue
+        for row_i in candidate_rows:
+            request = request_text[row_i]
+            url = url_text[row_i]
             semantics = _extract_http_request_semantics(message_vals[row_i], request, url)
             request_target = _safe_str(semantics.get("path")).strip()
             if not request_target:
@@ -6932,6 +6996,57 @@ class ChronoSiftEngine:
                         "source_ip": _safe_str(source_ip_vals[row_i]).strip(),
                     },
                 })
+
+            # An injection probe is evidence that someone tested the parameter,
+            # not that anything was exploited. It is deliberately excluded from
+            # exploit_indicators below so it cannot raise the scored
+            # exploit_public_facing_app signal; it carries its own low weight
+            # and is only emitted when no stronger web evidence exists on the
+            # row, so a full SQLi payload is never counted twice.
+            if "injection_probe" in indicators:
+                stronger_evidence = (
+                    any(token.startswith("sqli:") for token in indicators)
+                    or bool(indicators & {
+                        "path_traversal", "local_file_inclusion",
+                        "remote_file_inclusion", "command_injection",
+                        "webshell_command_parameter",
+                    })
+                    or any(
+                        float(signals.get(name, 0.0) or 0.0) > 0.0
+                        for name in ("web_sqli_attempt", "web_sqli_probable_success")
+                    )
+                )
+                if not stronger_evidence:
+                    signals["web_injection_probe"] = max(
+                        float(signals.get("web_injection_probe", 0.0) or 0.0), 1.0
+                    )
+                    expl.append({
+                        "rule_id": "WEB_INJECTION_PROBE",
+                        "description": (
+                            "Request parameter contains quote/metacharacter breakout probing "
+                            "without valid injection syntax; evidence of an attempt only"
+                        ),
+                        "confidence": "low",
+                        "evidence_type": "contextual",
+                        "signals": ["web_injection_probe"],
+                        "evidence": {
+                            "attack_technique_id": "T1190",
+                            "http_method": _safe_str(method_vals[row_i]).strip(),
+                            "canonical_endpoint": _safe_str(endpoint_vals[row_i]).strip(),
+                            "http_response_code": _normalise_integral_metadata_value(status_vals[row_i]),
+                            "attack_indicators": "|".join(sorted(indicators)),
+                            "source_ip": _safe_str(source_ip_vals[row_i]).strip(),
+                        },
+                    })
+                    # Record the technique through the same zero-weight mapping
+                    # path as every other label, so the mitre_t1190 signal and
+                    # the chronosift_attack_techniques column cannot disagree.
+                    emit_mapping(
+                        "mitre_t1190",
+                        "T1190",
+                        "Injection probing maps to Exploit Public-Facing Application as an attempt; no exploitation is asserted",
+                        "low",
+                    )
 
             exploit_indicators = {
                 "path_traversal", "local_file_inclusion", "remote_file_inclusion",

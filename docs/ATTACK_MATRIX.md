@@ -25,7 +25,7 @@ The mapping is based on:
 | Tactic | ATT&CK ID | Technique | Dead-box identifiable? | Detectable from Plaso output? | ChronoSift v2.31 status | Notes |
 |---|---|---|---|---|---|---|
 | Initial Access | T1078 | Valid Accounts | Yes | Yes | Covered | Successful SSH/RDP/auth patterns plus contextual anomaly logic |
-| Initial Access | T1190 | Exploit Public-Facing Application | Partial | Partial | Covered | Decoded SQLi, traversal/LFI/RFI, command-injection, and web-shell command syntax; attempts and probable outcomes remain distinct |
+| Initial Access | T1190 | Exploit Public-Facing Application | Partial | Partial | Covered | Decoded SQLi, traversal/LFI/RFI, command-injection, and web-shell command syntax; quote-breakout probing is mapped separately as a low-confidence attempt; attempts and probable outcomes remain distinct |
 | Initial Access | T1133 | External Remote Services | Partial | Partial | Covered | Remote-service success semantics are modeled, but confidence remains low |
 | Execution | T1059 | Command and Scripting Interpreter | Yes | Yes | Covered | Linux interpreters, shell history, and command-line artefacts |
 | Execution | T1218 | System Binary Proxy Execution | Yes | Yes | Covered | Windows LOLBins and suspicious argument patterns |
@@ -77,10 +77,14 @@ The mapping is based on:
 | Impact | T1490 | Inhibit System Recovery | Yes | Yes | Covered | Commands, logs, and configuration artefacts are modeled directly |
 | Impact | T1531 | Account Access Removal | Yes | Yes | Covered | Account disable/delete and group-removal events are modeled |
 
-Web exploitation coverage also distinguishes decoded SQLi attempts from
-probable successful SQLi. The latter requires a 2xx response-size anomaly
-relative to successful non-SQLi traffic for the same endpoint; it is an
-analyst-prioritisation inference, not proof that returned content was valid.
+Web exploitation coverage distinguishes three strengths of evidence for the
+same technique. Quote-breakout probing carries `web_injection_probe` at low
+confidence and weight `1`; decoded injection syntax carries `web_sqli_attempt`
+and the scored `exploit_public_facing_app`; and probable successful SQLi
+additionally requires a 2xx response-size anomaly relative to successful
+non-SQLi traffic for the same endpoint. Only the last asserts a likely
+outcome, and even then it is an analyst-prioritisation inference rather than
+proof that the returned content was valid.
 
 ## Remaining Depth Targets
 

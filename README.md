@@ -176,6 +176,13 @@ combined, so a SHA-256 match contributes file identity even when the recorded
 upload name does not match, and vice versa. Upload outcomes distinguish
 accepted, redirected, rejected, and status-unknown requests.
 
+Requests that merely test whether a parameter can be broken out of quoting —
+scanner probing such as `?id=2'gejf<'">skpv`, carrying no valid injection
+syntax — are recorded as `web_injection_probe` at `low` confidence with a
+weight of `1`. Probing is evidence of an attempt, never of success, so it does
+not raise the scored `exploit_public_facing_app` signal and is suppressed
+entirely when stronger web evidence already exists on the same request.
+
 Web requests are also checked for decoded, high-confidence SQL injection
 syntax. `web_sqli_attempt` records the request evidence. ChronoSIFT emits the
 stronger `web_sqli_probable_success` only when the server returns 2xx and the

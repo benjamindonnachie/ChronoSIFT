@@ -852,6 +852,78 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
                 msg=f"missed {expected} in {request_path}",
             )
 
+    def test_injection_probing_is_recorded_as_a_low_confidence_attempt(self):
+        ts = pd.date_range("2024-06-16T21:30:00Z", periods=3, freq="1s")
+        df = pd.DataFrame([
+            # sqlmap-style quote/angle breakout probe: no valid SQL syntax.
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /vuln/?id=2%27gejf%3C%27%22%3Eskpv&Submit=Submit HTTP/1.1",
+                "http_response_code": 200,
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": "GET /vuln/?id=3&Submit=Submit HTTP/1.1",
+                "http_response_code": 200,
+            },
+            {
+                "parser": "text/apache_access",
+                "http_request": (
+                    "GET /vuln/?id=1%27%20UNION%20SELECT%20table_name%20"
+                    "FROM%20information_schema.tables-- HTTP/1.1"
+                ),
+                "http_response_code": 200,
+            },
+        ], index=ts)
+
+        out = self.engine.apply_contextual(self.engine.apply_atomic(df), apply_temporal=False)
+        probe, benign, real_sqli = (out.iloc[i]["chronosift_signals"] or {} for i in range(3))
+
+        # The probe is an attempt: its own low-weight signal, no exploitation.
+        self.assertEqual(probe.get("web_injection_probe"), 1.0)
+        self.assertNotIn("exploit_public_facing_app", probe)
+        self.assertNotIn("web_sqli_attempt", probe)
+        self.assertNotIn("web_sqli_probable_success", probe)
+        self.assertEqual(out.iloc[0]["chronosift_web_outcome"], "attempt")
+        self.assertEqual(out.iloc[0]["chronosift_attack_techniques"], "T1190")
+        self.assertEqual(probe.get("mitre_t1190"), 1.0)
+        entry = next(
+            item for item in out.iloc[0]["chronosift_explain"]
+            if item.get("rule_id") == "WEB_INJECTION_PROBE"
+        )
+        self.assertEqual(entry["confidence"], "low")
+
+        # An ordinary lookup stays clean, and a real payload is not downgraded
+        # to a probe or double-counted.
+        self.assertNotIn("web_injection_probe", benign)
+        self.assertEqual(float(out.iloc[1]["chronosift_score"]), 0.0)
+        self.assertEqual(real_sqli.get("web_sqli_attempt"), 1.0)
+        self.assertNotIn("web_injection_probe", real_sqli)
+        self.assertLess(
+            float(out.iloc[0]["chronosift_score"]),
+            float(out.iloc[2]["chronosift_score"]),
+        )
+
+    def test_web_feature_prefilter_keeps_schema_stable_on_non_web_partitions(self):
+        ts = pd.date_range("2024-06-16T22:00:00Z", periods=2, freq="1s")
+        non_web = pd.DataFrame(
+            [{"parser": "filestat", "pathspec": "/home/user/a.txt"},
+             {"parser": "filestat", "pathspec": "/home/user/b.txt"}], index=ts,
+        )
+        web = pd.DataFrame(
+            [{"parser": "text/apache_access", "http_request": "GET /x?id=1 HTTP/1.1", "http_response_code": 200},
+             {"parser": "text/apache_access", "http_request": "GET /y HTTP/1.1", "http_response_code": 404}], index=ts,
+        )
+        self.engine._materialise_normalised_web_features(non_web)
+        self.engine._materialise_normalised_web_features(web)
+
+        non_web_cols = {c: str(non_web[c].dtype) for c in non_web.columns if c.startswith("chronosift_")}
+        web_cols = {c: str(web[c].dtype) for c in web.columns if c.startswith("chronosift_")}
+        self.assertEqual(non_web_cols, web_cols)
+        self.assertFalse(bool(non_web["chronosift_web_is_event"].any()))
+        self.assertTrue(bool(web["chronosift_web_is_event"].all()))
+        self.assertTrue(non_web["chronosift_web_method"].isna().all())
+
     def test_manifest_hash_index_covers_only_hit_carrying_rows(self):
         # The hash index previously accumulated every hashed row across the
         # whole dataset even though non-hit hashes are discarded when the
