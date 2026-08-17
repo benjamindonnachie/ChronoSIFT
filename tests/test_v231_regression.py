@@ -924,6 +924,55 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertTrue(bool(web["chronosift_web_is_event"].all()))
         self.assertTrue(non_web["chronosift_web_method"].isna().all())
 
+    def test_month_window_spans_wide_forensic_years(self):
+        # Partition years beyond Python's datetime.MAXYEAR (9999) previously
+        # aborted a whole dataset: four junk rows in Case1 (23746, 29326) and
+        # three in ENISA-LOT3 (44567, and 9999 whose December end rolls to
+        # 10000). Timestamps are retained as evidence rather than clipped, so
+        # the window must be constructible for any of them.
+        for year, month in ((23746, 7), (29326, 9), (44567, 12), (9999, 12), (10000, 1), (1, 1)):
+            start, end = MODULE._month_window_utc(year, month)
+            self.assertEqual(start.year, year)
+            self.assertEqual(start.month, month)
+            self.assertLess(start, end)
+            self.assertEqual(str(start.tz), "UTC")
+
+        # December rolls the year over; other months advance within it.
+        self.assertEqual(MODULE._month_window_utc(9999, 12)[1].year, 10000)
+        self.assertEqual(MODULE._month_window_utc(44567, 12)[1].year, 44568)
+        self.assertEqual(MODULE._month_window_utc(23746, 7)[1].month, 8)
+
+    def test_month_window_matches_previous_behaviour_for_ordinary_years(self):
+        # The replacement must be a no-op for representable years, so existing
+        # sidecars stay valid without reprocessing.
+        for year, month in ((1970, 1), (2024, 1), (2024, 12), (2026, 2)):
+            start, end = MODULE._month_window_utc(year, month)
+            expected_start = pd.Timestamp(year=year, month=month, day=1, tz="UTC")
+            expected_end = (
+                pd.Timestamp(year=year + 1, month=1, day=1, tz="UTC")
+                if month == 12
+                else pd.Timestamp(year=year, month=month + 1, day=1, tz="UTC")
+            )
+            self.assertEqual(start, expected_start)
+            self.assertEqual(end, expected_end)
+
+    def test_wide_year_rows_fall_inside_their_partition_window(self):
+        index = pd.DatetimeIndex(
+            np.array(["23746-07-08T09:58:21.349921"], dtype="datetime64[us]")
+        ).tz_localize("UTC")
+        start, end = MODULE._month_window_utc(23746, 7)
+        self.assertTrue(bool(((index >= start) & (index < end)).all()))
+
+    def test_year_month_iteration_crosses_wide_year_boundaries(self):
+        start = MODULE._month_start_timestamp(9999, 11)
+        end = MODULE._month_start_timestamp(10000, 2)
+        self.assertEqual(
+            MODULE._iter_year_months(start, end),
+            [(9999, 11), (9999, 12), (10000, 1), (10000, 2)],
+        )
+        single = MODULE._month_start_timestamp(44567, 12)
+        self.assertEqual(MODULE._iter_year_months(single, single), [(44567, 12)])
+
     def test_manifest_hash_index_covers_only_hit_carrying_rows(self):
         # The hash index previously accumulated every hashed row across the
         # whole dataset even though non-hit hashes are discarded when the

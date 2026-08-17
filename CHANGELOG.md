@@ -2,6 +2,42 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## 2.31.3 — August 2026
+
+Fixed a crash that aborted an entire dataset when a partition's derived year
+fell outside Python's `datetime` range.
+
+- `process_parquet_dataset_partitioned()` built each month window with
+  `pd.Timestamp(year=..., month=..., day=...)`, which constructs through
+  Python's `datetime` and is capped at `datetime.MAXYEAR` (9999). The
+  July 2026 wide-year conversion work deliberately widened the partition
+  column to `Int32` and retained implausible-but-parseable timestamps as
+  evidence, so the loop could be handed years the constructor cannot
+  represent. Four junk rows out of 1,382,975 aborted a full Case1 run after
+  28 minutes; ENISA-LOT3 failed the same way on three rows out of 2,552,690,
+  one of them the `utmp` false positive over an Office font with year 44567.
+- A second boundary case failed even within range: for December the loop
+  computed `year + 1`, so a valid `9999-12` partition overflowed to 10000.
+- Added `_month_start_timestamp()`, `_month_window_utc()`,
+  `_next_year_month()` and `_iter_year_months()`. Windows are now built from
+  `numpy.datetime64`, which bypasses the component path; `datetime64[us]`
+  spans roughly +/-292,277 years, so every retained timestamp is
+  representable. The same component-constructor pattern was also replaced in
+  both partition-range loaders, which would have failed once wide-year
+  windows reached them.
+- **No timestamp is discarded, clamped, or judged implausible.** Deciding
+  which timestamps are "valid" is not safe in a forensic tool, where
+  anti-forensic tampering is itself the evidence; wide-year rows are now
+  processed and scored like any other. They cannot match a bounded temporal
+  window, so they remain inert for correlation.
+- Behaviour is unchanged for representable years, verified against the
+  previous construction for 1970, 2024-01, 2024-12 and 2026-02. Sidecars
+  produced by 2.31.2 for datasets without an out-of-range partition are
+  therefore unaffected and need no reprocessing.
+- Added regression coverage for years 23746, 29326, 44567, the 9999-to-10000
+  December rollover, wide-year row/window containment, and month iteration
+  across a wide-year boundary.
+
 ## 2.31.2 — August 2026
 
 Adds injection-probe evidence and removes the whole-partition cost of web

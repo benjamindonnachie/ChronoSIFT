@@ -11236,11 +11236,7 @@ class ChronoSiftEngine:
 
             for year, month, _part_path in iter_hive_year_month_partitions(dataset_root):
                 logger.info("Pipeline stage: processing partition %04d-%02d", year, month)
-                month_start = pd.Timestamp(year=year, month=month, day=1, tz="UTC")
-                if month == 12:
-                    month_end = pd.Timestamp(year=year + 1, month=1, day=1, tz="UTC")
-                else:
-                    month_end = pd.Timestamp(year=year, month=month + 1, day=1, tz="UTC")
+                month_start, month_end = _month_window_utc(year, month)
 
                 partition_fields = {"year": int(year), "month": int(month)}
                 telemetry.emit("partition_start", **partition_fields)
@@ -12741,6 +12737,56 @@ def _ensure_nsrl_cache(
         return _make_nsrl_cache_descriptor(nsrl_parquet_path)
     return None
 
+def _next_year_month(year: int, month: int) -> Tuple[int, int]:
+    """Advance a (year, month) pair by one month using integer arithmetic."""
+    return (int(year) + 1, 1) if int(month) == 12 else (int(year), int(month) + 1)
+
+
+def _month_start_timestamp(year: int, month: int) -> pd.Timestamp:
+    """
+    Return a month's first instant as a tz-aware UTC timestamp.
+
+    ``pd.Timestamp(year=..., month=..., day=...)`` builds through Python's
+    ``datetime``, which caps years at ``datetime.MAXYEAR`` (9999).  Forensic
+    timelines legitimately contain parseable timestamps far outside that range
+    — a tampered or misparsed record may derive a year such as 23746 or 44567 —
+    and the JSONL-to-Parquet conversion deliberately retains them as evidence
+    rather than clipping them.  Constructing from ``numpy.datetime64`` avoids
+    the component path and its limit, while ``datetime64[us]`` spans roughly
+    +/-292,277 years, so no partition has to be discarded or clamped.
+    """
+    value = np.datetime64(f"{int(year):04d}-{int(month):02d}", "M")
+    return pd.Timestamp(value.astype("datetime64[us]")).tz_localize("UTC")
+
+
+def _month_window_utc(year: int, month: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the half-open ``[start, end)`` window covering one month."""
+    next_year, next_month = _next_year_month(year, month)
+    return (
+        _month_start_timestamp(year, month),
+        _month_start_timestamp(next_year, next_month),
+    )
+
+
+def _iter_year_months(
+    start: pd.Timestamp, end: pd.Timestamp
+) -> List[Tuple[int, int]]:
+    """
+    List the (year, month) pairs spanned by ``start``..``end`` inclusive.
+
+    Iterating on integers rather than rebuilding a timestamp per step keeps
+    wide forensic years working; tuple comparison is equivalent to comparing
+    month-floored timestamps.
+    """
+    months: List[Tuple[int, int]] = []
+    year, month = int(start.year), int(start.month)
+    last = (int(end.year), int(end.month))
+    while (year, month) <= last:
+        months.append((year, month))
+        year, month = _next_year_month(year, month)
+    return months
+
+
 def iter_hive_year_month_partitions(dataset_root: str) -> List[Tuple[int, int, str]]:
     """Return discovered Hive-style year/month partition directories."""
     root = Path(dataset_root)
@@ -12822,15 +12868,7 @@ def load_plaso_parquet_timerange(
     if end is None:
         end = start
 
-    months: List[Tuple[int, int]] = []
-    cur = pd.Timestamp(year=start.year, month=start.month, day=1, tz="UTC")
-    stop = pd.Timestamp(year=end.year, month=end.month, day=1, tz="UTC")
-    while cur <= stop:
-        months.append((int(cur.year), int(cur.month)))
-        if cur.month == 12:
-            cur = pd.Timestamp(year=cur.year + 1, month=1, day=1, tz="UTC")
-        else:
-            cur = pd.Timestamp(year=cur.year, month=cur.month + 1, day=1, tz="UTC")
+    months = _iter_year_months(start, end)
 
     cols = list(columns) if columns is not None else None
     dt_col = _dataset_datetime_column(path)
@@ -12987,15 +13025,7 @@ def load_plaso_parquet_timerange_with_sidecar(
     if end is None:
         end = start
 
-    months: List[Tuple[int, int]] = []
-    cur = pd.Timestamp(year=start.year, month=start.month, day=1, tz="UTC")
-    stop = pd.Timestamp(year=end.year, month=end.month, day=1, tz="UTC")
-    while cur <= stop:
-        months.append((int(cur.year), int(cur.month)))
-        if cur.month == 12:
-            cur = pd.Timestamp(year=cur.year + 1, month=1, day=1, tz="UTC")
-        else:
-            cur = pd.Timestamp(year=cur.year, month=cur.month + 1, day=1, tz="UTC")
+    months = _iter_year_months(start, end)
 
     def _build_where_sql(path: str) -> Tuple[str, List[Any]]:
         dt_col = _dataset_datetime_column(path)
