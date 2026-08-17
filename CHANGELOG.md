@@ -34,9 +34,19 @@ fell outside Python's `datetime` range.
   previous construction for 1970, 2024-01, 2024-12 and 2026-02. Sidecars
   produced by 2.31.2 for datasets without an out-of-range partition are
   therefore unaffected and need no reprocessing.
+- Replaced four `Timestamp.to_pydatetime()` calls that bound DuckDB query
+  parameters in the two partition-range loaders. These hit the same
+  `datetime.MAXYEAR` limit and were not caught by the initial sweep, which
+  looked only for the component constructor. Added
+  `_duckdb_timestamp_param()`, which binds ISO text instead; DuckDB coerces it
+  to the column's timestamp type, preserving the previous tz-aware semantics.
 - Added regression coverage for years 23746, 29326, 44567, the 9999-to-10000
   December rollover, wide-year row/window containment, and month iteration
-  across a wide-year boundary.
+  across a wide-year boundary, plus an end-to-end
+  `process_parquet_dataset_partitioned()` run over a Hive dataset holding both
+  an ordinary and a wide-year partition. That end-to-end test is what exposed
+  the `to_pydatetime()` sites: the unit tests covered the window arithmetic and
+  passed while the real code path still failed.
 
 ## 2.31.2 — August 2026
 

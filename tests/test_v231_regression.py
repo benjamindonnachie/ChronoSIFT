@@ -973,6 +973,55 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         single = MODULE._month_start_timestamp(44567, 12)
         self.assertEqual(MODULE._iter_year_months(single, single), [(44567, 12)])
 
+    def test_partitioned_run_survives_wide_year_partition_end_to_end(self):
+        """
+        The regression that actually bit: a whole dataset aborted because one
+        partition's derived year exceeded Python's datetime.MAXYEAR. The helper
+        tests above cover the window arithmetic; this drives the real
+        process_parquet_dataset_partitioned() path over a Hive-partitioned
+        dataset containing an ordinary partition and a wide-year one, and
+        asserts the wide-year row is retained rather than dropped.
+        """
+        rows = [
+            ("2024-06-16T17:30:00", 2024, 6, "/home/user/ordinary.txt"),
+            ("2024-06-16T17:31:00", 2024, 6, "/var/www/html/shell.php"),
+            # Junk timestamp of the kind the wide-year conversion retains as
+            # evidence rather than clipping (cf. Case1 year 23746).
+            ("23746-07-08T09:58:21.349921", 23746, 7, "/home/user/tampered.txt"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir) / "dataset"
+            for row_id, (stamp, year, month, path) in enumerate(rows):
+                part = root / f"year={year}" / f"month={month:02d}"
+                part.mkdir(parents=True, exist_ok=True)
+                frame = pd.DataFrame({
+                    "datetime": np.array([stamp], dtype="datetime64[us]"),
+                    MODULE.CHRONOSIFT_ROW_ID_COLUMN: [row_id],
+                    "parser": ["filestat"],
+                    "timestamp_desc": ["Creation Time"],
+                    "pathspec": [path],
+                    "message": [f"file {path}"],
+                })
+                # Unique per row: two of these share a partition directory.
+                frame.to_parquet(part / f"part-{row_id:05d}.parquet", engine="pyarrow", index=False)
+
+            out_root = pathlib.Path(tmpdir) / "sidecar"
+            reports = self.engine.process_parquet_dataset_partitioned(
+                str(root), str(out_root), output_mode="sidecar",
+            )
+
+            self.assertTrue(reports, "the run produced no partition reports")
+            years = {int(r["year"]) for r in reports if "year" in r}
+            self.assertIn(23746, years, "wide-year partition was skipped")
+
+            written = MODULE._duckdb_read_parquet_df(str(out_root), require_datetime=False)
+            self.assertEqual(
+                sorted(int(v) for v in written[MODULE.CHRONOSIFT_ROW_ID_COLUMN]),
+                [0, 1, 2],
+                "every row should reach the sidecar, including the wide-year row",
+            )
+
     def test_manifest_hash_index_covers_only_hit_carrying_rows(self):
         # The hash index previously accumulated every hashed row across the
         # whole dataset even though non-hit hashes are discarded when the

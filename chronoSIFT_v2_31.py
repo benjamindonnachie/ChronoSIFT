@@ -12759,6 +12759,18 @@ def _month_start_timestamp(year: int, month: int) -> pd.Timestamp:
     return pd.Timestamp(value.astype("datetime64[us]")).tz_localize("UTC")
 
 
+def _duckdb_timestamp_param(value: pd.Timestamp) -> str:
+    """
+    Bind a timestamp as a DuckDB query parameter without Python's year cap.
+
+    ``Timestamp.to_pydatetime()`` converts through Python's ``datetime`` and so
+    raises for the wide forensic years the pipeline deliberately retains.
+    ``isoformat()`` has no such limit, and DuckDB coerces the ISO text to the
+    column's timestamp type, preserving the previous tz-aware semantics.
+    """
+    return value.isoformat()
+
+
 def _month_window_utc(year: int, month: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Return the half-open ``[start, end)`` window covering one month."""
     next_year, next_month = _next_year_month(year, month)
@@ -12887,10 +12899,10 @@ def load_plaso_parquet_timerange(
         where_parts.append("(" + " OR ".join(clauses) + ")")
     if dt_col and start is not None:
         where_parts.append(f'"{dt_col}" >= ?')
-        params.append(start.to_pydatetime())
+        params.append(_duckdb_timestamp_param(start))
     if dt_col and end is not None:
         where_parts.append(f'"{dt_col}" <= ?')
-        params.append(end.to_pydatetime())
+        params.append(_duckdb_timestamp_param(end))
 
     return _duckdb_read_parquet_df(
         path,
@@ -13040,10 +13052,10 @@ def load_plaso_parquet_timerange_with_sidecar(
             where_parts.append("(" + " OR ".join(clauses) + ")")
         if dt_col and start is not None:
             where_parts.append(f'{_duckdb_quote_ident(dt_col)} >= ?')
-            params.append(start.to_pydatetime())
+            params.append(_duckdb_timestamp_param(start))
         if dt_col and end is not None:
             where_parts.append(f'{_duckdb_quote_ident(dt_col)} <= ?')
-            params.append(end.to_pydatetime())
+            params.append(_duckdb_timestamp_param(end))
         return " AND ".join(where_parts), params
 
     base_where_sql, base_params = _build_where_sql(base_path)
