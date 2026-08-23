@@ -21,22 +21,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         nargs="+",
         help=(
             "One or more JSONL telemetry paths emitted by "
-            "run_chronosift_sidecar_cli.py"
+            "run_chronosift_sidecar_cli.py; basenames must be unique"
         ),
     )
     p.add_argument("--top", type=int, default=10, help="How many top partitions to report, default: 10")
-    p.add_argument("--json-out", default=None, help="Optional path to save the summary as JSON")
+    p.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional JSON output written only after every input validates",
+    )
     return p
 
 
 def load_events(path: str) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     with Path(path).open("r", encoding="utf-8") as fh:
-        for line in fh:
+        for line_number, line in enumerate(fh, start=1):
             line = line.strip()
             if line:
-                events.append(json.loads(line))
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{path}:{line_number}: invalid JSON: {exc.msg}"
+                    ) from exc
+                if not isinstance(event, dict):
+                    raise ValueError(
+                        f"{path}:{line_number}: telemetry event must be a JSON object"
+                    )
+                events.append(event)
     return events
+
+
+def _portable_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalised = str(value).rstrip("/\\").replace("\\", "/")
+    return normalised.rsplit("/", 1)[-1] or None
 
 
 def _optional_int(value: Any, *, field: str, source: str) -> Optional[int]:
@@ -80,7 +101,11 @@ def _numeric_summary(values: Sequence[int]) -> Dict[str, Any]:
     }
 
 
-def _profile_record(path: str, events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _profile_record(
+    path: str,
+    telemetry_file: str,
+    events: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
     profile_events = [event for event in events if event.get("event") == "profile_validation"]
     if len(profile_events) > 1:
         raise ValueError(
@@ -92,8 +117,8 @@ def _profile_record(path: str, events: Sequence[Dict[str, Any]]) -> Dict[str, An
         {},
     )
     record: Dict[str, Any] = {
-        "telemetry_jsonl": path,
-        "dataset_root": run_start.get("dataset_root"),
+        "telemetry_file": telemetry_file,
+        "dataset_name": _portable_name(run_start.get("dataset_root")),
         "run_complete": any(event.get("event") == "run_end" for event in events),
         "profile_validation_present": bool(profile_events),
     }
@@ -262,25 +287,46 @@ def summarize_telemetry_files(paths: Sequence[str], top: int = 10) -> Dict[str, 
     if top < 1:
         raise ValueError("top must be at least 1")
 
-    resolved_paths = sorted(str(Path(path).resolve()) for path in paths)
+    resolved_paths = [str(Path(path).resolve()) for path in paths]
     if len(set(resolved_paths)) != len(resolved_paths):
         raise ValueError("Telemetry JSONL paths must be unique")
 
+    input_paths = [(path, Path(path).name) for path in resolved_paths]
+    paths_by_name: Dict[str, List[str]] = defaultdict(list)
+    for path, telemetry_file in input_paths:
+        paths_by_name[telemetry_file].append(path)
+    duplicate_names = {
+        name: duplicate_paths
+        for name, duplicate_paths in paths_by_name.items()
+        if len(duplicate_paths) > 1
+    }
+    if duplicate_names:
+        detail = "; ".join(
+            f"{name}: {', '.join(duplicate_paths)}"
+            for name, duplicate_paths in sorted(duplicate_names.items())
+        )
+        raise ValueError(
+            "Telemetry JSONL basenames must be unique for portable summaries; "
+            + detail
+        )
+    input_paths.sort(key=lambda item: item[1])
+
     events: List[Dict[str, Any]] = []
     profile_records: List[Dict[str, Any]] = []
-    for path in resolved_paths:
+    for path, telemetry_file in input_paths:
         file_events = load_events(path)
         run_start = next(
             (event for event in file_events if event.get("event") == "run_start"),
             {},
         )
-        dataset_root = run_start.get("dataset_root")
+        dataset_name = _portable_name(run_start.get("dataset_root"))
         for event in file_events:
             tagged = dict(event)
-            tagged["_telemetry_jsonl"] = path
-            tagged["_dataset_root"] = dataset_root
+            tagged["_source_path"] = path
+            tagged["_telemetry_file"] = telemetry_file
+            tagged["_dataset_name"] = dataset_name
             events.append(tagged)
-        profile_records.append(_profile_record(path, file_events))
+        profile_records.append(_profile_record(path, telemetry_file, file_events))
 
     stage_end = [event for event in events if event.get("event") == "stage_end"]
 
@@ -292,13 +338,28 @@ def summarize_telemetry_files(paths: Sequence[str], top: int = 10) -> Dict[str, 
         "worst_partition": None,
     })
     by_partition_stage: Dict[Tuple[str, int, int], Dict[str, float]] = defaultdict(dict)
-    partition_dataset_roots: Dict[Tuple[str, int, int], Any] = {}
+    partition_dataset_names: Dict[Tuple[str, int, int], Any] = {}
     peak_rss_mb = 0.0
 
     for event in stage_end:
+        source_path = str(event["_source_path"])
         stage = str(event.get("stage"))
-        duration_s = float(event.get("duration_s") or 0.0)
-        rss_mb = float(event.get("rss_mb") or 0.0)
+        duration_s = float(
+            _optional_float(
+                event.get("duration_s"),
+                field="duration_s",
+                source=source_path,
+            )
+            or 0.0
+        )
+        rss_mb = float(
+            _optional_float(
+                event.get("rss_mb"),
+                field="rss_mb",
+                source=source_path,
+            )
+            or 0.0
+        )
         peak_rss_mb = max(peak_rss_mb, rss_mb)
 
         rec = by_stage[stage]
@@ -310,29 +371,32 @@ def summarize_telemetry_files(paths: Sequence[str], top: int = 10) -> Dict[str, 
         year = event.get("year")
         month = event.get("month")
         if year is not None and month is not None:
-            telemetry_jsonl = str(event["_telemetry_jsonl"])
-            part_key = (telemetry_jsonl, int(year), int(month))
+            year_value = _optional_int(year, field="year", source=source_path)
+            month_value = _optional_int(month, field="month", source=source_path)
+            assert year_value is not None and month_value is not None
+            telemetry_file = str(event["_telemetry_file"])
+            part_key = (telemetry_file, year_value, month_value)
             by_partition_stage[part_key][stage] = duration_s
-            partition_dataset_roots[part_key] = event.get("_dataset_root")
+            partition_dataset_names[part_key] = event.get("_dataset_name")
             if (
                 rec["worst_partition"] is None
                 or duration_s > float(rec["worst_partition"]["duration_s"])
             ):
                 rec["worst_partition"] = {
-                    "telemetry_jsonl": telemetry_jsonl,
-                    "dataset_root": event.get("_dataset_root"),
-                    "year": int(year),
-                    "month": int(month),
+                    "telemetry_file": telemetry_file,
+                    "dataset_name": event.get("_dataset_name"),
+                    "year": year_value,
+                    "month": month_value,
                     "duration_s": duration_s,
                     "rss_mb": rss_mb,
                 }
 
     top_partitions = []
-    for (telemetry_jsonl, year, month), stages in by_partition_stage.items():
+    for (telemetry_file, year, month), stages in by_partition_stage.items():
         total_s = float(sum(stages.values()))
         top_partitions.append({
-            "telemetry_jsonl": telemetry_jsonl,
-            "dataset_root": partition_dataset_roots[(telemetry_jsonl, year, month)],
+            "telemetry_file": telemetry_file,
+            "dataset_name": partition_dataset_names[(telemetry_file, year, month)],
             "year": year,
             "month": month,
             "total_stage_s": total_s,
@@ -350,15 +414,15 @@ def summarize_telemetry_files(paths: Sequence[str], top: int = 10) -> Dict[str, 
     top_partitions.sort(
         key=lambda value: (
             -float(value["total_stage_s"]),
-            str(value["telemetry_jsonl"]),
+            str(value["telemetry_file"]),
             int(value["year"]),
             int(value["month"]),
         )
     )
 
     return {
-        "telemetry_file_count": len(resolved_paths),
-        "telemetry_files": resolved_paths,
+        "telemetry_file_count": len(input_paths),
+        "telemetry_files": [telemetry_file for _, telemetry_file in input_paths],
         "events": len(events),
         "stage_end_events": len(stage_end),
         "peak_rss_mb": peak_rss_mb,

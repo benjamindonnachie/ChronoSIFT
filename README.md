@@ -260,7 +260,7 @@ uv run python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 Tests that require the complete external YARA Forge bundle are skipped when it is not present.
-The current unreleased baseline passes 413 tests, with 8 expected skips when
+The current unreleased baseline passes 418 tests, with 8 expected skips when
 that external corpus is unavailable.
 
 ## Usage
@@ -323,6 +323,9 @@ counts, `complete_week_count`, `amplifiable_hour_count`,
 `simultaneous_upper_radius`, and the derived `engaged` flag. Engagement means
 that validation was accepted and at least one hour received a factor greater
 than one; it does not mean that every scored event was amplified.
+An ablation with `profiling.hour_of_week.enabled: false` instead records
+`selection_mode: disabled` and `reason: profiling_disabled`. It is therefore a
+deliberate known non-engagement, not an unexplained profile rejection.
 
 Aggregate one telemetry stream per image after a batch run:
 
@@ -342,6 +345,19 @@ reported as unknown and is excluded from the engagement-rate denominator rather
 than being counted as a rejection. Preserve this aggregate with the per-image
 manifests so the reported engagement rate can be traced back to each profile
 decision.
+
+Summaries use the portable basenames `telemetry_file` and `dataset_name`; they
+do not archive resolved filesystem paths. Input telemetry basenames must be
+unique so those identifiers remain unambiguous. The raw JSONL retains the
+original `dataset_root` when full execution provenance is required.
+
+Corpus summarisation is intentionally all-or-nothing. Every input is parsed and
+validated before `--json-out` is written; malformed JSON, duplicate identities,
+duplicate profile events, invalid field types, or inconsistent engagement abort
+the command instead of producing a partial rate. The error identifies the
+offending path (and line for malformed JSON). Run this command as the telemetry
+preflight before downstream table generation; it reads the compact telemetry
+files rather than the source timelines.
 
 ## Optional enrichment data
 

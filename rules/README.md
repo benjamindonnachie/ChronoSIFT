@@ -330,6 +330,16 @@ and one provenance record per image. Missing or older engagement fields remain
 unknown and are not silently added to the engagement-rate denominator;
 incomplete runs are likewise reported separately rather than treated as corpus
 results.
+When `profiling.hour_of_week.enabled` is false, profile construction is skipped
+and the compact record uses `selection_mode: disabled`,
+`reason: profiling_disabled`, and `engaged: false`. This is counted as explicit
+non-engagement rather than an unspecified data failure.
+Summary artefacts use unique `telemetry_file` and `dataset_name` basenames so
+moving an unchanged telemetry set between machines does not rewrite its paths.
+The raw JSONL remains the source for full path provenance. The summariser
+validates every input before writing an output; malformed or inconsistent files
+abort the corpus operation, with the offending path reported, rather than
+yielding a silently partial engagement rate.
 The factor is intentionally conservative and becomes less attenuated as the
 profile's effective event volume increases. It is therefore a within-dataset
 prioritisation factor rather than a directly comparable cross-dataset

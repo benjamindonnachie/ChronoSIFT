@@ -4,6 +4,17 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Labelled disabled hour-of-week profiling explicitly in telemetry and reports
+  with `selection_mode: disabled` and `reason: profiling_disabled`. Disabled
+  runs now short-circuit profile construction, including when a reusable
+  manifest was supplied, so an ablation cannot be reported as an incidental
+  acceptance or unexplained rejection.
+- Made telemetry summaries portable across filesystem layouts. Corpus and
+  per-run summaries now expose unique `telemetry_file` and `dataset_name`
+  basenames instead of resolved paths; duplicate basenames fail validation.
+  Strict all-or-nothing input validation remains deliberate, and malformed
+  JSON errors now name the input path and line. Public documentation specifies
+  the validation preflight and raw-telemetry provenance boundary.
 - Added corpus-level out-of-hours amplifier engagement telemetry. Each
   `profile_validation` event and partition report now includes source and
   selected event counts, amplifiable-hour count, simultaneous radius, and an
@@ -12,7 +23,7 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
   selection modes, validation and non-engagement reasons, week/hour coverage,
   unknown records, and per-image provenance. The sidecar runner uses the same
   implementation for its automatic single-run summary. The complete current
-  suite passes 413 tests with 8 expected corpus-dependent skips.
+  suite now passes 418 tests with 8 expected corpus-dependent skips.
 - Changed the shipped insufficient-profile action from `full_dataset` to
   `empty_profile`. A filtered host-resident profile that is too small, invalid,
   inconclusive, or predictively valid but operationally inert now remains

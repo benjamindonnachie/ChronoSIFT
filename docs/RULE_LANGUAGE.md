@@ -448,6 +448,21 @@ missing profile events, and older records without `amplifiable_hour_count` are
 counted separately as unknown. This aggregate should accompany corpus results
 rather than replacing the complete per-image manifests.
 
+When `profiling.hour_of_week.enabled: false`, dataset profile construction is
+not attempted. Reports and telemetry expose `selection_mode: disabled`,
+`reason: profiling_disabled`, `accepted: false`, and `engaged: false`; an
+ablation is therefore distinguishable from an evidentially insufficient or
+statistically rejected profile.
+
+The summary schema uses `telemetry_file` and `dataset_name` basenames rather
+than resolved paths. Basenames must be unique within one corpus aggregate;
+ambiguity fails validation and names the conflicting inputs. Original paths
+remain in the raw JSONL `run_start` event for execution provenance. The
+summariser validates the complete input set before writing JSON. Invalid JSON,
+non-object events, duplicate identities or profile events, invalid field types,
+and inconsistent explicit engagement abort the operation rather than returning
+a partial corpus rate. Invalid JSON errors include the source path and line.
+
 Quiet-quantile membership controls only the optional `quiet_time_event`
 annotation and never gates the amplifier. Configured NSRL application-type
 tokens also govern derivation of `nsrl_is_os_component` when the lookup does not
