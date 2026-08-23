@@ -63,7 +63,11 @@ before falling back to message scanning.
 
 ## GeoIP Enrichment
 
-GeoIP is applied via unique‑IP lookup tables.
+GeoIP is applied via unique-IP lookup tables. The input is the configured
+canonical IP-recovery field, and the six City/ASN output column names are
+declared under the mandatory `geoip_enrichment.outputs` mapping. Geographic-
+continuity and impossible-travel input bindings are checked against that schema
+at startup.
 
 Advantages:
 
@@ -72,6 +76,8 @@ Advantages:
 -   reproducible results
 
 Private and non‑routable IP addresses are intentionally not enriched.
+GeoLite2 data is an external, time-varying input; record both database versions,
+hashes, and build metadata with every run.
 
 ------------------------------------------------------------------------
 

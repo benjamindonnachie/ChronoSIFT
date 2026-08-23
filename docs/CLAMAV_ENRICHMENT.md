@@ -1,173 +1,160 @@
-# ChronoSift v2.31 — ClamAV Category Mapping Reference
+# ChronoSIFT v2.31 — ClamAV classification policy
 
-This document describes how ChronoSift v2.31 classifies ClamAV antivirus detections into forensic categories, and how those categories interact with the signal scoring and temporal composite pipeline.
+The shipped ChronoSIFT policy classifies ClamAV detections into six forensic
+categories before scoring and temporal correlation. The category registry and
+classification judgement are
+authoritative in
+[`detector_policy.detectors.clamav_classification`](../rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml),
+not in Python lookup tables.
 
-## Background
+## Policy boundary
 
-Plaso stores ClamAV detection results as an `av_signature` string (the full ClamAV signature name) and an `av_hit` boolean. Previously, ChronoSift treated all AV hits identically — emitting a single `av_hit` signal at weight 8 regardless of what was detected. This meant a PUA toolbar detection scored the same as a Mimikatz or ransomware detection.
+The shipped detector uses the `clamav_classifier` executor at atomic phase 5.
+Its outputs are available to later atomic signal gates, which run at phase 10.
 
-ClamAV uses a structured naming convention that embeds platform, malware category, and family name directly in the signature string:
+YAML owns:
 
-```
+- enablement and the default forensic category;
+- the category-token mapping;
+- ordered family-substring overrides;
+- the ordered category registry and generic/category-specific signal names,
+  values, rule IDs, descriptions, confidence, evidence, and
+  generic-suppression behaviour.
+
+Python retains only the reusable mechanics: interpreting `av_hit`, parsing the
+signature grammar including configured leading category tokens, applying the configured mappings in order, formatting
+configured explanations, and merging sparse emissions. The raw input fields
+remain fixed executor mechanics: `av_hit`, `av_signature`, and `filename`.
+
+The complete classifier definition is mandatory even when `enabled: false`.
+Unknown keys, an empty registry, dangling category references, invalid evidence
+names, duplicate normalised tokens or override substrings, output collisions,
+missing weights, and invalid policy dependencies fail engine construction.
+
+## Signature grammar
+
+The usual ClamAV form is:
+
+```text
 {Platform}.{Category}.{FamilyName}-{SignatureID}-{Revision}
 ```
 
-ChronoSift now parses this structure at scoring time to emit category-specific signals with differential weights.
+For example, `Win.Trojan.Agent-12345-0` yields platform `Win`, category token
+`Trojan`, and family `Agent`. The parser also handles configured
+category-token-prefixed names,
+two-part names, missing ID/revision suffixes, multi-dot families, and bare
+names. Grammar handling is deliberately lenient; classification is still
+decided by the configured policy.
 
-## Naming Convention
+## Classification order
 
-### Standard Form
+For every non-empty signature with `av_hit` true, the executor applies:
 
-```
-Win.Trojan.Agent-12345-0
-│    │       │      │    │
-│    │       │      │    └─ Revision
-│    │       │      └────── Signature ID
-│    │       └───────────── Family name
-│    └───────────────────── Category token
-└────────────────────────── Platform
-```
+1. `family_overrides` in YAML list order, using lowercase substring matching;
+2. `category_tokens` using the lowercase parsed category token; then
+3. `default_category` when neither configured lookup matches.
 
-### PUA Prefix Form
+Order matters. The shipped policy places `c99shell` before `c99`, for example.
+It contains 27 category-token keys and 28 ordered family-substring patterns.
+The shipped registry contains `offensive_tool`, `ransomware`, `exploit`,
+`malware`, `pua`, and `webshell`. Mapping order is authoritative, and a policy
+can add, remove, or reorder categories after updating all category references
+and downstream signal dependencies.
 
-```
-PUA.Win.Toolbar-55555-0
-│    │    │       │    │
-│    │    │       │    └─ Revision
-│    │    │       └────── Signature ID
-│    │    └──────────────── Family name
-│    └───────────────────── Platform (shifted)
-└────────────────────────── PUA category prefix
-```
+The baseline family overrides cover common offensive tools such as Mimikatz,
+Rubeus, Impacket, Cobalt Strike, Metasploit, Meterpreter, SharpHound and
+BloodHound; web shells including C99/C99shell, R57shell, B374k, Weevely and
+WSO; and ransomware families including Petya, WannaCry, LockBit, Conti,
+REvil, Ryuk, Maze, BlackCat/ALPHV, Babuk, Akira and Razy. The shipped YAML is
+the definitive list.
 
-### Deviations
+## Shipped emissions and weights
 
-Some ClamAV signatures deviate from the standard form:
-- Two-part names: `Win.Generic-999-0`
-- No ID/revision suffix: `Win.Trojan.Agent`
-- Multi-dot families: `Win.Trojan.Sub.Family-1-0`
-- Bare names: `FooBar-42-1`
+Signal names are configurable. The baseline uses:
 
-The parser handles all of these gracefully, defaulting to `malware` when classification is ambiguous.
+| Category | Configured signal | Weight | Generic `av_hit` suppressed? |
+|---|---|---:|---|
+| `offensive_tool` | `av_offensive_tool` | 10 | no |
+| `ransomware` | `av_ransomware` | 9 | no |
+| `webshell` | `av_webshell` | 9 | no |
+| `exploit` | `av_exploit` | 8 | no |
+| `malware` | `av_malware` | 8 | no |
+| `pua` | `av_pua` | 2 | yes |
 
-## Classification Hierarchy
+The configured generic signal is `av_hit` at weight 8. A non-PUA classified
+hit therefore emits both the generic signal and its category signal. The
+shipped PUA policy emits only `av_pua`, preventing a low-relevance toolbar,
+adware, coinminer, or joke-program hit from inheriting the generic weight.
+Changing an emission name also requires a corresponding weight entry.
 
-Each ClamAV signature is classified using a two-level priority system — first match wins:
+Each emission has its own configured rule ID, description, confidence, and
+evidence list. Non-PUA hits consequently receive separate generic and category
+explanations rather than one explanation standing in for two producers.
 
-### 1. Family Name Overrides (Highest Priority)
+## Empty, unknown, and disabled behaviour
 
-Known tool and malware family names override category-based classification. This handles cases where ClamAV categorises a tool generically (e.g., `Win.Trojan.Mimikatz`) but the family name reveals its true forensic significance.
+- `av_hit: false` emits nothing, regardless of signature text.
+- A true hit with a null or empty signature emits only the configured generic
+  signal using `generic.unclassified_description`.
+- A true hit with an unknown non-empty signature uses `default_category` and
+  follows the configured generic/category suppression rules.
+- `enabled: false` suppresses every direct classifier output, including the
+  configured generic signal. The full definition remains required.
 
-| Family Pattern | Forensic Category | Notable Tools |
-|---|---|---|
-| `mimikatz` | `offensive_tool` | Credential dumping |
-| `pwdump` | `offensive_tool` | SAM/NTDS extraction |
-| `lazagne` | `offensive_tool` | Multi-target credential theft |
-| `rubeus` | `offensive_tool` | Kerberos abuse |
-| `impacket` | `offensive_tool` | Network protocol exploitation |
-| `cobaltstrike` | `offensive_tool` | C2 framework |
-| `metasploit` | `offensive_tool` | Exploitation framework |
-| `meterpreter` | `offensive_tool` | Post-exploitation agent |
-| `sharphound` | `offensive_tool` | AD enumeration |
-| `bloodhound` | `offensive_tool` | AD attack path analysis |
-| `c99shell`, `c99` | `webshell` | PHP webshell |
-| `r57shell` | `webshell` | PHP webshell |
-| `b374k` | `webshell` | PHP webshell |
-| `weevely` | `webshell` | PHP backdoor/webshell |
-| `wso` | `webshell` | PHP webshell |
-| `petya` | `ransomware` | Destructive ransomware |
-| `wannacry` | `ransomware` | Self-propagating ransomware |
-| `lockbit` | `ransomware` | RaaS family |
-| `conti` | `ransomware` | RaaS family |
-| `revil` | `ransomware` | RaaS family |
-| `ryuk` | `ransomware` | Targeted ransomware |
-| `maze` | `ransomware` | Double-extortion ransomware |
-| `blackcat`, `alphv` | `ransomware` | Rust-based RaaS |
-| `babuk` | `ransomware` | Cross-platform ransomware |
-| `akira` | `ransomware` | RaaS family |
-| `razy` | `ransomware` | Ransomware family |
+Disabling classification does not erase source evidence. Raw AV hit and
+signature values can still be retained in referenced-file identities, and the
+independently configured `referenced_file_correlation` detector may still
+propagate AV evidence when its `av` branch is present. Derived AV categories
+and families are omitted, so classifier-driven
+ransomware, offensive-tool, and confirmed-webshell paths receive no category
+support.
 
-### 2. Category Token Mapping
+## Downstream integration
 
-When no family override matches, the ClamAV category token (second dot-separated segment) is mapped:
+Downstream candidate selection and the legacy ransomware-impact and
+credential-dump composites resolve the configured category emission names from
+the detector registry. Renaming `av_ransomware` or `av_offensive_tool` in YAML
+therefore updates those consumers without a Python edit. Disabling the
+classifier removes those category outputs from the effective candidate and
+composite inputs.
 
-| ClamAV Token(s) | Forensic Category | Signal |
-|---|---|---|
-| `Ransomware` | `ransomware` | `av_ransomware` |
-| `Trojan`, `Backdoor`, `Virus`, `Worm`, `Malware`, `Dropper`, `Downloader`, `Loader`, `Infostealer`, `Spyware`, `Keylogger`, `Ircbot`, `Proxy`, `Phishing`, `Packed`, `Packer`, `File` | `malware` | `av_malware` |
-| `Rootkit`, `Exploit` | `exploit` | `av_exploit` |
-| `Tool`, `Hacktool`, `Countermeasure` | `offensive_tool` | `av_offensive_tool` |
-| `Pua`, `Adware`, `Coinminer`, `Joke` | `pua` | `av_pua` |
-| *(unknown token)* | `malware` | `av_malware` |
+An enabled policy consumer may use a classifier output because phase 5
+precedes atomic gates at phase 10. A consumer whose only path depends on a
+disabled policy producer is rejected. `any` gates and sequence sides may still
+retain a disabled optional input when another live input path remains; an
+`all` gate may not.
 
-## Scoring Model
+## Referenced-file manifest
 
-### Category Signal Weights
+Referenced-file manifest schema v7 preserves raw AV signatures plus derived
+families and categories through filesystem paths, web aliases, and SHA-256
+identity maps. Dataset-resident and external-CSV signatures are accumulated
+independently under their own hit masks, so two valid signatures are unioned
+and an `av_hit: false` CSV row cannot replace a dataset hit's signature.
+SHA-256 tags and identities are accumulated at exact-hash scope rather than
+reconstructed from an aggregated filename, so different file versions that
+reuse a path cannot exchange AV, Luhn, or YARA evidence.
 
-| Category | Signal | Weight | Rationale |
-|---|---|---|---|
-| `offensive_tool` | `av_offensive_tool` | 10 | Confirms post-exploitation tooling — highest forensic relevance |
-| `ransomware` | `av_ransomware` | 9 | Confirms ransomware presence — direct impact indicator |
-| `webshell` | `av_webshell` | 9 | Confirms webshell — directly actionable |
-| `exploit` | `av_exploit` | 8 | Confirms exploit/rootkit payload |
-| `malware` | `av_malware` | 8 | Generic malware — confirmed threat but less specific |
-| `pua` | `av_pua` | 2 | Low forensic relevance — adware, coinminers, joke programs |
+Schema v7 records four digests:
 
-### PUA Dampening
+- `clamav_policy_digest`: SHA-256 of the complete raw classifier block;
+- `yara_policy_digest`: SHA-256 of the complete YARA classifier block;
+- `correlation_policy_digest`: SHA-256 of the complete referenced-file
+  correlation block; and
+- `source_digest`: a fingerprint of Parquet membership/file metadata, AV and
+  Luhn CSV paths and contents, referenced-file configuration, and the YARA
+  metadata source path/bytes plus its effective parsed index.
 
-When a detection is classified as PUA:
-- `av_hit` is **suppressed** (not emitted) — prevents the weight-8 `av_hit` from inflating scores
-- `av_pua` is emitted at weight 2 — preserves the detection in the timeline without disproportionate scoring
+Partitioned processing rebuilds a loaded or caller-supplied manifest when the
+schema is not exactly v7 or any expected digest differs. Direct in-memory
+contextual calls reject a manifest whose schema or any policy digest is
+incompatible, because they do not have the dataset inputs needed to rebuild or
+verify its source fingerprint.
 
-For non-PUA detections:
-- `av_hit` is emitted normally (weight 8)
-- The category-specific signal is emitted additionally
+## Relationship to YARA
 
-### Score Examples
-
-**Mimikatz detection** (`Win.Hacktool.Mimikatz-12345-0`):
-- `av_hit`: 1.0 × 8 = 8 points
-- `av_offensive_tool`: 1.0 × 10 = 10 points
-- **Total: 18 points** (of 50 max)
-
-**Adware detection** (`Win.Adware.Toolbar-55555-0`):
-- `av_hit`: suppressed = 0 points
-- `av_pua`: 1.0 × 2 = 2 points
-- **Total: 2 points**
-
-**Generic trojan** (`Win.Trojan.Agent-12345-0`):
-- `av_hit`: 1.0 × 8 = 8 points
-- `av_malware`: 1.0 × 8 = 8 points
-- **Total: 16 points**
-
-## Temporal Composite Integration
-
-### Ransomware Impact
-
-`av_ransomware` is a ransomware source signal, alongside `mass_file_modification`, `ransomware_extension_burst`, `yara_ransomware`. When any of these is present, the ransomware impact composite checks for temporal support events (defense impairment, recovery inhibition, suspicious execution, ransom note creation).
-
-This means a ClamAV-identified ransomware binary can trigger `ransomware_impact` even without visible mass file modification.
-
-### Credential Dump Collection
-
-`av_offensive_tool` is a credential source signal, alongside `credential_dumping`, `yara_offensive_tool`. When any of these is present, the credential dump collection composite checks for follow-on copying, archiving, or transfer activity.
-
-This means a ClamAV-identified Mimikatz or Rubeus binary can trigger `credential_dump_collection` even without explicit dump command-line evidence.
-
-## Backwards Compatibility
-
-When `av_signature` is null or empty, no category signal is emitted. The existing `av_hit` signal continues to work from the boolean `av_hit` column. All existing pipelines remain functional.
-
-## Comparison with YARA Forge Category-Aware Scoring
-
-| Aspect | YARA Forge | ClamAV |
-|---|---|---|
-| Metadata source | External `.yar` file parsed at init | Signature name itself (self-contained) |
-| Classification inputs | tc_detection_type, inline tags, category metadata, rule name | Family name overrides, category token |
-| Category count | 7 (includes `apt`, `certificate`) | 6 (no `apt` or `certificate`) |
-| Rule coverage | ~10,561 (extended) | Unlimited (any ClamAV signature) |
-| Certificate handling | Explicit dampening (weight 0) | N/A (ClamAV doesn't scan certs) |
-| PUA handling | N/A | Explicit dampening (suppress `av_hit`, emit `av_pua`) |
-| External file needed | Yes (`yara-rules-extended_20260215.yar`) | No (parsing is self-contained) |
-
-Both systems feed into the same temporal composites (ransomware impact, credential dump collection) and contribute to the same forensic narrative.
+YARA and ClamAV remain separate evidence producers. The shipped YARA policy
+uses external rule metadata and seven categories; the shipped ClamAV policy
+uses the signature grammar and six categories. Their configured category
+signals can support the same later behavioural composites, but neither source
+is treated as a verdict on its own.

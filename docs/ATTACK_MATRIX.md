@@ -17,8 +17,24 @@ The mapping is based on:
 - [chronoSIFT_v2_31.py](../chronoSIFT_v2_31.py)
 - [rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml](../rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml)
 - [weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml](../rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml)
-- [chronosift_yara_category_mapping.md](YARA_ENRICHMENT.md) — YARA Forge category-aware scoring reference
+- [YARA classification reference](YARA_ENRICHMENT.md) — authoritative YARA Forge classification and scoring policy
 - Plaso parser and field availability as documented in the Plaso GitHub repository and wiki
+
+The baseline request judgement is configured under
+`detector_policy.detectors.web_request_classification`: decoded indicators,
+upload semantics and outcomes, SQLi response inference, and direct
+`exploit_public_facing_app` branches are YAML-owned. The later web-evidence
+mappings are configured separately under
+`detector_policy.detectors.referenced_file_correlation.mappings`. Mapping
+output IDs and branch IDs are configuration-local rather than a fixed Python
+set; matching branches execute deterministically in YAML order. The upload to
+execution chain is an independent configured temporal sequence and does not
+depend on `webshell_activity` being enabled. Its `webshell_artifact` precursor
+is also configuration-owned: YAML selects the path/text fields, shared
+web-root and script-extension lists, basename/text/signal support, exclusive
+threshold, emission, and evidence. Python retains path normalisation and
+sparse executor mechanics. The shipped temporal sequences consume that
+configured precursor output.
 
 ## Matrix
 
@@ -40,7 +56,7 @@ The mapping is based on:
 | Persistence | T1546.015 | Component Object Model Hijacking | Yes | Yes | Covered | CLSID InprocServer32 and TreatAs registry modification detection |
 | Persistence | T1543.002 | Systemd Service | Yes | Yes | Covered | Filesystem and command/log semantics for unit management are modeled |
 | Persistence | T1098.004 | SSH Authorized Keys | Yes | Yes | Covered | File create/modify/delete evidence is modeled directly |
-| Persistence | T1505.003 | Web Shell | Partial | Partial | Covered | Requires web-accessible file identity classified as `webshell` by AV or strong YARA evidence, or an existing artefact/activity chain; a generic malicious upload is not sufficient |
+| Persistence | T1505.003 | Web Shell | Partial | Partial | Covered | The scored artefact precursor requires a web-root script plus configured suspicious-name, upload-context, or referenced AV/YARA support. The separate zero-weight T1505.003 mapping remains restricted to web access of a file independently classified as `webshell`; a generic malicious upload is not sufficient. |
 | Privilege Escalation | T1548.001 | Setuid and Setgid | Yes | Yes | Covered | SUID-related command and path heuristics |
 | Privilege Escalation | T1543.003 | Windows Service | Yes | Yes | Covered | Service installation/change may also support escalation narratives |
 | Privilege Escalation | T1055 | Process Injection | No | No | Not realistic | Normally requires volatile memory or detailed endpoint telemetry |
@@ -102,7 +118,7 @@ These are no longer missing breadth items; they are the highest-value areas for 
 
 For dead-box forensics using Plaso-derived data, the Diamond Model elements map approximately as follows:
 
-- `Capability`: strongest coverage; commands, scripts, LOLBins, persistence artefacts, archives, transfer tools, web exploitation traces, and YARA-classified offensive tools/ransomware/webshells are often visible. YARA Forge category-aware scoring (see [chronosift_yara_category_mapping.md](YARA_ENRICHMENT.md)) provides high-confidence capability identification for 10,500+ known malware families and tools. ClamAV category-aware scoring (see [chronosift_clamav_category_mapping.md](CLAMAV_ENRICHMENT.md)) provides complementary malware family identification with PUA dampening across 27 category tokens and 27 known family overrides.
+- `Capability`: strongest coverage; commands, scripts, LOLBins, persistence artefacts, archives, transfer tools, web exploitation traces, and YARA-classified offensive tools/ransomware/webshells are often visible. The pinned July 2026 YARA Forge corpus contains 10,735 classified rules (see [the YARA classification reference](YARA_ENRICHMENT.md)); the shipped ClamAV policy provides complementary malware-family identification with PUA dampening across 27 category tokens and 28 ordered family-substring overrides.
 - `Victim`: strong coverage; local accounts, hosts, sensitive files, web roots, impacted content, and local configuration changes are well represented
 - `Infrastructure`: moderate coverage; IPs, URLs, domains, GeoIP continuity, and remote service endpoints are only available when preserved by artefacts or logs
-- `Adversary`: moderate-weak coverage; dead-box Plaso data supports behaviour clustering and inference. YARA `apt` category signals (181 APT-attributed rules) provide partial attribution when known APT tooling is identified, but strong attribution still requires external intelligence correlation
+- `Adversary`: moderate-weak coverage; dead-box Plaso data supports behaviour clustering and inference. The pinned corpus contains 1,027 rules classified into the YARA `apt` category, providing partial attribution when known APT tooling is identified, but strong attribution still requires external intelligence correlation

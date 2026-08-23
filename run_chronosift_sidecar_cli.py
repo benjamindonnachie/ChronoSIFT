@@ -27,7 +27,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--telemetry-summary-json", default=None, help="Optional path for telemetry summary JSON")
     p.add_argument("--profile-manifest-path", default=None, help="Optional reusable profile manifest path")
     p.add_argument("--file-hit-manifest-path", default=None, help="Optional reusable referenced-file manifest path")
-    p.add_argument("--yara-metadata-path", default=None, help="Optional YARA Forge .yar file used for category metadata")
+    p.add_argument(
+        "--yara-metadata-path",
+        default=None,
+        help="Run-specific override for detector_policy YARA metadata.path",
+    )
     p.add_argument("--geoip-city-db", default=None, help="Optional MaxMind GeoLite2 City .mmdb")
     p.add_argument("--geoip-asn-db", default=None, help="Optional MaxMind GeoLite2 ASN .mmdb")
     p.add_argument("--av-csv-path", default=None, help="Optional hash-keyed ClamAV results CSV")

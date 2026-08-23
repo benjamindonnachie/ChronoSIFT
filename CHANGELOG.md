@@ -2,6 +2,414 @@
 
 This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK expansion and hardening pass.
 
+## Unreleased
+
+- Replaced family-specific quiet-time coefficients with a single
+  dataset-derived out-of-hours event-score amplifier. Candidate hour-of-week
+  profiles must improve held-out logarithmic score over a uniform 168-hour
+  reference under leave-one-complete-calendar-week-out validation; a
+  deterministic whole-week bootstrap must place the configured one-sided
+  confidence bound above zero. Rejected, inconclusive, and legacy unvalidated
+  profiles are neutral.
+- Accepted profiles use a simultaneous bootstrap upper probability band to
+  derive a conservative activity deficit and multiplier in `[1, 2]`. The
+  factor is applied once to the complete post-trust event score before the
+  ordinary score cap, cannot create score from zero, and is recorded with the
+  profile selection, validation statistics, uncertainty bounds, and fallback
+  attempts in reports, telemetry, explanations, and the profile manifest.
+- Added a mandatory strict top-level `canonicalisation` policy for Windows
+  authentication extraction, SSH authentication parsing, pivot-destination
+  identity, and structured-first IP recovery. YAML now owns parser/field
+  selectors, EVTX aliases, placeholders, event-ID outcomes, protocol rules,
+  regexes and capture bindings, output names, source precedence, prefixes, and
+  context gating. The former Python alias/event/regex/source tables and unused
+  row-level IP fallback were removed.
+- Made canonical placeholders, SSH selector composition and per-pattern
+  provenance, excluded IP networks, source-registry subsets, configured output
+  propagation, and lateral-authentication remote participation effective at
+  runtime. File-extension normalisation no longer imposes an undocumented
+  suffix-length judgement.
+- Added mandatory Windows and SSH `output_merge` precedence. The shipped
+  `preserve_existing` policies fill only null, blank, or recognised-placeholder
+  outputs; `prefer_extracted` instead overwrites only with meaningful parsed
+  values.
+- Made Windows protocol truth tables explicit: every protocol declares
+  event-ID/logon-type `any` or `all` matching, the policy selects first or last
+  matching branch, and remote direction declares whether a client address or a
+  classified protocol qualifies it.
+- Made the ClamAV and YARA `categories` mappings dynamic ordered registries.
+  Category addition, removal, reordering, classification, emission, and
+  referenced-file validation now derive from YAML rather than fixed Python
+  category universes.
+- Made `normalisation` a typed ordered schema supporting only `coalesce`,
+  `regex_first`, `ipv4_first`, and `file_extension`. Method-specific keys,
+  unique outputs, regex compilation, and capture groups are validated at
+  startup; unknown methods no longer silently create placeholder columns.
+- Completed the migration of detector judgement into a mandatory top-level
+  `detector_policy` v1. The shipped configuration now contains thirty-five
+  required definitions covering ClamAV, YARA, web-request,
+  canonical-authentication, and execution-context classification,
+  file lifecycle, MFT timestomping, persistence/configuration changes,
+  repeated scheduled execution, direct ATT&CK semantics, referenced-file
+  correlation, web-shell artefact classification, isolated systemd
+  persistence, download-to-execution,
+  masquerading, automated collection,
+  three canonical persistence/transfer projections, webshell activity, the
+  web-upload execution chain, five canonical execution aliases, suspicious
+  execution, ransomware impact, automated exfiltration, credential-dump
+  collection, and the password-store exfiltration chain.
+- Removed the detector-level `merge: max` schema marker. Typed detector
+  emissions remain idempotently maximum-merged as an explicit executor
+  invariant; only ordinary atomic and temporal rules expose selectable merge
+  policy through `rule_signal_merge`.
+- Made residual explanation field selection authoritative. Systemd command,
+  message, hostname, path, and timestamp evidence and temporal impact/count/
+  follow-on row evidence now use validated YAML resolvers. Best-effort path
+  helpers require a configured field list and no longer expose a legacy default.
+- Ordered-row evaluation now records every matching rule even when rules share
+  one max-merged emission. Explain entries retain the canonical emission
+  `rule_id` and add the unique YAML `detector_rule_id`, with idempotent
+  provenance deduplication.
+- Restored explicit SMB share/named-pipe precedence over the fallback type-3
+  network-logon inference. A remote named pipe on a non-admin share no longer
+  acquires `smb_admin_share`; IPC$/ADMIN$ events continue to emit the explicit
+  SMB and remote-service signals. Added an exact regression for both edges.
+- Added mandatory phase-40 `geographic_continuity`, `impossible_travel`, and
+  `ip_scope_continuity` policies. YAML now owns their actor/success inputs,
+  geo/IP fields, lookbacks and thresholds, transition rules, derived outputs,
+  emissions, and evidence. The legacy top-level geo, impossible-travel, and
+  private-IP configuration and the duplicate atomic geo rules were removed.
+- Made geographic continuity history behaviour authoritative: YAML now selects
+  lifetime or bounded retention, all-seen or previous-observation novelty,
+  first-observation output/emission handling, and previous or any-prior country
+  boundary comparison. Carried country, ASN, and city histories are pruned and
+  evaluated according to those choices.
+- Made impossible-travel state advancement authoritative. YAML now selects the
+  retained or immediately previous reference, whether rejected observations
+  advance the retained reference, whether qualifying comparisons advance it,
+  and inclusive or exclusive distance/time/velocity comparisons. The shipped
+  policy retains its reference through too-soon or too-near observations,
+  advances after qualification, and preserves explicit `>=` semantics across
+  partition continuation.
+- Made IP-scope history and transition evaluation authoritative. YAML now owns
+  retained-versus-previous reference selection, state-update timing, lookback
+  duration and open/closed bounds, and ordered `all_matches` or `first_match`
+  transition evaluation. The shipped policy preserves the former behavior:
+  every valid observation advances state, the 24-hour window is closed, and
+  overlapping private-address and subnet-change rules both emit across
+  partition boundaries.
+- Made generic temporal window, anchor, and condition state policy authoritative.
+  Every temporal rule now declares inclusive or exclusive exact-lookback
+  treatment and a genuinely selectable mode-specific emission anchor. Condition
+  rules additionally declare empty-value handling, first-observation behavior,
+  and rolling/selected reference semantics. The shipped policy explicitly
+  preserves inclusive windows, completion/current/match anchors, ignored empty
+  values, suppressed first change observations, and previous-observation change
+  references. Condition state is bounded by the active lookback, so the
+  configured first-observation behavior applies again after all references age
+  out.
+- Added mandatory phase-35 `contextual_signal_adjustments` using the reusable
+  `ordered_signal_adjustments` executor. Discovery reclassification and benign
+  administrative-query/backup dampening now take predicates, guards, targets,
+  zeroing actions, descriptions, confidence, and evidence entirely from YAML;
+  the former detector-specific Python passes were removed.
+- Made atomic rules, temporal rules, conditions, profiling, profile
+  multipliers, trust dampening, config validation, and weights complete strict
+  schemas. Required keys and types no longer fall back to code defaults;
+  unknown keys, stale targets, duplicate ownership, malformed regexes, and
+  missing producer paths fail startup with a configuration path.
+- Replaced permissive YAML loading with a safe duplicate-key-rejecting loader
+  for both rules and weights. Duplicate mapping keys at any depth and
+  non-mapping document roots now fail before policy construction rather than
+  silently applying last-value-wins semantics.
+- Added mandatory `rule_signal_merge.atomic_rules` and `.temporal_rules`
+  choices (`maximum` or `sum`). Scalar, vectorised, fallback, and temporal
+  evaluation now resolve duplicate ordinary-rule emissions through the same
+  YAML-owned policy; the shipped bundle selects `maximum` for both.
+- Asserted the fixed executor schedule for the required persistence,
+  repeated-schedule, direct-semantics, and contextual-adjustment definitions at
+  phases 19, 19, 28, and 35. YAML can describe the actual schedule but cannot
+  claim to reschedule hard-wired orchestration.
+- Canonical authentication now runs once in the atomic stage, so contextual
+  signal adjustments remain effective. Ordered web-shell, systemd, GeoIP,
+  impossible-travel, and IP-scope fallback fields now select the first
+  meaningful configured value per row rather than the first column that exists.
+- Removed the implicit `1.0` cap from generic temporal emissions. Configured
+  positive values are retained and duplicate emissions follow
+  `rule_signal_merge.temporal_rules`; the configured maximum event score
+  remains the final scoring cap.
+- Added mandatory generic-temporal emission anchors. Sequences emit on their
+  completion input, co-occurrences on a current configured input, and value
+  conditions on the matching row, so satisfied windows no longer mark unrelated
+  trailing events. `counted_signal_window.emit_on` now lists explicit current-row
+  roles; the shipped exfiltration policy permits counted or current-support rows.
+- Added mandatory exclusive input-signal thresholds to every generic temporal
+  rule and counted-signal window; the shipped value is zero.
+- Added a mandatory `download_to_execution.key.host_field`. Hostname-scoped
+  download/execution correlation and hostname evidence no longer read a
+  literal Python field name.
+- Moved hour-of-week filters, quiet-quantile membership, output names, optional
+  emission values/merge modes and explanation metadata into
+  `profiling.hour_of_week`, and trust field bindings, selectors, targets,
+  multiplier and explanation metadata into `engine_config.trust_dampening`.
+  Profile emissions now use the ordinary signal map and scorer; the shipped
+  unweighted emissions are disabled to retain sparse scaling, while rarity
+  still drives post-temporal multipliers. Profile multipliers and trust
+  dampening now run after temporal detection and post-temporal projection,
+  fixing previously unreachable geo/temporal targets.
+- Added explicit NSRL exclusion composition for both in-memory and DuckDB
+  profiling, plus trust-selector `any`/`all` composition and configured reason
+  precedence.
+- Replaced the hard-coded NSRL `Operating System` lookup test with
+  `profiling.hour_of_week.exclude_nsrl_application_type_contains`. In-memory
+  and DuckDB-backed enrichment now apply the active engine policy after lookup,
+  write the two configured profiling field names, and cannot leak one engine's
+  classification into another through a cached Parquet view.
+- Made upload query-parameter admission, filename-extension admission mode,
+  multi-value MIME pairing, MIME-mismatch Boolean branches,
+  indicator-to-attempt promotion, and observed/attempt/probable-success outcome
+  ranks mandatory web policy. The shipped suffix mode now requires a proper
+  non-empty suffix rather than merely a dot somewhere in the basename.
+  Referenced-file outcomes separately use a complete configured rank table and
+  maximum-rank merge, preventing later contextual evidence from downgrading an
+  earlier probable-success classification.
+- Added mandatory `geoip_enrichment.outputs` bindings for City geoname ID,
+  city, country, latitude, longitude, and ASN. The unique-IP builder, required-
+  field exclusions, and sidecar projection now use those configured names.
+  Startup cross-validates every geographic-continuity and impossible-travel
+  input against the enrichment schema, so renaming either side cannot silently
+  disable the detector.
+- Added the ordinary `LUHN_SENSITIVE_DATA_HIT` YAML producer for the `luhn_hit`
+  enrichment field. Luhn evidence now reaches `sensitive_data_staged` through
+  the configured temporal sequence instead of remaining a ghost input.
+- Added a central detector registry. Additional IDs may use contextual or atomic
+  signal gates, temporal signal sequences, and contextual or temporal signal
+  projections without detector-specific policy wiring. Ordered-row,
+  ordered-adjustment, and grouped-window implementations are bound to their
+  required baseline IDs and fixed schedule points; additional IDs selecting
+  them are rejected.
+- Moved the five canonical execution aliases and `suspicious_execution` onto
+  required atomic `signal_gate` definitions. Their source sets, thresholds,
+  outputs, rule IDs, descriptions, confidence, enablement, and
+  `matched_signals` provenance now come from YAML; the former Python mapping
+  and execution-family helpers have been removed.
+- Moved `automated_collection` onto a required contextual `signal_gate` with
+  two configuration-owned input groups. YAML now requires sensitive access and
+  one of archiving or repeated scheduled execution without a detector-specific
+  Python branch.
+- Moved canonical authentication onto the mandatory phase-5
+  `canonical_authentication` definition. YAML now owns the six input field
+  bindings, success/failure source signals and outcomes, remote/logon/message/
+  package vocabularies, lateral threshold, all thirteen emission roles and
+  metadata, evidence, and enablement. The legacy
+  `engine_config.canonical_auth_signals` mapping is rejected; Python retains
+  only normalisation, candidate selection, typed semantic evaluation, and
+  sparse emission mechanics.
+- Replaced the remaining canonical-authentication truth table with mandatory
+  YAML fact decisions. Outcome/source composition, conflict resolution,
+  remote and remote-interactive composition, local exclusions, success/failure
+  gates, and all thirteen emission predicates are now executable policy. A
+  mandatory `eligibility` decision now gates candidate rows after conflict
+  resolution; the shipped policy admits either resolved success or failure.
+- Moved execution-context classification onto the mandatory phase-5
+  `execution_context_classifier` definition. YAML now owns the ordered
+  path/command/actor fields, path vocabularies, system-binary, command-family,
+  and privileged-actor names, SUID regex, all ten emission roles and metadata,
+  evidence, and enablement. The former hard-coded Python lookup and emission
+  tables were removed; Python retains coalescing, normalisation, command
+  tokenisation, regex execution, and sparse max merge.
+- Replaced the execution-context emission truth table with mandatory YAML
+  `all`/`any`/`none` fact decisions, including temporary/user-writable overlap,
+  residual suspicious-path suppression, misplaced system binaries, command
+  families, privilege, and SUID handling.
+- Moved file-lifecycle policy onto the mandatory phase-15 `file_lifecycle`
+  definition. YAML now owns all input fields, timestamp-kind precedence and
+  tokens, path/extension/suffix classifications, a mandatory registry of named
+  `all`/`any`/`none` predicates over typed base facts, all eight row-emission
+  truth tables, weight-aware conditions, and all three window definitions. Base
+  and derived facts are reusable across row and window decisions. Window
+  policy includes source or eligible kinds, identity/grouping, OR-of-AND
+  admission clauses, ordering and bounds, threshold comparison, and emission
+  limits as applicable. YAML also owns all eleven emission roles and metadata
+  and per-role evidence. Python retains path/timestamp normalization, fact
+  extraction, keyed bounded-window traversal, weight lookup, and sparse
+  emission mechanics. The five former lifecycle keys under
+  `engine_config.detection_thresholds` are rejected.
+- Moved MFT timestomping policy onto the mandatory phase-18
+  `mft_timestomping` definition. YAML now owns its path/parser/timestamp fields,
+  parser/creation/attribute tokens, minimum delta, path exclusions,
+  parent-directory bulk threshold, emission metadata, and targeted versus bulk
+  explanation descriptions, confidence, and evidence. Python retains MFT
+  filtering, normalized path identity, earliest SI/FN timestamp pairing, delta
+  comparison, parent grouping, branch selection, and sparse max merge.
+- Added reusable contextual `ordered_row_rules` and
+  `grouped_signal_window` executors. Ordered-row policy owns derived inputs,
+  configurable timestamp-kind classification, nested `all`/`any`/`not`/
+  `at_least` predicates, literal/regex/signal leaves, ordered branch metadata,
+  emissions, and direct or regex-captured evidence. Signal leaves require a
+  finite non-negative `minimum_value_exclusive`, removing their former implicit
+  zero boundary. Grouped windows own source
+  signals, normalised host/command keys, message regex/fallback extraction,
+  closed lookback, count threshold, per-key emission cap, and evidence.
+- Moved persistence and configuration judgement onto the mandatory phase-19
+  `persistence_configuration` ordered-row definition. YAML now owns cron,
+  firewall, group-policy, Winlogon, COM-hijack, service, Defender, account, and
+  privileged-membership fields, timestamp taxonomy, tokens/event IDs, ordered
+  predicates, all nine emissions, confidence, and evidence.
+- Moved repeated scheduled execution onto the mandatory phase-19
+  `repeated_scheduled_execution` grouped-window definition. Its scheduled
+  source signals, host/command key, message extraction, ten-minute window,
+  threshold, one-emission-per-key limit, metadata, and evidence now come from
+  YAML.
+- Replaced the non-systemd body of the former direct dead-box loop with the
+  mandatory phase-28 `direct_attack_semantics` ordered-row definition. YAML
+  owns `authorized_keys`, recovery-inhibition, credential, discovery, cleanup,
+  service-stop, SMB/remote-service, alternate-authentication, application-
+  protocol, and account-removal inputs, timestamp taxonomy, literals, regexes,
+  Windows event IDs, source-signal conditions, ordered precedence, all fifteen
+  emissions, confidence, and evidence. Python retains generic vector
+  evaluation and sparse max-merge mechanics only.
+- Isolated `systemd_service_persistence` in its specialised phase-20 executor
+  and moved its timestamp-kind precedence and tokens into YAML. Systemd and
+  web-shell artefact paths/extensions, plus web-upload execution target values,
+  are now declared directly in their owning definitions instead of shared
+  `*_from` registries.
+- Made systemd branch topology authoritative: YAML now owns explicit branch
+  order, first-match versus all-match handling, and OR-of-AND fact clauses for
+  artefact and command activity. The executor evaluates those clauses instead
+  of imposing its former fixed persistent/transient/unit-reference expression.
+- Removed and now reject the shared `engine_config.path_taxonomy`,
+  `detection_vocabulary`, `detection_event_ids`, and `detection_thresholds`
+  rule-logic sections. `engine_config.schema_aliases` and
+  `engine_config.temporal_signal_policy` are config-only as well: omitted
+  aliases or ineligible signals no longer receive Python defaults.
+- Moved canonical persistence and transfer derivation onto the required
+  `canonical_persistence_projection`, `canonical_transfer_projection`, and
+  `canonical_transfer_post_temporal_projection` definitions. Each ordered
+  projection now owns its inputs, `any`/`all` exclusive gate,
+  maximum-matched-input strength propagation, emission metadata, enablement,
+  and matched-signal evidence. Contextual projections run at phase 29 before
+  contextual gates; the post-temporal transfer projection runs at phase 45.
+  Python retains row-local numeric evaluation, max merge, and sparse explain
+  mechanics.
+- Moved ClamAV classification onto the required
+  `clamav_classification`/`clamav_classifier` definition. YAML now owns the
+  default category, 27 category-token mappings, 28 ordered family overrides,
+  generic suppression, all seven emissions, rule metadata, confidence, and
+  evidence; Python retains only signature grammar and executor mechanics.
+- Moved YARA classification onto the required
+  `yara_classification`/`yara_classifier` definition. YAML now owns metadata
+  resource handling, defaults and unindexed behaviour, ordered metadata/name
+  predicates, distinct-rule strength and score scaling, all eight emissions,
+  confidence/evidence, category contribution, and the web/hash referenced-file
+  gate; Python retains only corpus grammar and executor/index mechanics.
+- Moved exact-path, web-path, and upload-hash referenced-file correlation onto
+  the required `referenced_file_correlation` detector at contextual phase 25.
+  YAML now owns its filesystem/web-identity field bindings, document roots,
+  all propagation emissions, ordered web identity branches, and ordered
+  evidence-qualified mapping outputs and branches. These registries accept
+  arbitrary configuration-local IDs; Python retains canonical request/path,
+  hash-index, identity-merge, and sparse execution mechanics.
+- Moved web-shell artefact judgement out of the direct dead-box pass and into
+  the required `webshell_artifact` detector at contextual phase 27, after
+  referenced-file correlation. YAML now owns its path and text fields,
+  web-root and script-extension references, basename/text/signal support,
+  exclusive threshold, emission, evidence, confidence, and enablement. The old
+  `webshell_name_tokens` and `web_upload_tokens` vocabulary keys are rejected;
+  Python retains only path/text normalisation and sparse executor mechanics.
+- Added the required `web_request_classification` detector at atomic phase 5.
+  YAML now owns raw web fields and sidecar aliases, parser tokens, bounded
+  decoding, SQLi/traversal/LFI/RFI/command/probe patterns, upload semantics and
+  outcomes, endpoint response baselines, ordered direct-exploit branches, all
+  four emissions, and explanation metadata. The old Python SQLi table,
+  thresholds, upload verdicts, and direct public-facing exploit pass were
+  removed. Nameless configured upload methods promote an executable request
+  target such as `PUT /shell.aspx` into the normalized upload identity.
+- Made SQLi response inference topology authoritative. YAML now owns baseline
+  grouping and required keys, sample admission, partition-wide versus prior-row
+  scope, optional lookback, median/mean statistic, threshold-term selection and
+  min/max composition, comparison, fallback, and separate fact decisions for
+  attempt, anomaly, and probable-success emissions.
+- Made upload filename and MIME judgement authoritative. YAML now selects
+  non-empty-basename versus non-empty-suffix admission, declares MIME mismatch
+  as `all`/`any`/`none` branches over typed extension/content-type facts, and
+  supplies distinct ranks used by both initial and SQLi-inferred web-outcome
+  selection.
+- Moved `web_upload_execution_chain` onto the generic `signal_sequence`
+  executor. Its source and execution target signals, dead-box scope, ordering,
+  lookback, web-root/combined-text target predicate, emission, and evidence are
+  now YAML-owned and independent of `webshell_activity`.
+- Exposed strict positive-signal admission in the typed authentication, web
+  exploit/mapping, ransomware, artefact-follow-on, download, and generic
+  sequence policies. Each signal-bearing condition or source/support/target
+  role now requires its own non-negative `minimum_signal_value_exclusive`;
+  Python no longer supplies an implicit `> 0` boundary.
+- Moved `ransomware_impact`, `automated_exfiltration`,
+  `credential_dump_collection`, and `password_store_exfil_chain` onto required
+  temporal policy definitions. Their source, support, count, and follow-on
+  signals; closed lookbacks; threshold or branch semantics; artifact fields and
+  label/copy vocabularies; emissions; and evidence now come from YAML.
+  Artefact follow-on qualification is a mandatory configured OR of AND clauses
+  over copy-command, text-support, signal-support, and follow-on-signal facts,
+  so Python no longer fixes that Boolean topology. The
+  `temporal_context_branches`, `counted_signal_window`, and
+  `artifact_follow_on_sequence` executors retain only typed validation,
+  timestamp/window lookup, path/text normalisation, label matching, and sparse
+  emission mechanics. The former temporal-composite threshold keys and
+  Python-owned ransom-note vocabulary are rejected.
+- Added classifier phase 5 before atomic signal gates at phase 10. Web-request,
+  canonical-authentication, and execution-context classification run after
+  ordinary atomic rules and before ClamAV/YARA enrichment; same-phase
+  dependencies are rejected. Later gates, temporal candidate selection,
+  ransomware impact, and credential-dump composites resolve configured
+  classifier output names dynamically.
+  Disabling either malware classifier removes its direct outputs and category
+  support while preserving raw exact-path identity for referenced-file
+  propagation.
+- Advanced referenced-file manifests to schema v6. Manifests retain and union
+  dataset and external-CSV signatures under their respective hit masks, record
+  both classifier-policy digests and an input `source_digest` that fingerprints
+  YARA corpus bytes and the effective parsed metadata index, rebuild when the
+  schema or any digest differs, and reject incompatible direct in-memory reuse.
+  Weak or certificate-only YARA is filtered from SHA-256 upload correlation as
+  well as URL aliases, with qualification and identity tracked per exact hash
+  so reused paths cannot cross-qualify different file versions. AV and Luhn
+  hash tags and AV identity are likewise accumulated at exact-hash scope rather
+  than reconstructed from path-aggregated evidence.
+- Advanced the manifest again to schema v7 with a
+  `correlation_policy_digest`, making field, matching, propagation, web-branch,
+  and mapping changes part of cache compatibility and source fingerprinting.
+  URL aliases and upload basenames that resolve to multiple hit-bearing
+  filesystem paths are now omitted instead of unioning unrelated identities,
+  resolved exact upload hashes take precedence over basename evidence, and
+  access/upload branch explanations retain source-specific identities. Mapping
+  conditions may not depend on same-pass mapping outputs.
+- Made detector-policy phases explicit. Atomic policy outputs may feed later
+  contextual or temporal definitions, while same-phase and backwards
+  dependencies fail startup. File lifecycle runs at phase 15, MFT timestomping
+  at phase 18, persistence and repeated-schedule policy at phase 19, isolated
+  systemd persistence at phase 20, referenced-file correlation at phase 25,
+  web-shell artefact classification at phase 27, direct ATT&CK semantics at
+  phase 28, contextual canonical projections at phase 29, bounded temporal
+  executors at phase 40, and post-temporal projections at phase 45. Downstream
+  candidate selection, dampening, and temporal policy executors resolve
+  configured inputs and outputs from the registry instead of hard-coded signal
+  names.
+- Added strict startup validation for the complete policy, required detector
+  definitions, known keys and types, lowercase signal names, producer
+  availability, executor phase, output ownership, weights, temporal keys, and
+  policy dependency constraints. `enabled: false` now disables a required
+  detector and removes its outputs from the effective emit registries without
+  removing its auditable definition.
+- Candidate selection, required-column projection, temporal-stage entry, and
+  partition-overlap validation are derived from all enabled temporal policy
+  definitions. The obsolete `web_upload_execution_window` threshold is
+  rejected in favour of
+  `detector_policy.detectors.web_upload_execution_chain.lookback`.
+- Added parity, disablement, policy-mutation, generic-extension, execution-order,
+  candidate-window, overlap, and invalid-configuration tests for this migration
+  tranche.
+
 ## 2.31.3 — August 2026
 
 Fixed a crash that aborted an entire dataset when a partition's derived year
@@ -843,7 +1251,7 @@ Parallels the YARA Forge category-aware scoring, applying forensic categorisatio
 
 ### Classification Hierarchy
 
-1. **Family name overrides** (highest priority): 27 known families (Mimikatz, CobaltStrike, Meterpreter, SharpHound, BloodHound, LockBit, Conti, REvil, Ryuk, C99shell, R57shell, Weevely, etc.) override category-based classification
+1. **Family name overrides** (highest priority): 28 known substring patterns (Mimikatz, CobaltStrike, Meterpreter, SharpHound, BloodHound, LockBit, Conti, REvil, Ryuk, C99shell, C99, R57shell, Weevely, etc.) override category-based classification
 2. **Category token mapping**: 27 ClamAV category tokens (Trojan, Backdoor, Ransomware, Exploit, Rootkit, Hacktool, Adware, Coinminer, etc.) mapped to 6 forensic categories
 
 ### Forensic Categories and Weights
@@ -872,9 +1280,9 @@ The parser handles all ClamAV platform prefixes: Win, Linux, Unix, Osx, Php, Htm
 
 ### Changes
 
-- `chronoSIFT_v2_31.py`: Added `parse_clamav_signature()`, `ClamAVSignatureMeta`, `_CLAMAV_CATEGORY_MAP` (27 tokens), `_CLAMAV_FAMILY_OVERRIDES` (27 families), `AV_CATEGORY_SIGNALS`; rewrote `_inject_av_signal_sparse()` for category-aware scoring; wired `av_ransomware` and `av_offensive_tool` into temporal composites
+- `chronoSIFT_v2_31.py`: Added `parse_clamav_signature()`, `ClamAVSignatureMeta`, `_CLAMAV_CATEGORY_MAP` (27 tokens), `_CLAMAV_FAMILY_OVERRIDES` (28 patterns), `AV_CATEGORY_SIGNALS`; rewrote `_inject_av_signal_sparse()` for category-aware scoring; wired `av_ransomware` and `av_offensive_tool` into temporal composites
 - `weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml`: Added `av_offensive_tool: 10`, `av_ransomware: 9`, `av_exploit: 8`, `av_malware: 8`, `av_pua: 2`, `av_webshell: 9`
-- `tests/test_v231_integration.py`: Added `ChronoSiftV231ClamAVCategoryTest` class with 85 tests covering structural parsing, PUA prefix handling, all 27 category tokens, all 27 family overrides, 9 platform variants, and 14 engine integration tests
+- `tests/test_v231_integration.py`: Added `ChronoSiftV231ClamAVCategoryTest` class with 85 tests covering structural parsing, PUA prefix handling, all 27 category tokens, 27 of the 28 family-override patterns, 9 platform variants, and 14 engine integration tests. The standalone `c99` pattern was added to the current 86-test class under Unreleased.
 
 ## City-Level Geo Continuity Signal (March 2026)
 

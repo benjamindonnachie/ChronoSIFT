@@ -121,8 +121,6 @@ weights:
   new_asn: 5
   new_city: 3    # City-level geo continuity — low weight, high noise potential
 
-  hour_rarity: 0
-  quiet_time_event: 0
 
   impossible_travel: 10
 
@@ -198,9 +196,8 @@ weights:
   service_stop: 3
   timestomping: 10
 
-  # YARA Forge category-specific signals.  When a YARA Forge metadata index
-  # is loaded, the engine classifies each YARA match by forensic category
-  # and emits category-specific signals alongside the existing yara_hit_strength.
+  # Default YARA policy outputs. The rules YAML owns their names and emission
+  # semantics; this file owns only their numeric scoring contribution.
   yara_offensive_tool: 10   # Mimikatz, Cobalt Strike, Rubeus, hacktools — confirms compromise
   yara_ransomware: 8        # Ransomware family binary — confirms impact context
   yara_webshell: 9           # Webshell detection — directly actionable
@@ -209,9 +206,8 @@ weights:
   yara_malware: 7            # Generic malware (trojan, backdoor, infostealer)
   yara_certificate_blocklist: 0  # Informational only — revoked cert, not inherently malicious
 
-  # ClamAV category-specific signals.  When av_signature is present, the engine
-  # parses the structured ClamAV name into forensic categories and emits
-  # category-specific signals alongside the existing av_hit.
+  # Default ClamAV policy outputs. The rules YAML owns their names and emission
+  # semantics; this file owns only their numeric scoring contribution.
   av_offensive_tool: 10   # Mimikatz, Cobalt Strike, hacktools — confirms compromise
   av_ransomware: 9        # Ransomware family — confirms impact context
   av_exploit: 8            # Exploit/shellcode payload
