@@ -50,6 +50,7 @@ profiling:
       random_seed: 0
       acceptance: bootstrap_lower_bound_above_zero
       uncertainty_band: simultaneous_bootstrap_upper_probability
+      amplification_gate: require_positive_activity_deficit
     score_amplifier:
       enabled: true
       method: one_plus_conservative_relative_activity_deficit

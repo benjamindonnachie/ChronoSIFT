@@ -360,7 +360,13 @@ non-boundary calendar weeks. For each held-out week, the other weeks fit a
 Laplace-smoothed 168-bin distribution and calculate the held-out mean log-score
 improvement over `validation.reference: uniform_hour_of_week` (`1/168`). A
 deterministic bootstrap resamples whole weeks. The profile is accepted only
-when its configured one-sided lower confidence bound is greater than zero.
+when its configured one-sided lower confidence bound is greater than zero and
+`amplification_gate: require_positive_activity_deficit` is satisfied after
+uncertainty-band construction. The gate requires at least one hour whose upper
+probability bound is below the uniform reference. A predictively non-uniform
+profile that cannot identify any such hour is rejected, allowing the configured
+full-dataset fallback to run rather than retaining an accepted but inert
+amplifier.
 `minimum_complete_weeks`, `confidence_level`, `bootstrap_resamples`, and
 `random_seed` make this inferential contract reproducible rather than silently
 engine-defined.

@@ -282,8 +282,13 @@ are validation blocks. Each week is held out in turn; the remaining weeks fit a
 Laplace-smoothed 168-bin distribution, and mean held-out log-score improvement
 is measured against the uniform `1/168` reference. A deterministic whole-week
 bootstrap must put the configured one-sided lower confidence bound above zero.
-Too few events, too few complete weeks, or a non-positive bound rejects the
-profile; rejection after fallback is neutral and cannot alter scoring.
+The required `amplification_gate` then requires at least one hour whose
+simultaneous upper probability bound lies below the uniform reference. Too few
+events, too few complete weeks, a non-positive log-score bound, or no
+confidently low-activity hour rejects the profile; rejection after fallback is
+neutral and cannot alter scoring. This final gate prevents a statistically
+predictive but operationally inert profile from stopping the configured
+filtered-to-full-dataset fallback.
 
 For an accepted profile, a simultaneous bootstrap upper probability band makes
 the activity deficit conservative:
