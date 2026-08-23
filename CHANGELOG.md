@@ -4,6 +4,13 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Fixed hash-enrichment alignment for timelines with duplicate timestamps.
+  AV and Luhn lookup results now attach through the persistent unique
+  `chronosift_row_id` rather than pandas datetime-index alignment; missing,
+  null, or duplicate row IDs fail explicitly. Regression coverage preserves
+  timestamp ties while proving that enrichment remains attached to the correct
+  event row. The complete current suite passes 420 tests with 8 expected
+  corpus-dependent skips.
 - Reorganised the public README around detection scope, the conceptual pipeline,
   reproducible profiling, operation, and limitations. Exhaustive executor and
   scheduling contracts now remain in the technical references; the README uses
@@ -28,8 +35,7 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
   more run streams and reports the known denominator, engagement count/rate,
   selection modes, validation and non-engagement reasons, week/hour coverage,
   unknown records, and per-image provenance. The sidecar runner uses the same
-  implementation for its automatic single-run summary. The complete current
-  suite now passes 418 tests with 8 expected corpus-dependent skips.
+  implementation for its automatic single-run summary.
 - Changed the shipped insufficient-profile action from `full_dataset` to
   `empty_profile`. A filtered host-resident profile that is too small, invalid,
   inconclusive, or predictively valid but operationally inert now remains
