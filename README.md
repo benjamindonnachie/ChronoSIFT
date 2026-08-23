@@ -256,11 +256,11 @@ supported for local-filesystem installations that do not use uv.
 Run the test suite from the repository root:
 
 ```bash
-uv run python -m unittest discover -s tests -p 'test_v231_*.py' -v
+uv run python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 Tests that require the complete external YARA Forge bundle are skipped when it is not present.
-The current unreleased baseline passes 407 tests, with 8 expected skips when
+The current unreleased baseline passes 413 tests, with 8 expected skips when
 that external corpus is unavailable.
 
 ## Usage
@@ -313,6 +313,35 @@ uv run python run_chronosift_sidecar_cli.py INPUT OUTPUT \
 ```
 
 Use `--help` for output modes, overlap windows, telemetry, manifests, and optional enrichment paths. ChronoSIFT does not run Plaso or scan evidence itself; it consumes timeline fields and hash-indexed enrichment produced by the surrounding forensic pipeline.
+
+### Corpus amplifier telemetry
+
+Each sidecar run writes a `profile_validation` telemetry event and carries the
+same compact record into its reports and `.telemetry.summary.json`. The record
+includes `selection_mode`, `accepted`, `reason`, source and selected event
+counts, `complete_week_count`, `amplifiable_hour_count`,
+`simultaneous_upper_radius`, and the derived `engaged` flag. Engagement means
+that validation was accepted and at least one hour received a factor greater
+than one; it does not mean that every scored event was amplified.
+
+Aggregate one telemetry stream per image after a batch run:
+
+```bash
+uv run python summarize_chronosift_telemetry.py \
+  /path/to/corpus/*.telemetry.jsonl \
+  --json-out /path/to/corpus/amplifier-engagement.summary.json
+```
+
+The resulting `amplifier_engagement` object reports complete and incomplete
+runs, the known corpus denominator, engaged and non-engaged counts, engagement
+rate, selection-mode and validation-reason counts, non-engagement causes,
+complete-week and amplifiable-hour summaries, and an auditable record for every
+input image. Telemetry that lacks a
+completed run, lacks a profile event, or predates `amplifiable_hour_count` is
+reported as unknown and is excluded from the engagement-rate denominator rather
+than being counted as a rejection. Preserve this aggregate with the per-image
+manifests so the reported engagement rate can be traced back to each profile
+decision.
 
 ## Optional enrichment data
 

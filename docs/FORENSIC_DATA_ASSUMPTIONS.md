@@ -114,6 +114,16 @@ Do not combine its results with filtered-profile results. Report
 complete-week count, amplifiable-hour count, and simultaneous radius in every
 results table that uses the factor.
 
+For a multi-image corpus, preserve one telemetry stream per image and generate
+the corpus `amplifier_engagement` summary with
+`summarize_chronosift_telemetry.py`. Report its corpus run count, known
+engagement denominator, engaged count and rate, selection modes, and
+non-engagement reasons. An incomplete run, a missing profile event, or an older
+event without an amplifiable-hour count is an unknown observation, not evidence
+that the factor failed to engage. Retain the aggregate's per-image records and
+profile manifests so every count remains attributable to its selection and
+validation decision.
+
 “Out of hours” means dataset-relative off-peak activity below the uniform
 hour-of-week reference. It is not synonymous with the optional tenth-quantile
 quiet annotation or with a rare event; a regular office-hours profile may
