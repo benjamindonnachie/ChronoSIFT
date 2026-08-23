@@ -340,6 +340,8 @@ producer; enabled profiling emissions must be included because profiling is
 not a temporal-rule input, and a temporal rule that consumes an ineligible
 signal is rejected. The list is config-only.
 
+### Hour-of-week profiling and trust dampening
+
 `profiling.hour_of_week` is a complete typed policy for profile selection,
 smoothing, quiet-hour annotation, the minimum sample floor, predictive
 validation, uncertainty estimation, insufficient-profile behaviour,
@@ -403,6 +405,13 @@ emitted only for a scored event whose factor exceeds one. It records the
 observed and upper-bound probability, uniform reference, deficit, factor, and
 validation statistics. The former `profile_multipliers` list and all
 family-specific `k` coefficients are intentionally unsupported.
+
+The persisted profile manifest exposes whether the method was operationally
+active as well as statistically predictive. Its `validation` object includes
+`amplifiable_hour_count` and `simultaneous_upper_radius`; per-hour
+`probabilities`, `upper_probability_bounds`, `activity_deficits`, and
+`amplifiers` describe the accepted profile. `validation_attempts` preserves
+the filtered-selection outcome when validation falls back to the full dataset.
 
 Here “out of hours” means hours whose conservative dataset-relative activity
 probability lies below the uniform reference. It is an off-peak measure, not a

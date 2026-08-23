@@ -313,8 +313,11 @@ emissions remain disabled;
 quiet-quantile membership is annotation-only and does not gate amplification.
 The dataset manifest records probabilities, simultaneous upper bounds,
 per-hour factors, weekly log-score improvements, bootstrap settings, selection
-and fallback history. Partition reports and JSONL telemetry include a compact
-validation summary; `profile_manifest_path` persists the full manifest.
+and fallback history. Its `validation` object explicitly reports
+`amplifiable_hour_count` and `simultaneous_upper_radius`, while
+`validation_attempts` retains rejected filtered-selection attempts. Partition
+reports and JSONL telemetry include a compact validation summary;
+`profile_manifest_path` persists the full manifest.
 The factor is intentionally conservative and becomes less attenuated as the
 profile's effective event volume increases. It is therefore a within-dataset
 prioritisation factor rather than a directly comparable cross-dataset

@@ -4,6 +4,12 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Refreshed the public README with a standalone account of the data-derived
+  out-of-hours method, exact shipped validation settings, score ordering,
+  manifest provenance, interpretation limits, a documentation index, and the
+  current 404-pass/8-expected-skip verification baseline. The rule-language
+  references now name the manifest fields that distinguish predictive and
+  operationally active profiles.
 - Replaced family-specific quiet-time coefficients with a single
   dataset-derived out-of-hours event-score amplifier. Candidate hour-of-week
   profiles must improve held-out logarithmic score over a uniform 168-hour
