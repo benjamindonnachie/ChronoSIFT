@@ -177,6 +177,53 @@ flowchart LR
 
 **Downstream research — outside this repository.** The sidecar can be joined to the base timeline for analyst review, visualisation, ground-truth evaluation, and later experiments. Within the wider research programme, deterministic behavioural signals may also contribute antigen and danger context to dDCA-based analysis; ChronoSIFT itself remains the explainable behavioural-scoring stage rather than the complete research pipeline.
 
+## Data-derived out-of-hours amplification
+
+ChronoSIFT does not define fixed overnight or weekend periods and no longer
+uses hand-tuned detector-family coefficients. Instead, it estimates a
+dataset-level 168-bin hour-of-week activity distribution and amplifies scored
+events only where the available evidence supports a recurring, confidently
+low-activity period.
+
+The shipped policy first selects host-resident filesystem activity, excluding
+configured NSRL operating-system material and package/update noise. It requires
+at least 100 selected events and falls back to the full dataset when the
+filtered selection is too small or fails validation. Boundary weeks are
+discarded. Each remaining complete calendar week is held out in turn, and a
+Laplace-smoothed profile fitted on the other weeks must improve mean held-out
+logarithmic score over a uniform `1/168` reference. The shipped inferential
+settings require at least three complete weeks and use a deterministic
+2,000-resample whole-week bootstrap (`confidence_level: 0.95`,
+`random_seed: 0`). Startup also requires confidence in `(0.5, 1)`, at least 100
+resamples, and at least five expected resamples in each confidence tail.
+
+Predictive non-uniformity alone is not enough. An accepted profile must also
+have at least one hour whose simultaneous upper probability bound is below the
+uniform reference. For each accepted hour `h`:
+
+```text
+activity_deficit(h) = max(0, 1 - p_upper(h) / (1/168))
+multiplier(h)       = 1 + activity_deficit(h)
+```
+
+The factor is data-derived and bounded to `[1, 2]`. It is applied once to the
+complete weighted event score after trust dampening and before the normal event
+score cap. It does not change individual signal values, compound by signal
+family, reduce in-hours scores, or create a score on an otherwise unscored
+event. A rejected or inconclusive profile is neutral.
+
+The profile manifest records selection and fallback history, per-hour
+probabilities and simultaneous upper bounds, activity deficits and factors,
+weekly validation results, `amplifiable_hour_count`, and
+`simultaneous_upper_radius`. Preserve it with the rules, weights, and input
+provenance for every run. These factors support within-dataset prioritisation:
+they depend on retained event volume, and UTC hour-of-week bins can split local
+habits across daylight-saving transitions. Here “out of hours” means
+dataset-relative off peak and can cover a broad part of the week; it is not a
+rare-event label. See the [statistical method and rule-language
+contract](docs/RULE_LANGUAGE.md#hour-of-week-profiling-and-trust-dampening) and
+[forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md#hour-of-week-time-basis-and-comparability).
+
 ## Installation
 
 ChronoSIFT requires Python 3.11 or newer.
@@ -200,6 +247,8 @@ uv run python -m unittest discover -s tests -p 'test_v231_*.py' -v
 ```
 
 Tests that require the complete external YARA Forge bundle are skipped when it is not present.
+The current unreleased baseline passes 404 tests, with 8 expected skips when
+that external corpus is unavailable.
 
 ## Usage
 
@@ -357,6 +406,17 @@ independently classified web shell that is accessed maps to T1505.003; an
 accepted malicious inbound upload maps to T1105; and probable successful SQLi carrying
 database-enumeration or file-access syntax maps to T1213.006. These mapping
 signals have zero weight to avoid counting the same evidence twice.
+
+## Documentation
+
+- [Rule language and configuration contract](docs/RULE_LANGUAGE.md)
+- [Shipped rules, weights, and optional input schemas](rules/README.md)
+- [Forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Dead-box ATT&CK coverage matrix](docs/ATTACK_MATRIX.md)
+- [YARA enrichment](docs/YARA_ENRICHMENT.md)
+- [ClamAV enrichment](docs/CLAMAV_ENRICHMENT.md)
+- [Changelog](CHANGELOG.md) and [citation metadata](CITATION.cff)
 
 ## Acknowledgements
 
