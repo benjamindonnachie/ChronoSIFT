@@ -4,6 +4,15 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Added corpus-level out-of-hours amplifier engagement telemetry. Each
+  `profile_validation` event and partition report now includes source and
+  selected event counts, amplifiable-hour count, simultaneous radius, and an
+  explicit engagement flag. `summarize_chronosift_telemetry.py` accepts one or
+  more run streams and reports the known denominator, engagement count/rate,
+  selection modes, validation and non-engagement reasons, week/hour coverage,
+  unknown records, and per-image provenance. The sidecar runner uses the same
+  implementation for its automatic single-run summary. The complete current
+  suite passes 413 tests with 8 expected corpus-dependent skips.
 - Changed the shipped insufficient-profile action from `full_dataset` to
   `empty_profile`. A filtered host-resident profile that is too small, invalid,
   inconclusive, or predictively valid but operationally inert now remains
@@ -23,7 +32,7 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 - Refreshed the public README with a standalone account of the data-derived
   out-of-hours method, exact shipped validation settings, score ordering,
   manifest provenance, interpretation limits, a documentation index, and the
-  current 407-pass/8-expected-skip verification baseline. The rule-language
+  then-current 407-pass/8-expected-skip verification baseline. The rule-language
   references now name the manifest fields that distinguish predictive and
   operationally active profiles.
 - Replaced family-specific quiet-time coefficients with a single

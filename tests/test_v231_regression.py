@@ -1628,8 +1628,12 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
                 frame.to_parquet(part / f"part-{row_id:05d}.parquet", engine="pyarrow", index=False)
 
             out_root = pathlib.Path(tmpdir) / "sidecar"
+            telemetry_path = pathlib.Path(tmpdir) / "run.telemetry.jsonl"
             reports = self.engine.process_parquet_dataset_partitioned(
-                str(root), str(out_root), output_mode="sidecar",
+                str(root),
+                str(out_root),
+                output_mode="sidecar",
+                telemetry_jsonl_path=str(telemetry_path),
             )
 
             self.assertTrue(reports, "the run produced no partition reports")
@@ -1641,6 +1645,26 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
                 sorted(int(v) for v in written[MODULE.CHRONOSIFT_ROW_ID_COLUMN]),
                 [0, 1, 2],
                 "every row should reach the sidecar, including the wide-year row",
+            )
+            telemetry_events = [
+                json.loads(line)
+                for line in telemetry_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            profile_event = next(
+                event
+                for event in telemetry_events
+                if event.get("event") == "profile_validation"
+            )
+            self.assertEqual(profile_event["source_event_count"], 3)
+            self.assertEqual(profile_event["selected_event_count"], 3)
+            self.assertEqual(profile_event["complete_week_count"], 0)
+            self.assertEqual(profile_event["amplifiable_hour_count"], 0)
+            self.assertIsNone(profile_event["simultaneous_upper_radius"])
+            self.assertFalse(profile_event["engaged"])
+            self.assertEqual(
+                reports[0]["profile_validation"]["amplifiable_hour_count"],
+                profile_event["amplifiable_hour_count"],
             )
 
     def test_manifest_hash_index_covers_only_hit_carrying_rows(self):

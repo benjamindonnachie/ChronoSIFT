@@ -319,8 +319,17 @@ per-hour factors, weekly log-score improvements, bootstrap settings, selection
 and configured fallback history. Its `validation` object explicitly reports
 `amplifiable_hour_count` and `simultaneous_upper_radius`, while
 `validation_attempts` retains rejected filtered-selection attempts. Partition
-reports and JSONL telemetry include a compact validation summary;
+reports and JSONL telemetry include a compact validation summary with the
+selection mode, acceptance, reason, source and selected event counts, complete
+weeks, amplifiable hours, simultaneous radius, and explicit engagement state;
 `profile_manifest_path` persists the full manifest.
+`summarize_chronosift_telemetry.py` accepts one or more telemetry JSONL paths.
+For a corpus it emits `amplifier_engagement` counts and rates, grouped selection
+modes, validation and non-engagement reasons, descriptive week/hour coverage,
+and one provenance record per image. Missing or older engagement fields remain
+unknown and are not silently added to the engagement-rate denominator;
+incomplete runs are likewise reported separately rather than treated as corpus
+results.
 The factor is intentionally conservative and becomes less attenuated as the
 profile's effective event volume increases. It is therefore a within-dataset
 prioritisation factor rather than a directly comparable cross-dataset

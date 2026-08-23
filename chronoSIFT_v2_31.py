@@ -22723,12 +22723,32 @@ class ChronoSiftEngine:
             profile_validation = dict(
                 (profile_manifest or {}).get("validation", {}) or {}
             )
+            profile_values = dict((profile_manifest or {}).get("profile", {}) or {})
+            amplifiable_hour_count = int(
+                profile_validation.get("amplifiable_hour_count")
+                if profile_validation.get("amplifiable_hour_count") is not None
+                else sum(float(value) > 0.0 for value in profile_values.values())
+            )
             profile_summary = {
                 "selection_mode": (profile_manifest or {}).get("selection_mode"),
                 "accepted": bool(profile_validation.get("accepted", False)),
                 "reason": profile_validation.get("reason"),
+                "source_event_count": int(
+                    (profile_manifest or {}).get("source_event_count", 0) or 0
+                ),
+                "selected_event_count": int(
+                    (profile_manifest or {}).get("selected_event_count", 0) or 0
+                ),
                 "complete_week_count": int(
                     profile_validation.get("complete_week_count", 0) or 0
+                ),
+                "amplifiable_hour_count": amplifiable_hour_count,
+                "simultaneous_upper_radius": profile_validation.get(
+                    "simultaneous_upper_radius"
+                ),
+                "engaged": bool(
+                    profile_validation.get("accepted", False)
+                    and amplifiable_hour_count > 0
                 ),
                 "mean_log_score_improvement": profile_validation.get(
                     "mean_log_score_improvement"
@@ -22739,11 +22759,12 @@ class ChronoSiftEngine:
             }
             logger.info(
                 "Profile validation | selection=%s accepted=%s reason=%s "
-                "complete_weeks=%d lower_bound=%s",
+                "complete_weeks=%d amplifiable_hours=%d lower_bound=%s",
                 profile_summary["selection_mode"],
                 profile_summary["accepted"],
                 profile_summary["reason"],
                 profile_summary["complete_week_count"],
+                profile_summary["amplifiable_hour_count"],
                 profile_summary["lower_confidence_bound"],
             )
             telemetry.emit("profile_validation", **profile_summary)

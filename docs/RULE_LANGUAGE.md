@@ -436,6 +436,18 @@ series. Tables reporting the factor must include `selection_mode`, source and
 selected event counts, validation status/reason, complete-week count,
 `amplifiable_hour_count`, and `simultaneous_upper_radius`.
 
+Partition reports and the JSONL `profile_validation` event expose those fields
+plus `engaged`, which is true only when the profile is accepted and
+`amplifiable_hour_count > 0`. The standalone telemetry summariser accepts
+multiple JSONL paths and produces a corpus-level `amplifier_engagement` object.
+It reports the number and rate of images on which the factor engaged,
+selection-mode and reason counts, non-engagement causes, coverage summaries, and the
+complete per-image records. The engagement-rate denominator includes only
+completed records for which engagement can be determined; incomplete runs,
+missing profile events, and older records without `amplifiable_hour_count` are
+counted separately as unknown. This aggregate should accompany corpus results
+rather than replacing the complete per-image manifests.
+
 Quiet-quantile membership controls only the optional `quiet_time_event`
 annotation and never gates the amplifier. Configured NSRL application-type
 tokens also govern derivation of `nsrl_is_os_component` when the lookup does not
