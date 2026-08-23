@@ -1,6 +1,8 @@
 """
-Regression checks for ChronoSift v2.31 config and backward compatibility.
+Regression checks for the ChronoSift v2.31 runtime and configuration contract.
 """
+from copy import deepcopy
+from dataclasses import replace
 import importlib.util
 import json
 import pathlib
@@ -10,9 +12,11 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import yaml
 
 
-MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "chronoSIFT_v2_31.py"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+MODULE_PATH = ROOT / "chronoSIFT_v2_31.py"
 SPEC = importlib.util.spec_from_file_location("chronosift_v2_31_regression", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
@@ -23,9 +27,24 @@ RULES_PATH = "rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.
 WEIGHTS_PATH = "rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml"
 
 
+def _load_yaml(path):
+    with pathlib.Path(path).open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
 class ChronoSiftV231RegressionTest(unittest.TestCase):
     def setUp(self):
         self.engine = ChronoSiftEngine.from_yaml(RULES_PATH, WEIGHTS_PATH)
+
+    def _configured_engine(self, rules, weights):
+        yara_path = ROOT / rules["detector_policy"]["detectors"][
+            "yara_classification"
+        ]["metadata"]["path"]
+        return ChronoSiftEngine(
+            rules,
+            weights,
+            yara_metadata_path=str(yara_path),
+        )
 
     def _run_referenced_hit_propagation(self, hit_rows, target_rows, hit_manifest=None):
         all_rows = hit_rows + target_rows
@@ -67,6 +86,58 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             "mitre_t1213_006",
         ):
             self.assertIn(signal_name, self.engine.weights)
+
+    def test_luhn_enrichment_field_is_emitted_as_an_atomic_signal(self):
+        timestamp = pd.to_datetime(["2024-06-16T14:00:00Z"], utc=True)
+        frame = pd.DataFrame([{
+            "parser": "filestat",
+            "filename": "/evidence/cards.csv",
+            "sha256_hash": "a" * 64,
+            "luhn_hit": True,
+            "chronosift_row_id": 0,
+        }], index=timestamp)
+
+        atomic = self.engine.apply_atomic(frame, apply_profiling=False)
+        signal_map = atomic.attrs["chronosift_sparse"]["signal_map"]
+
+        self.assertEqual(signal_map[0]["luhn_hit"], 1.0)
+
+    def test_luhn_then_staging_archive_emits_sensitive_data_staged(self):
+        timestamps = pd.to_datetime([
+            "2024-06-16T14:00:00Z",
+            "2024-06-16T14:30:00Z",
+        ], utc=True)
+        frame = pd.DataFrame([
+            {
+                "parser": "filestat",
+                "filename": "/evidence/cards.csv",
+                "timestamp_desc": "Content Modification Time",
+                "actor_principal": "alice",
+                "luhn_hit": True,
+                "chronosift_row_id": 0,
+            },
+            {
+                "parser": "filestat",
+                "filename": "/tmp/stage.zip",
+                "timestamp_desc": "Creation Time",
+                "actor_principal": "alice",
+                "luhn_hit": False,
+                "chronosift_row_id": 1,
+            },
+        ], index=timestamps)
+
+        contextual = self.engine.apply_contextual(
+            self.engine.apply_atomic(frame, apply_profiling=False),
+            apply_profiling=False,
+        )
+        staged_signals = contextual.iloc[1]["chronosift_signals"]
+
+        self.assertGreater(float(staged_signals.get("archive_created", 0.0)), 0.0)
+        self.assertGreater(float(staged_signals.get("staging_archive", 0.0)), 0.0)
+        self.assertGreater(
+            float(staged_signals.get("sensitive_data_staged", 0.0)),
+            0.0,
+        )
 
     def test_legacy_rdp_success_still_works(self):
         ts = pd.to_datetime([pd.Timestamp("2024-06-16T15:00:00Z")], utc=True)
@@ -167,17 +238,21 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
                 "link_target": None,
             },
         ], index=ts)
-        expected = [
-            MODULE._best_effort_file_path_values(
-                row.get("filename"),
-                row.get("relative_path"),
-                row.get("display_name"),
-                row.get("pathspec"),
-                row.get("link_target"),
-            )
-            for _, row in df.iterrows()
-        ]
-        actual = MODULE._best_effort_file_path_vectorised(df).tolist()
+        expected = []
+        for _, row in df.iterrows():
+            normalised = None
+            for field in (
+                "filename", "relative_path", "display_name", "pathspec",
+                "link_target",
+            ):
+                normalised = MODULE._normalise_reference_path(row.get(field))
+                if normalised:
+                    break
+            expected.append(normalised)
+        actual = MODULE._best_effort_file_path_vectorised(
+            df,
+            ("filename", "relative_path", "display_name", "pathspec", "link_target"),
+        ).tolist()
         self.assertEqual(actual, expected)
 
     def test_normalise_yara_match_count_series_matches_scalar_reference(self):
@@ -207,33 +282,36 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         actual = MODULE.normalise_ipv4_first_series(series).tolist()
         self.assertEqual(actual, expected)
 
-    def test_classify_command_name_mentions_detects_multiple_tool_classes(self):
-        compiler, shell, network, archive = MODULE._classify_command_name_mentions(
-            r'bash -lc "tar -czf /tmp/x.tgz /etc && scp /tmp/x.tgz host:/tmp/"'
-        )
-        self.assertEqual((compiler, shell, network, archive), (False, True, True, True))
-
-        compiler, shell, network, archive = MODULE._classify_command_name_mentions(
-            r"gcc -o dropper.exe dropper.c"
-        )
-        self.assertEqual((compiler, shell, network, archive), (True, False, False, False))
-
-    def test_combined_command_text_array_joins_nonempty_parts_once_per_row(self):
+    def test_configured_concat_input_joins_nonempty_parts_once_per_row(self):
         df = pd.DataFrame({
             "actor_cmd": [" powershell ", None, "  "],
             "command_line": ["Get-Process", "cmd.exe /c whoami", ""],
             "message": [" status ", " event only ", "message only"],
         })
-        actual = MODULE._combined_command_text_array(df).tolist()
+        input_policy = self.engine.detector_policy.direct_attack_semantics.inputs[
+            "combined_text"
+        ]
+        actual = self.engine._resolve_row_policy_inputs(
+            df,
+            {"combined_text": input_policy},
+            contextual_cache={},
+        )["combined_text"].tolist()
         self.assertEqual(
             actual,
             [
-                "powershell Get-Process status",
+                "powershell get-process status",
                 "cmd.exe /c whoami event only",
                 "message only",
             ],
         )
-        self.assertEqual(MODULE._combined_command_text_array(df).tolist(), actual)
+        self.assertEqual(
+            self.engine._resolve_row_policy_inputs(
+                df,
+                {"combined_text": input_policy},
+                contextual_cache={},
+            )["combined_text"].tolist(),
+            actual,
+        )
 
     def test_normalise_coalesce_candidate_series_matches_scalar_reference(self):
         series = pd.Series([
@@ -330,18 +408,20 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
 
         self.assertEqual(mode, "nested")
 
-    def test_http_request_semantics_and_upload_name_cached_helpers_preserve_behavior(self):
+    def test_http_request_semantics_and_upload_names_helper_preserves_behavior(self):
         semantics = MODULE._extract_http_request_semantics(
             "cs-method=POST cs-uri-stem=/upload.php cs-uri-query=file=shell.php"
         )
-        upload_name = MODULE._extract_http_upload_name(
+        upload_names = MODULE._extract_http_upload_names(
             "POST /upload.php?file=shell.php HTTP/1.1",
             "/upload.php?file=shell.php",
+            query_parameter_names=frozenset({"file"}),
+            filename_extension_admission="nonempty_suffix",
         )
 
         self.assertEqual(semantics.get("method"), "POST")
         self.assertEqual(semantics.get("path"), "/upload.php?file=shell.php")
-        self.assertEqual(upload_name, "shell.php")
+        self.assertEqual(upload_names, ("shell.php",))
 
     def test_file_lifecycle_signals_support_vectorised_pathspec_coalesce(self):
         ts = pd.to_datetime(["2024-06-16T17:30:00Z"], utc=True)
@@ -395,8 +475,9 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         df = pd.DataFrame([{"pathspec": r"C:\Temp\Payload.EXE"}], index=ts)
         cache = {}
 
-        first = MODULE._contextual_path_lower(df, cache)
-        second = MODULE._contextual_path_lower(df, cache)
+        fields = ("filename", "relative_path", "display_name", "pathspec", "link_target")
+        first = MODULE._contextual_path_lower(df, cache, fields)
+        second = MODULE._contextual_path_lower(df, cache, fields)
 
         self.assertIs(first, second)
         self.assertEqual(first[0], "c:/temp/payload.exe")
@@ -436,34 +517,29 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertEqual(explain_map[0][0]["evidence"]["actor_user"], "root")
 
     def test_private_ip_continuity_uses_normalised_actor_and_ip_fields(self):
-        original_cfg = self.engine.private_ip_continuity_cfg
-        self.engine.private_ip_continuity_cfg = {
-            "enabled": True,
-            "key_by": ["actor_principal"],
-            "lookback": "24h",
-            "subnet_prefix_v4": 24,
-            "subnet_prefix_v6": 64,
-        }
-        try:
-            ts = pd.to_datetime(
-                ["2024-06-16T17:33:00Z", "2024-06-16T17:43:00Z"],
-                utc=True,
-            )
-            df = pd.DataFrame([
-                {"actor_principal": " Alice ", "ip_address": " 10.0.0.5 "},
-                {"actor_principal": "Alice", "ip_address": "10.0.1.8"},
-            ], index=ts)
-            signal_map = {}
-            explain_map = {}
+        ts = pd.to_datetime(
+            ["2024-06-16T17:33:00Z", "2024-06-16T17:43:00Z"],
+            utc=True,
+        )
+        df = pd.DataFrame([
+            {"actor_principal": " Alice ", "ip_address": " 10.0.0.5 "},
+            {"actor_principal": "Alice", "ip_address": "10.0.1.8"},
+        ], index=ts)
+        signal_map = {}
+        explain_map = {}
 
-            self.engine._apply_private_ip_continuity_sparse(df, signal_map, explain_map, carried_last={})
+        self.engine._apply_private_ip_continuity_sparse(
+            df, signal_map, explain_map, carried_last={}
+        )
 
-            self.assertEqual(signal_map[1].get("user_changed_private_ip"), 1.0)
-            self.assertEqual(signal_map[1].get("user_crossed_private_subnet"), 1.0)
-            self.assertEqual(explain_map[1][0]["evidence"]["actor_principal"], "Alice")
-            self.assertEqual(explain_map[1][0]["evidence"]["current_ip"], "10.0.1.8")
-        finally:
-            self.engine.private_ip_continuity_cfg = original_cfg
+        self.assertEqual(signal_map[1].get("user_changed_private_ip"), 1.0)
+        self.assertEqual(signal_map[1].get("user_crossed_private_subnet"), 1.0)
+        self.assertEqual(
+            explain_map[1][0]["evidence"]["actor_principal"], "Alice"
+        )
+        self.assertEqual(
+            explain_map[1][0]["evidence"]["current_ip"], "10.0.1.8"
+        )
 
     def test_geo_continuity_uses_normalised_actor_key_fields(self):
         ts = pd.to_datetime(
@@ -591,6 +667,213 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         sigs = signal_map.get(1, {})
         self.assertGreater(float(sigs.get("referenced_file_av_hit", 0.0)), 0.0)
 
+    def test_referenced_file_emission_metadata_is_config_authoritative(self):
+        rules = _load_yaml(ROOT / RULES_PATH)
+        weights = _load_yaml(ROOT / WEIGHTS_PATH)
+        correlation = rules["detector_policy"]["detectors"][
+            "referenced_file_correlation"
+        ]
+        configured = correlation["emissions"].pop("referenced_av")
+        configured.update({
+            "name": "configured_referenced_av",
+            "value": 0.75,
+            "rule_id": "CONFIGURED_REFERENCED_AV",
+            "description": "Configured AV reference propagation",
+            "confidence": "low",
+        })
+        correlation["emissions"]["configured_av_slot"] = configured
+        correlation["propagation"]["av"]["emission"] = "configured_av_slot"
+        webshell_support = rules["detector_policy"]["detectors"][
+            "webshell_artifact"
+        ]["conditions"]["support"]["signals_any"]
+        webshell_support[webshell_support.index("referenced_file_av_hit")] = (
+            "configured_referenced_av"
+        )
+        temporal_ineligible = rules["engine_config"]["temporal_signal_policy"][
+            "ineligible_signals"
+        ]
+        temporal_ineligible[
+            temporal_ineligible.index("referenced_file_av_hit")
+        ] = "configured_referenced_av"
+        weights["weights"]["configured_referenced_av"] = 9
+        engine = self._configured_engine(rules, weights)
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "filename": "/tmp/payload.exe",
+                    "av_hit": True,
+                    "luhn_hit": False,
+                    "yara_match_count": 0,
+                },
+                {
+                    "filename": "security.evtx",
+                    "command_line": "/tmp/payload.exe --run",
+                },
+            ],
+            index=pd.date_range("2024-06-16T18:00:00Z", periods=2, freq="min"),
+        )
+        signal_map = {}
+        explain_map = {}
+        engine._apply_referenced_file_hit_signals_sparse(
+            frame, signal_map, explain_map
+        )
+
+        self.assertEqual(signal_map[1]["configured_referenced_av"], 0.75)
+        self.assertNotIn("referenced_file_av_hit", signal_map[1])
+        explanation = explain_map[1][0]
+        self.assertEqual(explanation["rule_id"], "CONFIGURED_REFERENCED_AV")
+        self.assertEqual(explanation["confidence"], "low")
+        self.assertEqual(
+            explanation["description"],
+            "Configured AV reference propagation",
+        )
+
+    def test_web_mapping_output_and_materialised_field_names_are_config_authoritative(self):
+        rules = _load_yaml(ROOT / RULES_PATH)
+        weights = _load_yaml(ROOT / WEIGHTS_PATH)
+        correlation = rules["detector_policy"]["detectors"][
+            "referenced_file_correlation"
+        ]
+        web_outputs = rules["detector_policy"]["detectors"][
+            "web_request_classification"
+        ]["outputs"]
+        web_outputs["method"] = "chronosift_configured_method"
+        web_outputs["endpoint"] = "chronosift_configured_endpoint"
+        web_outputs["attack_indicators"] = "chronosift_configured_indicators"
+        mapping_outputs = correlation["mappings"]["outputs"]
+        configured_output = mapping_outputs.pop("t1190")
+        configured_output["attack_technique_id"] = "T4242"
+        configured_output["emission"].update({
+            "name": "configured_t1190",
+            "rule_id": "CONFIGURED_T1190",
+            "description": "Configured public-facing application mapping",
+            "confidence": "high",
+        })
+        mapping_outputs["configured_attack_mapping"] = configured_output
+        mapping_branches = correlation["mappings"]["branches"]
+        for branch in mapping_branches.values():
+            branch["emissions"] = [
+                "configured_attack_mapping" if item == "t1190" else item
+                for item in branch["emissions"]
+            ]
+        configured_branch = mapping_branches.pop("exploit_syntax")
+        configured_branch["conditions"] = {
+            "match": "all",
+            "indicators_any": ["sqli:union_select"],
+        }
+        mapping_branches["configured_exploit_branch"] = configured_branch
+        weights["weights"]["configured_t1190"] = 0
+        engine = self._configured_engine(rules, weights)
+        frame = pd.DataFrame(
+            [{
+                "parser": "text/apache_access",
+                "http_request": (
+                    "GET /vuln/?id=1%27%20UNION%20SELECT%20table_name%20"
+                    "FROM%20information_schema.tables-- HTTP/1.1"
+                ),
+                "http_response_code": 404,
+            }],
+            index=pd.DatetimeIndex([pd.Timestamp("2024-06-16T18:10:00Z")]),
+        )
+
+        atomic = engine.apply_atomic(frame, apply_profiling=False)
+        self.assertEqual(atomic.iloc[0]["chronosift_configured_method"], "GET")
+        self.assertEqual(
+            atomic.iloc[0]["chronosift_configured_endpoint"], "/vuln"
+        )
+        self.assertIn(
+            "sqli:union_select",
+            atomic.iloc[0]["chronosift_configured_indicators"],
+        )
+        contextual = engine.apply_contextual(
+            atomic, apply_temporal=False, apply_profiling=False
+        )
+        signals = contextual.iloc[0]["chronosift_signals"]
+        self.assertEqual(signals.get("configured_t1190"), 1.0)
+        self.assertNotIn("mitre_t1190", signals)
+        self.assertEqual(
+            contextual.iloc[0]["chronosift_attack_techniques"], "T4242"
+        )
+        explanation = next(
+            item
+            for item in contextual.iloc[0]["chronosift_explain"]
+            if item["rule_id"] == "CONFIGURED_T1190"
+        )
+        self.assertEqual(explanation["confidence"], "high")
+        self.assertEqual(explanation["evidence"]["attack_technique_id"], "T4242")
+        self.assertEqual(
+            explanation["description"],
+            "Configured public-facing application mapping",
+        )
+
+    def test_contextual_web_aliases_mirror_the_canonical_sidecar_contract(self):
+        rules = _load_yaml(ROOT / RULES_PATH)
+        weights = _load_yaml(ROOT / WEIGHTS_PATH)
+        web_inputs = rules["detector_policy"]["detectors"][
+            "referenced_file_correlation"
+        ]["inputs"]["web"]
+        configured_fields = {
+            "hit_types": "chronosift_configured_hit_types",
+            "categories": "chronosift_configured_categories",
+            "rules": "chronosift_configured_rules",
+        }
+        web_inputs["feature_fields"].update(configured_fields)
+        web_inputs["attack_techniques"] = "chronosift_configured_techniques"
+        rules["detector_policy"]["detectors"]["web_request_classification"][
+            "outputs"
+        ]["web_outcome"] = "chronosift_configured_outcome"
+        engine = self._configured_engine(rules, weights)
+        manifest = {
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {"/shell.php": {"yara"}},
+            "web_basename_map": {},
+            "web_identity_map": {
+                "/shell.php": {
+                    "hit_types": {"yara"},
+                    "yara_categories": {"webshell"},
+                    "yara_rules": {"strong_shell"},
+                },
+            },
+        }
+        frame = pd.DataFrame(
+            [{
+                "parser": "text/apache_access",
+                "http_request": "GET /shell.php HTTP/1.1",
+                "http_response_code": 200,
+            }],
+            index=pd.DatetimeIndex([pd.Timestamp("2024-06-16T18:20:00Z")]),
+        )
+
+        out = engine.apply_contextual(
+            engine.apply_atomic(frame),
+            apply_temporal=False,
+            file_hit_manifest=manifest,
+        )
+        row = out.iloc[0]
+        self.assertEqual(row["chronosift_web_file_hit_types"], "yara")
+        self.assertEqual(row[configured_fields["hit_types"]], "yara")
+        self.assertEqual(row["chronosift_web_file_categories"], "webshell")
+        self.assertEqual(row[configured_fields["categories"]], "webshell")
+        self.assertEqual(row["chronosift_web_file_rules"], "strong_shell")
+        self.assertEqual(row[configured_fields["rules"]], "strong_shell")
+        self.assertEqual(row["chronosift_web_outcome"], "confirmed_follow_on")
+        self.assertEqual(row["chronosift_configured_outcome"], "confirmed_follow_on")
+        self.assertEqual(row["chronosift_attack_techniques"], "T1505.003")
+        self.assertEqual(row["chronosift_configured_techniques"], "T1505.003")
+
     def test_web_path_canonicalisation_decodes_and_removes_query(self):
         self.assertEqual(
             MODULE._canonical_web_request_path("/exports/credit%20cards.sql?download=1#top"),
@@ -606,14 +889,14 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
 
     def test_strong_yara_gate_uses_score_quality_and_category(self):
         metadata = {
-            "strong_shell": MODULE.YaraRuleMeta(score=90, quality=80, category=MODULE.YARA_CAT_WEBSHELL),
-            "weak_shell": MODULE.YaraRuleMeta(score=60, quality=80, category=MODULE.YARA_CAT_WEBSHELL),
-            "certificate": MODULE.YaraRuleMeta(score=100, quality=100, category=MODULE.YARA_CAT_CERTIFICATE),
+            "strong_shell": MODULE.YaraRuleMeta(score=90, quality=80, category="webshell"),
+            "weak_shell": MODULE.YaraRuleMeta(score=60, quality=80, category="webshell"),
+            "certificate": MODULE.YaraRuleMeta(score=100, quality=100, category="certificate"),
         }
-        cfg = {"web_yara_min_score": 75, "web_yara_min_quality": 70}
-        self.assertTrue(MODULE._web_relevant_yara_rule_names(["strong_shell"], metadata, cfg))
-        self.assertFalse(MODULE._web_relevant_yara_rule_names(["weak_shell"], metadata, cfg))
-        self.assertFalse(MODULE._web_relevant_yara_rule_names(["certificate"], metadata, cfg))
+        policy = self.engine.detector_policy.yara_classification
+        self.assertTrue(MODULE._web_relevant_yara_rule_names(["strong_shell"], metadata, policy))
+        self.assertFalse(MODULE._web_relevant_yara_rule_names(["weak_shell"], metadata, policy))
+        self.assertFalse(MODULE._web_relevant_yara_rule_names(["certificate"], metadata, policy))
 
     def test_manifest_web_aliases_exclude_yara_below_web_gate(self):
         manifest = MODULE._finalise_referenced_file_hit_manifest(
@@ -624,35 +907,209 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             },
             {},
             {"/var/www/html/strong.php"},
-            {"web_document_roots": ["/var/www/html"]},
+            self.engine.detector_policy.referenced_file_correlation,
             {
                 "/var/www/html/strong.php": {
                     "hit_types": {"yara"},
                     "yara_rules": {"strong_shell"},
-                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                    "yara_categories": {"webshell"},
                     "yara_rule_metadata": {
-                        "strong_shell": {"category": MODULE.YARA_CAT_WEBSHELL, "score": 90, "quality": 80},
+                        "strong_shell": {"category": "webshell", "score": 90, "quality": 80},
                     },
                 },
             },
-            {"B" * 64: {"/var/www/html/strong.php"}},
+            {
+                "B" * 64: {"/var/www/html/strong.php"},
+                "C" * 64: {"/var/www/html/routine.php"},
+            },
+            hash_source_hit_map={"B" * 64: {"yara"}, "C" * 64: {"yara"}},
+            hash_source_identity_map={
+                "B" * 64: {"hit_types": {"yara"}},
+                "C" * 64: {"hit_types": {"yara"}},
+            },
+            strong_yara_hashes={"B" * 64},
+            strong_yara_hash_identity_map={
+                "B" * 64: {
+                    "hit_types": {"yara"},
+                    "yara_rules": {"strong_shell"},
+                    "yara_categories": {"webshell"},
+                    "yara_rule_metadata": {
+                        "strong_shell": {
+                            "category": "webshell",
+                            "score": 90,
+                            "quality": 80,
+                        },
+                    },
+                },
+            },
+            clamav_policy_digest="digest-for-test",
+            yara_policy_digest="yara-digest-for-test",
+            source_digest="source-digest-for-test",
         )
-        self.assertEqual(manifest["schema_version"], 4)
+        self.assertEqual(
+            manifest["schema_version"],
+            MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+        )
+        self.assertEqual(manifest["clamav_policy_digest"], "digest-for-test")
+        self.assertEqual(manifest["yara_policy_digest"], "yara-digest-for-test")
+        self.assertEqual(
+            manifest["correlation_policy_digest"],
+            self.engine.detector_policy.referenced_file_correlation.policy_digest,
+        )
+        self.assertEqual(manifest["source_digest"], "source-digest-for-test")
         self.assertEqual(manifest["web_path_map"]["/strong.php"], {"yara"})
         self.assertNotIn("/routine.php", manifest["web_path_map"])
         self.assertEqual(manifest["web_path_map"]["/cards.csv"], {"luhn"})
         identity = manifest["web_identity_map"]["/strong.php"]
-        self.assertEqual(identity["yara_categories"], {MODULE.YARA_CAT_WEBSHELL})
+        self.assertEqual(identity["yara_categories"], {"webshell"})
         self.assertEqual(identity["yara_rule_metadata"]["strong_shell"]["quality"], 80)
         self.assertEqual(manifest["hash_hit_map"]["B" * 64], {"yara"})
-        self.assertEqual(manifest["hash_identity_map"]["B" * 64]["yara_categories"], {MODULE.YARA_CAT_WEBSHELL})
+        self.assertNotIn("C" * 64, manifest["hash_hit_map"])
+        self.assertEqual(manifest["hash_identity_map"]["B" * 64]["yara_categories"], {"webshell"})
         round_trip = MODULE._deserialise_file_hit_manifest(
             MODULE._serialise_file_hit_manifest(manifest)
         )
         self.assertEqual(round_trip, manifest)
 
+    def test_manifest_hash_yara_gate_is_exact_when_a_path_has_multiple_hashes(self):
+        strong_hash = "D" * 64
+        weak_hash = "E" * 64
+        for materialised_count in (False, True):
+            with self.subTest(materialised_count=materialised_count):
+                rows = [
+                    {
+                        "filename": "/var/www/html/shell.php",
+                        "sha256_hash": strong_hash,
+                        "yara_match": '["strong_shell"]',
+                        "av_hit": False,
+                        "luhn_hit": False,
+                        "av_signature": None,
+                    },
+                    {
+                        "filename": "/var/www/html/shell.php",
+                        "sha256_hash": weak_hash,
+                        "yara_match": '["weak_shell"]',
+                        "av_hit": True,
+                        "luhn_hit": True,
+                        "av_signature": "Win.Trojan.Agent-1-0",
+                    },
+                ]
+                if materialised_count:
+                    for row in rows:
+                        row["yara_match_count"] = 1
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = pathlib.Path(tmpdir) / "dataset"
+                    part = root / "year=2024" / "month=6"
+                    part.mkdir(parents=True)
+                    pd.DataFrame(rows).to_parquet(
+                        part / "part-00000.parquet",
+                        index=False,
+                    )
+                    metadata_path = pathlib.Path(tmpdir) / "rules.yar"
+                    metadata_path.write_text(
+                        "// synthetic test provenance\n",
+                        encoding="utf-8",
+                    )
+                    manifest = MODULE.build_global_referenced_file_hit_manifest(
+                        str(root),
+                        referenced_file_policy=(
+                            self.engine.detector_policy.referenced_file_correlation
+                        ),
+                        yara_metadata_index={
+                            "strong_shell": MODULE.YaraRuleMeta(
+                                score=90,
+                                quality=80,
+                                category="webshell",
+                            ),
+                            "weak_shell": MODULE.YaraRuleMeta(
+                                score=60,
+                                quality=80,
+                                category="webshell",
+                            ),
+                        },
+                        yara_metadata_path=str(metadata_path),
+                        clamav_classifier_policy=(
+                            self.engine.detector_policy.clamav_classification
+                        ),
+                        yara_classifier_policy=(
+                            self.engine.detector_policy.yara_classification
+                        ),
+                    )
+
+                self.assertEqual(manifest["hash_hit_map"][strong_hash], {"yara"})
+                self.assertEqual(
+                    manifest["hash_hit_map"][weak_hash],
+                    {"av", "luhn"},
+                )
+                strong_identity = manifest["hash_identity_map"][strong_hash]
+                weak_identity = manifest["hash_identity_map"][weak_hash]
+                self.assertEqual(strong_identity["yara_rules"], {"strong_shell"})
+                self.assertEqual(strong_identity["av_signatures"], set())
+                self.assertEqual(weak_identity["yara_rules"], set())
+                self.assertEqual(
+                    weak_identity["av_signatures"],
+                    {"Win.Trojan.Agent-1-0"},
+                )
+                self.assertEqual(weak_identity["av_categories"], {"malware"})
+
+    def test_manifest_drops_ambiguous_web_alias_and_upload_basename_identity(self):
+        manifest = MODULE._finalise_referenced_file_hit_manifest(
+            {
+                "/var/www/html/shell.php": {"av"},
+                "/srv/www/shell.php": {"yara"},
+                "/var/www/html/unique.bin": {"luhn"},
+                "/var/www/html/a/duplicate.bin": {"av"},
+                "/var/www/html/b/duplicate.bin": {"luhn"},
+            },
+            {},
+            {"/srv/www/shell.php"},
+            self.engine.detector_policy.referenced_file_correlation,
+            {
+                "/var/www/html/shell.php": {
+                    "hit_types": {"av"},
+                    "av_categories": {"malware"},
+                },
+                "/srv/www/shell.php": {
+                    "hit_types": {"yara"},
+                    "yara_categories": {"webshell"},
+                },
+                "/var/www/html/unique.bin": {"hit_types": {"luhn"}},
+                "/var/www/html/a/duplicate.bin": {"hit_types": {"av"}},
+                "/var/www/html/b/duplicate.bin": {"hit_types": {"luhn"}},
+            },
+            {"F" * 64: {"/var/www/html/shell.php"}},
+            hash_source_hit_map={"F" * 64: {"av"}},
+            hash_source_identity_map={"F" * 64: {"hit_types": {"av"}}},
+            strong_yara_hashes=set(),
+            strong_yara_hash_identity_map={},
+            clamav_policy_digest="digest-for-test",
+            yara_policy_digest="yara-digest-for-test",
+            source_digest="source-digest-for-test",
+        )
+
+        self.assertNotIn("/shell.php", manifest["web_path_map"])
+        self.assertNotIn("/shell.php", manifest["web_identity_map"])
+        self.assertNotIn("shell.php", manifest["web_basename_map"])
+        self.assertNotIn("shell.php", manifest["web_basename_identity_map"])
+        self.assertEqual(manifest["web_path_map"]["/unique.bin"], {"luhn"})
+        self.assertEqual(manifest["web_path_map"]["/a/duplicate.bin"], {"av"})
+        self.assertEqual(manifest["web_path_map"]["/b/duplicate.bin"], {"luhn"})
+        self.assertNotIn("duplicate.bin", manifest["web_basename_map"])
+        self.assertEqual(manifest["hash_hit_map"]["F" * 64], {"av"})
+
     def test_successful_web_download_propagates_luhn_file_identity(self):
         manifest = {
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {"/var/www/html/includes/sqldump.sql": {"luhn"}},
             "basename_map": {"sqldump.sql": {"luhn"}},
             "web_path_map": {"/includes/sqldump.sql": {"luhn"}},
@@ -676,6 +1133,17 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
 
     def test_failed_web_download_keeps_access_but_not_success_inference(self):
         manifest = {
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {},
             "basename_map": {},
             "web_path_map": {"/exports/customers.sql": {"luhn"}},
@@ -692,6 +1160,17 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
 
     def test_web_upload_name_propagates_strong_yara_file_identity(self):
         manifest = {
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {},
             "basename_map": {},
             "web_path_map": {"/shell.php": {"yara"}},
@@ -707,6 +1186,111 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertGreater(float(signals.get("referenced_file_yara_hit", 0.0)), 0.0)
         self.assertEqual(signals.get("web_file_access"), 1.0)
         self.assertEqual(signals.get("web_malicious_file_upload"), 1.0)
+
+    def test_access_and_upload_branches_use_source_specific_file_identity(self):
+        manifest = {
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
+            "hit_map": {},
+            "basename_map": {},
+            "web_path_map": {
+                "/download/clean.bin": {"av"},
+                "/download/shell.php": {"yara"},
+            },
+            "web_basename_map": {
+                "shell.php": {"yara"},
+                "report.csv": {"luhn"},
+            },
+            "web_identity_map": {
+                "/download/clean.bin": {
+                    "hit_types": {"av"},
+                    "av_categories": {"malware"},
+                    "av_families": {"Agent"},
+                },
+                "/download/shell.php": {
+                    "hit_types": {"yara"},
+                    "yara_categories": {"webshell"},
+                    "yara_rules": {"access_shell"},
+                },
+            },
+            "web_basename_identity_map": {
+                "shell.php": {
+                    "hit_types": {"yara"},
+                    "yara_categories": {"webshell"},
+                    "yara_rules": {"strong_shell"},
+                },
+                "report.csv": {"hit_types": {"luhn"}},
+            },
+        }
+        frame = pd.DataFrame(
+            [
+                {
+                    "parser": "text/apache_access",
+                    "http_request": (
+                        "POST /download/clean.bin HTTP/1.1 filename=Shell.php"
+                    ),
+                    "http_headers": "Content-Type: multipart/form-data; boundary=x",
+                    "http_content_disposition": 'form-data; filename="Shell.php"',
+                    "http_response_code": 201,
+                },
+                {
+                    "parser": "text/apache_access",
+                    "http_request": (
+                        "POST /download/shell.php HTTP/1.1 filename=report.csv"
+                    ),
+                    "http_headers": "Content-Type: multipart/form-data; boundary=x",
+                    "http_content_disposition": 'form-data; filename="report.csv"',
+                    "http_response_code": 201,
+                },
+            ],
+            index=pd.DatetimeIndex([
+                pd.Timestamp("2024-06-16T21:00:00Z"),
+                pd.Timestamp("2024-06-16T21:01:00Z"),
+            ]),
+        )
+
+        out = self.engine.apply_contextual(
+            self.engine.apply_atomic(frame),
+            apply_temporal=False,
+            file_hit_manifest=manifest,
+        )
+        signals = out.iloc[0]["chronosift_signals"]
+        self.assertEqual(signals.get("web_malicious_file_access"), 1.0)
+        self.assertEqual(signals.get("web_malicious_file_upload"), 1.0)
+        self.assertEqual(signals.get("mitre_t1105"), 1.0)
+        self.assertNotIn("web_confirmed_webshell_access", signals)
+        self.assertNotIn("mitre_t1505_003", signals)
+        self.assertEqual(
+            set(out.iloc[0]["chronosift_web_file_categories"].split("|")),
+            {"malware", "webshell"},
+        )
+        explanations = {
+            item["rule_id"]: item["evidence"]
+            for item in out.iloc[0]["chronosift_explain"]
+        }
+        self.assertEqual(
+            explanations["WEB_MALICIOUS_FILE_ACCESS"]["file_categories"],
+            "malware",
+        )
+        self.assertEqual(
+            explanations["WEB_MALICIOUS_FILE_UPLOAD"]["file_categories"],
+            "webshell",
+        )
+        reverse_signals = out.iloc[1]["chronosift_signals"]
+        self.assertEqual(reverse_signals.get("web_malicious_file_access"), 1.0)
+        self.assertEqual(reverse_signals.get("web_confirmed_webshell_access"), 1.0)
+        self.assertEqual(reverse_signals.get("mitre_t1505_003"), 1.0)
+        self.assertNotIn("web_malicious_file_upload", reverse_signals)
+        self.assertNotIn("mitre_t1105", reverse_signals)
 
     def test_structured_multipart_metadata_materialises_multiple_uploads(self):
         ts = pd.to_datetime(["2024-06-16T21:00:00Z"], utc=True)
@@ -741,15 +1325,32 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         file_hash = "A" * 64
         identity = {
             "hit_types": {"av"},
-            "av_categories": {MODULE.AV_CAT_MALWARE},
+            "av_categories": {"malware"},
             "av_families": {"ExampleFamily"},
         }
         manifest = {
-            "schema_version": 3,
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {},
             "basename_map": {},
             "web_path_map": {},
-            "web_basename_map": {},
+            "web_basename_map": {"payload.bin": {"yara"}},
+            "web_basename_identity_map": {
+                "payload.bin": {
+                    "hit_types": {"yara"},
+                    "yara_categories": {"webshell"},
+                    "yara_rules": {"ambiguous_name_only_shell"},
+                },
+            },
             "hash_hit_map": {file_hash: {"av"}},
             "hash_identity_map": {file_hash: identity},
         }
@@ -758,12 +1359,14 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             {
                 "parser": "text/apache_access",
                 "http_request": "POST /upload.php HTTP/1.1",
+                "http_upload_filename": "payload.bin",
                 "upload_sha256": file_hash.lower(),
                 "http_response_code": 201,
             },
             {
                 "parser": "text/apache_access",
                 "http_request": "POST /upload.php HTTP/1.1",
+                "http_upload_filename": "payload.bin",
                 "upload_sha256": file_hash.lower(),
                 "http_response_code": 403,
             },
@@ -779,8 +1382,19 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertEqual(accepted["chronosift_signals"].get("web_malicious_file_upload"), 1.0)
         self.assertEqual(rejected["chronosift_signals"].get("web_malicious_file_upload"), 1.0)
         self.assertEqual(accepted["chronosift_signals"].get("mitre_t1105"), 1.0)
+        self.assertNotIn("referenced_file_yara_hit", accepted["chronosift_signals"])
         self.assertNotIn("mitre_t1105", rejected["chronosift_signals"])
-        self.assertIn("malware", accepted["chronosift_web_file_categories"])
+        self.assertEqual(accepted["chronosift_web_file_categories"], "malware")
+        self.assertTrue(pd.isna(accepted["chronosift_web_file_rules"]))
+        av_reference = next(
+            item
+            for item in accepted["chronosift_explain"]
+            if item["rule_id"] == "REFERENCED_FILE_AV_HIT"
+        )
+        self.assertEqual(
+            av_reference["evidence"]["referenced_paths"],
+            f"upload-sha256:{file_hash}",
+        )
 
     def test_web_atomic_rules_scope_on_plaso_parser(self):
         ts = pd.to_datetime(["2024-06-16T21:00:00Z"], utc=True)
@@ -798,7 +1412,8 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
 
     def test_sqli_detection_decodes_url_encoded_payloads(self):
         indicators = MODULE._http_sqli_indicators(
-            "/search?id=1%27%20UNION%20ALL%20SELECT%20table_name%20FROM%20information_schema.tables--"
+            "/search?id=1%27%20UNION%20ALL%20SELECT%20table_name%20FROM%20information_schema.tables--",
+            self.engine.detector_policy.web_request_classification.indicators,
         )
         self.assertIn("union_select", indicators)
         self.assertIn("schema_enumeration", indicators)
@@ -821,7 +1436,10 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             "/oauth/callback?code=abc&state=xyz",
         ):
             self.assertEqual(
-                MODULE._http_attack_indicators(request_path),
+                MODULE._http_attack_indicators(
+                    request_path,
+                    self.engine.detector_policy.web_request_classification.indicators,
+                ),
                 tuple(),
                 msg=f"benign request flagged: {request_path}",
             )
@@ -848,7 +1466,10 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         ):
             self.assertIn(
                 expected,
-                MODULE._http_attack_indicators(request_path),
+                MODULE._http_attack_indicators(
+                    request_path,
+                    self.engine.detector_policy.web_request_classification.indicators,
+                ),
                 msg=f"missed {expected} in {request_path}",
             )
 
@@ -1030,12 +1651,21 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             {"/var/www/html/bad.php": {"av"}},
             {},
             set(),
-            {"web_document_roots": ["/var/www/html"]},
+            self.engine.detector_policy.referenced_file_correlation,
             {"/var/www/html/bad.php": {"hit_types": {"av"}}},
             {
                 "A" * 64: {"/var/www/html/bad.php"},
                 "C" * 64: {"/var/www/html/clean.php"},
             },
+            hash_source_hit_map={"A" * 64: {"av"}},
+            hash_source_identity_map={
+                "A" * 64: {"hit_types": {"av"}},
+            },
+            strong_yara_hashes=set(),
+            strong_yara_hash_identity_map={},
+            clamav_policy_digest="digest-for-test",
+            yara_policy_digest="yara-digest-for-test",
+            source_digest="source-digest-for-test",
         )
         self.assertEqual(manifest["hash_hit_map"]["A" * 64], {"av"})
         self.assertNotIn("C" * 64, manifest["hash_hit_map"])
@@ -1131,7 +1761,17 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             },
         ])
         manifest = {
-            "schema_version": 3,
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {},
             "basename_map": {},
             "web_path_map": {"/shell.php": {"av", "yara"}},
@@ -1139,20 +1779,20 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             "web_identity_map": {
                 "/shell.php": {
                     "hit_types": {"av", "yara"},
-                    "av_categories": {MODULE.AV_CAT_WEBSHELL},
+                    "av_categories": {"webshell"},
                     "av_families": {"C99shell"},
-                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                    "yara_categories": {"webshell"},
                     "yara_rules": {"strong_shell"},
                     "yara_rule_metadata": {
-                        "strong_shell": {"category": MODULE.YARA_CAT_WEBSHELL, "score": 90, "quality": 80},
+                        "strong_shell": {"category": "webshell", "score": 90, "quality": 80},
                     },
                 },
             },
             "web_basename_identity_map": {
                 "shell.php": {
                     "hit_types": {"av", "yara"},
-                    "av_categories": {MODULE.AV_CAT_WEBSHELL},
-                    "yara_categories": {MODULE.YARA_CAT_WEBSHELL},
+                    "av_categories": {"webshell"},
+                    "yara_categories": {"webshell"},
                 },
             },
         }
@@ -1180,7 +1820,17 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
     def test_external_sensitive_download_is_not_overmapped_to_exfiltration(self):
         ts = pd.to_datetime(["2024-06-16T21:20:00Z"], utc=True)
         manifest = {
-            "schema_version": 3,
+            "schema_version": MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
+            "clamav_policy_digest": (
+                self.engine.detector_policy.clamav_classification.policy_digest
+            ),
+            "yara_policy_digest": (
+                self.engine.detector_policy.yara_classification.policy_digest
+            ),
+            "correlation_policy_digest": (
+                self.engine.detector_policy.referenced_file_correlation.policy_digest
+            ),
+            "source_digest": "inline-test-fixture",
             "hit_map": {},
             "basename_map": {},
             "web_path_map": {"/exports/cards.sql": {"luhn"}},
@@ -1515,15 +2165,16 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertGreater(float(row1.get("auth_invalid_user", 0.0)), 0.0)
 
     def test_trust_dampening_uses_normalised_actor_ip_and_asn_values(self):
-        original_cfg = self.engine.trust_dampening_cfg
-        self.engine.trust_dampening_cfg = {
-            "enabled": True,
-            "multiplier": 0.5,
-            "trusted_actor_principals": ["admin@example.com"],
-            "trusted_ips": ["10.0.0.9"],
-            "trusted_asns": ["AS64500"],
-            "signals": ["impossible_travel", "new_asn"],
-        }
+        original_policy = self.engine.trust_dampening_policy
+        self.engine.trust_dampening_policy = replace(
+            original_policy,
+            enabled=True,
+            multiplier=0.5,
+            trusted_principals=frozenset({"admin@example.com"}),
+            trusted_ips=frozenset({"10.0.0.9"}),
+            trusted_asns=frozenset({"AS64500"}),
+            signals=frozenset({"impossible_travel", "new_asn"}),
+        )
         try:
             ts = pd.to_datetime(
                 ["2024-06-16T20:20:00Z", "2024-06-16T20:21:00Z", "2024-06-16T20:22:00Z"],
@@ -1548,7 +2199,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             self.assertEqual(float(signal_map[2]["impossible_travel"]), 0.5)
             self.assertEqual(float(signal_map[2]["new_asn"]), 0.5)
         finally:
-            self.engine.trust_dampening_cfg = original_cfg
+            self.engine.trust_dampening_policy = original_policy
 
 
 if __name__ == "__main__":

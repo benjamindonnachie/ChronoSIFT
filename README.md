@@ -8,7 +8,7 @@ The engine is part of a research pipeline tied to the [MITRE ATT&CK framework](h
 
 ## What it detects
 
-ChronoSIFT combines atomic artefact rules, temporal relationships, behavioural continuity, and contextual enrichment. Its configurable YAML rules and weights support behaviours including:
+ChronoSIFT combines atomic artefact rules, typed detector policy, temporal relationships, behavioural continuity, and contextual enrichment. Its configurable YAML rules, detector policy, and weights support behaviours including:
 
 - authentication failures, success-after-failure, account pivots, privileged activity, and newly observed users or IPs through first-seen/change rules;
 - new cities, countries, and autonomous systems (ASNs), network-boundary changes, private/public IP transitions, and impossible travel;
@@ -17,7 +17,119 @@ ChronoSIFT combines atomic artefact rules, temporal relationships, behavioural c
 - YARA, antivirus, Luhn, known-file, and referenced-file enrichment; and
 - direct and composite mappings to ATT&CK techniques that can be evidenced from disk artefacts.
 
-Rules define what constitutes a signal; weights define how strongly each signal contributes to a capped event score. Both are ordinary YAML and are intended to be adjusted for the investigated environment and research question. See [the rule-language reference](docs/RULE_LANGUAGE.md) and the [dead-box ATT&CK matrix](docs/ATTACK_MATRIX.md).
+Rules and detector policy define what constitutes a signal; weights define how strongly each signal contributes to a capped event score. They are ordinary YAML and are intended to be adjusted for the investigated environment and research question. See [the rule-language reference](docs/RULE_LANGUAGE.md) and the [dead-box ATT&CK matrix](docs/ATTACK_MATRIX.md).
+
+The authoritative typed-policy surface contains thirty-five required detectors:
+the ClamAV, YARA, web-request, canonical-authentication, and execution-context
+classifiers; file lifecycle and MFT timestomping; persistence, repeated
+scheduled execution, isolated systemd persistence, and direct ATT&CK
+semantics; referenced-file and web-shell artefact classification; geographic,
+impossible-travel, and IP-scope continuity (including config-owned travel
+reference advancement, IP state updates, window bounds, branch modes, and
+threshold comparisons); ordered contextual signal
+adjustments; three canonical projections; reusable execution and contextual
+gates; and the bounded temporal composites and sequences. The shipped YAML is
+the complete policy for these definitions. Missing or partial definitions fail
+at startup rather than reactivating Python defaults.
+Duplicate YAML mapping keys are rejected at every depth in both rules and
+weights, so an accidental repeated declaration cannot silently override an
+earlier value.
+
+The mandatory top-level `rule_signal_merge` policy also owns collisions between
+ordinary atomic and temporal rule emissions. Each role selects `maximum` or
+`sum`; the shipped policy uses `maximum` for both, and the scalar, vectorised,
+fallback, and temporal evaluators follow the same choice.
+Typed detector definitions do not accept a `merge` key. Their emissions use
+idempotent maximum merge as an executor invariant, so the configuration does
+not advertise a detector-level choice that the runtime cannot honour.
+
+At phase 19, `persistence_configuration` declares ordered file, registry,
+event, and message predicates, while `repeated_scheduled_execution` declares
+its source signals, host/command key extraction, bounded window, threshold,
+emission limit, and evidence. Systemd evaluation remains isolated in its
+specialised phase-20 executor. At phase 28, `direct_attack_semantics` declares
+the ordered `authorized_keys`, recovery-inhibition, credential, discovery,
+cleanup, service-stop, SMB/remote-service, authentication, protocol, and
+account-removal branches. YAML owns their input fields, timestamp-kind
+precedence and tokens, literals, regular expressions, event IDs,
+source-signal conditions, emissions, confidence, and evidence. The generic
+`ordered_row_rules`, `ordered_signal_adjustments`, and
+`grouped_signal_window` executors retain only cached normalisation, expression
+evaluation, grouping/window traversal, and sparse merge mechanics. At phase
+35, `contextual_signal_adjustments` owns discovery reclassification and benign
+admin-query/backup dampening, including every predicate, target, zeroing action,
+and explanation field.
+Ordered-row explain output retains every matching branch, including branches
+that share one max-merged signal; `detector_rule_id` identifies the unique YAML
+rule alongside the canonical emission `rule_id`. Explicit SMB share/named-pipe
+evidence takes precedence over type-3 network-logon inference, preventing a
+non-admin share pipe event from being relabelled `smb_admin_share`.
+Those four required policies are asserted at phases 19, 19, 28, and 35 because
+the executor schedule is fixed; changing their YAML phase values is rejected
+rather than pretending to reschedule them.
+
+The other typed definitions likewise own their classification, correlation,
+projection, bounds, outputs, and explanation policy. Python retains reusable
+mechanics such as canonical parsing, path and timestamp normalisation,
+candidate selection, bounded-window lookup, label intersection, numeric
+coercion, and sparse emission. `webshell_artifact` and
+`systemd_service_persistence` now carry their web-root, service-path, and
+extension values directly instead of resolving shared `*_from` registries.
+Canonical authentication and execution context declare per-emission Boolean
+fact decisions, while systemd declares branch predicates, order, and
+first/all-match handling plus command/message/host/path/timestamp evidence
+resolvers. Temporal impact/count/follow-on policies likewise bind row evidence
+fields in YAML. Every best-effort path use supplies an ordered field list; no
+legacy default list remains. Canonical authentication also declares the Boolean
+eligibility gate evaluated before its thirteen emission decisions. It runs once
+in the atomic stage, so later contextual adjustments are not undone. Ordered fallback fields
+are coalesced per row by first meaningful value rather than by whichever
+column happens to exist in the DataFrame; none of this decision topology is
+embedded in executor branches.
+The former `engine_config.path_taxonomy`, `detection_vocabulary`,
+`detection_event_ids`, and `detection_thresholds` sections are rejected;
+rule values live inside their owning detector. `engine_config.schema_aliases`
+and `engine_config.temporal_signal_policy` are config-only too: omitted entries
+receive no hidden Python defaults. Additional detector IDs may use only the
+reusable `signal_gate`, `signal_sequence`, or `signal_projection` executors.
+The ordered-row, ordered-adjustment, and grouped-window implementations are
+bound to required baseline definitions and fixed schedule points; additional
+IDs selecting them are rejected.
+Generic temporal rules declare exact window and state semantics. Mandatory
+`lookback_lower_bound` selects inclusive or exclusive treatment at the exact
+lookback boundary. Mode-specific `emit_on` anchors can place sequence output on
+its start or completion, co-occurrence output on the active window start or
+current input, and change output on its reference or matching observation.
+Condition rules also own empty-value handling, first-observation behavior, and
+rolling/selected reference behavior within the active lookback. When no
+reference survives that window, first-observation behavior applies again. The
+shipped policy states inclusive, completion/current/match, ignored-empty,
+suppressed-first, previous-reference behavior explicitly. Counted windows separately list the current-row
+roles allowed to receive their emission. Both generic temporal rules and
+counted windows declare a mandatory exclusive input-signal threshold.
+
+Hour-of-week profiling and trust dampening are also strict config-owned
+policies. Their fields, quiet-hour quantile, exclusion composition, mandatory
+signal/value/merge bindings with optional emission flags, output names,
+selector composition/reason precedence, targets, multipliers, and
+explanation metadata have no Python fallback. The shipped profile keeps its
+disabled, unweighted rarity and quiet signals out of sparse state while the dense
+rarity column still drives configured multipliers. Profiling multipliers and
+trust dampening run after temporal detectors and post-temporal projections, so
+configured geo and temporal targets can actually be adjusted.
+Because the shipped multiplier coefficients predate post-temporal application,
+they are an explicit baseline hypothesis rather than a calibrated result.
+Evaluate their sensitivity against downstream window/antigen separation before
+interpreting affected findings; the event-score cap can hide marginal changes.
+
+GeoIP enrichment has a mandatory six-role output mapping in
+`geoip_enrichment.outputs`. The MaxMind lookup uses the canonical IP-recovery
+field, emits the configured City/ASN column names, and retains renamed fields
+in sidecars. Startup requires the geographic-continuity and impossible-travel
+inputs to match those outputs, preventing a schema rename from silently
+disabling continuity logic. Geographic continuity's carried-state retention,
+novelty baseline, first-observation handling, and boundary comparison are also
+explicit detector policy rather than fixed Python decisions.
 
 ## Research context
 
@@ -53,9 +165,9 @@ flowchart LR
 
 2. **Parquet preparation — upstream.** The Plaso timeline is exported as JSONL; the supplied converter streams an XZ-compressed export into year/month-partitioned Parquet and assigns a stable `chronosift_row_id`. The base Parquet dataset is preserved so later sidecars can be joined without rebuilding or duplicating the timeline. ChronoSIFT then processes partitions incrementally with DuckDB/Arrow rather than holding the complete super-timeline in memory.
 
-3. **Normalisation and optional enrichment.** Each partition is normalised into stable fields. Structured values are preferred, aliases are coalesced, placeholder values become semantic nulls, and message parsing is used only when parsers do not expose the required field. Web rows expose typed `chronosift_web_*` features for method, host, decoded query, canonical endpoint, source, status, response size, upload name, content type, attack indicators, file identity, and qualified outcome. Optional YARA Forge metadata, ClamAV results, NSRL known-file data, GeoLite2 City/ASN data, Luhn findings, and hash evidence add context without becoming standalone verdicts.
+3. **Canonicalisation, normalisation, and optional enrichment.** Each partition is materialised into stable fields under the mandatory YAML `canonicalisation` and `normalisation` contracts. Windows/SSH authentication extraction, parsed-output merge precedence, destination identity, IP recovery, parser selectors, event classifications, regexes, aliases, source precedence, and output names are configuration-owned; Python retains reusable XML, regex, IP, and coalescing mechanics. The shipped authentication extractors preserve meaningful existing outputs and fill only null, blank, or recognised-placeholder values. Web rows expose typed `chronosift_web_*` features for method, host, decoded query, canonical endpoint, source, status, response size, upload name, content type, attack indicators, file identity, and qualified outcome. Optional YARA Forge metadata, ClamAV results, NSRL known-file data, GeoLite2 City/ASN data, Luhn findings, and hash evidence add context without becoming standalone verdicts.
 
-4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
+4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. Typed detector-policy executors handle configured atomic classification, contextual gates, and stateful semantics that do not fit the ordinary rule language. YAML owns their configured inputs, detection judgement, and emissions; Python owns validation, normalisation, and reusable executor mechanics. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
 
 5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, profiles activity by hour of week, applies noise dampening, and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
 
@@ -128,7 +240,9 @@ Partition runs omit the score-neutral generic lifecycle payloads by default to
 control whole-partition memory use. Add
 `--retain-zero-weight-lifecycle-signals` only when an export needs those legacy
 `file_created`, `file_modified`, and `file_deleted` entries despite their zero
-weights.
+weights. The mandatory lifecycle policy owns each row-emission truth table and
+each window's kinds, grouping, admission clauses, bounds, thresholds, and
+emission limits; Python supplies the generic keyed traversal.
 
 Rules and weights can be replaced at run time:
 
@@ -144,13 +258,13 @@ Use `--help` for output modes, overlap windows, telemetry, manifests, and option
 
 External databases and generated scan results are intentionally not bundled:
 
-- [YARA Forge](https://github.com/YARAHQ/yara-forge) rule metadata can refine YARA matches into categories such as offensive tooling, ransomware, web shells, APT, exploits, and malware. Supply the downloaded `.yar` file with `--yara-metadata-path`. ChronoSIFT reads additional rule metadata; it does not redistribute the upstream corpus.
-- [ClamAV](https://www.clamav.net/) scan results can be supplied as a hash-keyed CSV with `--av-csv-path`. Signature names are parsed into malware and tooling categories for richer output.
+- [YARA Forge](https://github.com/YARAHQ/yara-forge) rule metadata can refine YARA matches into categories such as offensive tooling, ransomware, web shells, APT, exploits, and malware. The shipped detector policy authoritatively defines classification, scoring, emissions, evidence, and the web/hash qualification gate. Supply the downloaded `.yar` file with `--yara-metadata-path`; ChronoSIFT does not redistribute the upstream corpus.
+- [ClamAV](https://www.clamav.net/) scan results can be supplied as a hash-keyed CSV with `--av-csv-path`. The shipped detector policy authoritatively maps signature names into malware and tooling categories; see the [ClamAV classification reference](docs/CLAMAV_ENRICHMENT.md).
 - The [NIST National Software Reference Library](https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl) (NSRL) can be supplied with `--nsrl-parquet-path` to identify known software and reduce routine operating-system noise. ChronoSIFT does not consume the original NSRL RDS distribution directly: prepare a SHA-256-indexed Parquet lookup first.
-- [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) City and ASN databases can be supplied with `--geoip-city-db` and `--geoip-asn-db` for country, city, ASN, boundary-crossing, novelty, and impossible-travel features.
+- [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) City and ASN databases can be supplied with `--geoip-city-db` and `--geoip-asn-db` for country, city, ASN, boundary-crossing, novelty, and impossible-travel features. Output names and continuity bindings are owned and cross-validated by the rules YAML.
 - Optional Luhn findings can be supplied as a hash-keyed CSV with `--luhn-csv-path`.
 
-See [rules/README.md](rules/README.md) for expected file schemas and [the enrichment documentation](docs/YARA_ENRICHMENT.md) for scoring details. Each external resource remains subject to its own licence and terms.
+See [rules/README.md](rules/README.md) for expected file schemas, the [YARA enrichment reference](docs/YARA_ENRICHMENT.md), and the [ClamAV classification reference](docs/CLAMAV_ENRICHMENT.md) for scoring details. Each external resource remains subject to its own licence and terms.
 
 ## Reproducibility and limitations
 
@@ -158,23 +272,60 @@ ChronoSIFT is a research engine, not a verdict generator. A high score prioritis
 
 The engine records reproducibility metadata and can emit reports, stage telemetry, a profile manifest, and a referenced-file hit manifest. Sidecar mode preserves the base timeline and writes only stable keys plus derived enrichment and scoring columns.
 
-Referenced-file manifest schema v4 also maps configured web document roots to canonical
-URL paths. This lets Apache, nginx, IIS/MS-IIS, and W3C requests inherit Luhn,
-antivirus, or sufficiently strong/category-relevant YARA support from the file
-they access, even when the request is much later than the filesystem event.
+Referenced-file manifest schema v7 maps configured web document roots to
+canonical URL paths. The mandatory `web_request_classification` policy owns
+raw web-field bindings, sidecar aliases, parser tokens, bounded decoding,
+attack patterns, upload semantics, status ranges, SQLi inference, and direct
+exploit emissions. The mandatory `referenced_file_correlation` policy owns its
+filesystem source fields, document roots, propagation emissions, ordered web
+identity branches, and ordered web-evidence/ATT&CK mapping outputs and
+branches. Upload query-key admission, filename-extension admission mode,
+multi-value MIME pairing, MIME-mismatch fact branches, indicator-to-attempt
+promotion, classifier outcome ranks, and referenced-file outcome merging are
+explicit strict policy. Registry IDs are
+configuration-local rather than a fixed Python vocabulary, and empty matching
+lists explicitly disable those paths.
+Python retains canonical path/request parsing, exact-hash lookup, and identity
+merge mechanics. This lets configured web requests inherit Luhn, antivirus, or
+sufficiently strong/category-relevant YARA support from the file they access,
+even when the request is much later than the filesystem event.
 The propagated identity preserves AV signatures, families and categories plus
 YARA rule names, categories, scores and quality, rather than reducing evidence
-to an undifferentiated hit flag.
+to an undifferentiated hit flag. Weak, certificate-only, unindexed, or unnamed
+YARA is retained as raw filesystem evidence but cannot enter the web or
+SHA-256 upload indexes under the shipped gate. The manifest records complete
+ClamAV, YARA, and referenced-file-correlation policy digests plus a source
+digest covering dataset membership/file metadata, enrichment inputs,
+referenced-file settings, YARA metadata file bytes, and the effective parsed
+YARA metadata index.
+Qualification is tracked per SHA-256, so
+different versions that reuse a path cannot exchange AV, Luhn, or YARA upload
+tags or identity, and a strong version cannot qualify a weak version's hash.
+Partitioned runs rebuild it when the schema or any expected digest differs.
 Query strings and fragments do not affect identity matching. Successful
 Luhn-positive GET responses are identified separately from failed or
-status-unknown access, and explicit POST/PUT/PATCH upload filenames can inherit
-strong malware-file support. Where parsers expose structured request metadata,
-ChronoSIFT recovers multiple multipart names (including RFC 5987 `filename*`),
-part MIME types, content length, and SHA-256 values using bounded extraction.
-Hash and basename correlation are applied independently and their evidence is
-combined, so a SHA-256 match contributes file identity even when the recorded
-upload name does not match, and vice versa. Upload outcomes distinguish
-accepted, redirected, rejected, and status-unknown requests.
+status-unknown access. Under the shipped policy, explicit POST/PUT/PATCH upload
+filenames can inherit strong malware-file support. Where parsers expose
+structured request metadata, ChronoSIFT recovers multiple multipart names
+(including RFC 5987 `filename*`), part MIME types, content length, and SHA-256
+values using bounded extraction.
+Hash and basename correlation are attempted independently, but a resolved
+SHA-256 takes precedence over weaker upload-name evidence. URL aliases or
+basenames that resolve to more than one hit-bearing filesystem path are omitted
+rather than merging unrelated identities. Ambiguity is evaluated among
+hit-bearing manifest entries; build manifests per evidence image and configure
+document roots narrowly because clean paths are not inventoried for this check.
+For a multipart event, any resolved upload hash makes the event's hash evidence
+authoritative because the available source fields do not reliably pair every
+name with its hash; unmatched basename-only evidence on that event is therefore
+ignored.
+Upload outcomes distinguish accepted, redirected, rejected, and status-unknown
+requests.
+
+The dataset portion of `source_digest` uses Parquet membership, size, and
+nanosecond modification time rather than hashing the full corpus. Explicitly
+rebuild the manifest after replacing Parquet bytes while preserving those
+metadata values.
 
 Requests that merely test whether a parameter can be broken out of quoting —
 scanner probing such as `?id=2'gejf<'">skpv`, carrying no valid injection
@@ -187,7 +338,10 @@ Web requests are also checked for decoded, high-confidence SQL injection
 syntax. `web_sqli_attempt` records the request evidence. ChronoSIFT emits the
 stronger `web_sqli_probable_success` only when the server returns 2xx and the
 response is substantially larger than successful non-SQLi responses for the
-same host, method and canonical endpoint. Response size alone is never interpreted as SQLi
+configured baseline group (host, method, and canonical endpoint in the shipped
+policy). Baseline sample admission, partition/prior scope, optional horizon,
+median/mean statistic, threshold terms, comparison, and attempt/anomaly/success
+fact decisions are all YAML-owned. Response size alone is never interpreted as SQLi
 success, and redirects or errors remain attempts.
 
 Evidence-qualified ATT&CK labels are emitted separately from scored source

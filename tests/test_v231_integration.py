@@ -4,6 +4,7 @@ Integration tests for ChronoSift v2.31 dead-box ATT&CK additions.
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 import pandas as pd
@@ -18,7 +19,10 @@ ChronoSiftEngine = MODULE.ChronoSiftEngine
 
 RULES_PATH = "rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml"
 WEIGHTS_PATH = "rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml"
-YARA_METADATA_PATH = str(pathlib.Path(__file__).resolve().parents[1] / "rules" / "yara-rules-extended_20260215.yar")
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+_BASE_POLICY_ENGINE = ChronoSiftEngine.from_yaml(RULES_PATH, WEIGHTS_PATH)
+_YARA_TEST_POLICY = _BASE_POLICY_ENGINE.detector_policy.yara_classification
+YARA_METADATA_PATH = str((ROOT / _YARA_TEST_POLICY.metadata_path).resolve())
 
 
 def _build_timeline():
@@ -1497,15 +1501,19 @@ class ChronoSiftV231ATTCKExpansionTest(unittest.TestCase):
 
 # Import YARA-specific helpers from the engine module
 extract_yara_rule_names = MODULE.extract_yara_rule_names
-parse_yara_forge_metadata = MODULE.parse_yara_forge_metadata
-_classify_yara_rule = MODULE._classify_yara_rule
-YARA_CAT_CERTIFICATE = MODULE.YARA_CAT_CERTIFICATE
-YARA_CAT_OFFENSIVE_TOOL = MODULE.YARA_CAT_OFFENSIVE_TOOL
-YARA_CAT_RANSOMWARE = MODULE.YARA_CAT_RANSOMWARE
-YARA_CAT_WEBSHELL = MODULE.YARA_CAT_WEBSHELL
-YARA_CAT_APT = MODULE.YARA_CAT_APT
-YARA_CAT_EXPLOIT = MODULE.YARA_CAT_EXPLOIT
-YARA_CAT_MALWARE = MODULE.YARA_CAT_MALWARE
+def parse_yara_forge_metadata(path):
+    return MODULE.parse_yara_forge_metadata(path, _YARA_TEST_POLICY)
+
+
+def _classify_yara_rule(rule_name, **metadata):
+    return MODULE._classify_yara_rule(rule_name, _YARA_TEST_POLICY, **metadata)
+YARA_CAT_CERTIFICATE = "certificate"
+YARA_CAT_OFFENSIVE_TOOL = "offensive_tool"
+YARA_CAT_RANSOMWARE = "ransomware"
+YARA_CAT_WEBSHELL = "webshell"
+YARA_CAT_APT = "apt"
+YARA_CAT_EXPLOIT = "exploit"
+YARA_CAT_MALWARE = "malware"
 
 
 class ChronoSiftV231YaraCategoryTest(unittest.TestCase):
@@ -1600,6 +1608,38 @@ class ChronoSiftV231YaraCategoryTest(unittest.TestCase):
         ot_count = sum(1 for m in idx.values() if m.category == YARA_CAT_OFFENSIVE_TOOL)
         self.assertGreater(ot_count, 500, "Expected >500 offensive tool rules")
 
+    def test_parse_metadata_uses_policy_for_defaults_bounds_and_categories(self):
+        corpus = """
+rule TEST_Hacktool_Mimikatz {
+  meta:
+    score = "not-an-integer"
+    quality = -12
+  condition:
+    true
+}
+rule TEST_Cert_Blocklist_One : INFO FILE {
+  meta:
+    score = 99
+    quality = 88
+  condition:
+    true
+}
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "mini.yar"
+            path.write_text(corpus, encoding="utf-8")
+            idx = parse_yara_forge_metadata(str(path))
+        self.assertEqual(idx["TEST_Hacktool_Mimikatz"].score, 75)
+        self.assertEqual(idx["TEST_Hacktool_Mimikatz"].quality, 0)
+        self.assertEqual(
+            idx["TEST_Hacktool_Mimikatz"].category,
+            YARA_CAT_OFFENSIVE_TOOL,
+        )
+        self.assertEqual(
+            idx["TEST_Cert_Blocklist_One"].category,
+            YARA_CAT_CERTIFICATE,
+        )
+
     # ── Engine integration (category-aware signal injection) ─────────────
 
     def _build_yara_timeline(self, yara_match_value):
@@ -1677,27 +1717,37 @@ class ChronoSiftV231YaraCategoryTest(unittest.TestCase):
         self.assertGreater(strength, 0)
         self.assertLess(strength, 0.5, "Expected ~0.33*0.75 for 1 non-cert hit")
 
-    def test_engine_no_metadata_legacy_path(self):
-        """Without YARA metadata file, engine falls back to legacy undifferentiated scoring."""
+    def test_engine_missing_metadata_uses_configured_name_only_fallback(self):
+        """Missing metadata retains configured name classification at score zero."""
         engine = ChronoSiftEngine.from_yaml(RULES_PATH, WEIGHTS_PATH, yara_metadata_path=YARA_METADATA_PATH)
         df = self._build_yara_timeline('["SOME_RULE"]')
         out = engine.apply_atomic(df, materialise_event_columns=True)
         signals = out.iloc[0]["chronosift_signals"] or {}
-        # Legacy path: yara_hit_strength > 0, no category signals
-        self.assertGreater(float(signals.get("yara_hit_strength", 0)), 0)
+        self.assertAlmostEqual(float(signals.get("yara_hit_strength", 0)), 0.2)
+        self.assertEqual(float(signals.get("yara_malware", 0)), 1.0)
         self.assertEqual(float(signals.get("yara_offensive_tool", 0)), 0)
 
 
 # ── ClamAV category-aware scoring ────────────────────────────────────────────
 
-parse_clamav_signature = MODULE.parse_clamav_signature
+_CLAMAV_TEST_POLICY = ChronoSiftEngine.from_yaml(
+    RULES_PATH,
+    WEIGHTS_PATH,
+    yara_metadata_path=YARA_METADATA_PATH,
+).detector_policy.clamav_classification
+
+
+def parse_clamav_signature(signature):
+    return MODULE.parse_clamav_signature(signature, _CLAMAV_TEST_POLICY)
+
+
 ClamAVSignatureMeta = MODULE.ClamAVSignatureMeta
-AV_CAT_OFFENSIVE_TOOL = MODULE.AV_CAT_OFFENSIVE_TOOL
-AV_CAT_RANSOMWARE = MODULE.AV_CAT_RANSOMWARE
-AV_CAT_EXPLOIT = MODULE.AV_CAT_EXPLOIT
-AV_CAT_MALWARE = MODULE.AV_CAT_MALWARE
-AV_CAT_PUA = MODULE.AV_CAT_PUA
-AV_CAT_WEBSHELL = MODULE.AV_CAT_WEBSHELL
+AV_CAT_OFFENSIVE_TOOL = "offensive_tool"
+AV_CAT_RANSOMWARE = "ransomware"
+AV_CAT_EXPLOIT = "exploit"
+AV_CAT_MALWARE = "malware"
+AV_CAT_PUA = "pua"
+AV_CAT_WEBSHELL = "webshell"
 
 
 class ChronoSiftV231ClamAVCategoryTest(unittest.TestCase):
@@ -1705,9 +1755,8 @@ class ChronoSiftV231ClamAVCategoryTest(unittest.TestCase):
 
     Covers the full ClamAV naming taxonomy — standard signatures
     (Platform.Category.Family-ID-Rev), PUA prefix forms,
-    Heuristics/bytecode deviations, all 27 category tokens in
-    _CLAMAV_CATEGORY_MAP, all family overrides in
-    _CLAMAV_FAMILY_OVERRIDES, and multi-platform coverage.
+    Heuristics/bytecode deviations, all 27 configured category tokens,
+    all 28 configured family overrides, and multi-platform coverage.
     """
 
     # ── Structural parsing ───────────────────────────────────────────────
@@ -1935,6 +1984,10 @@ class ChronoSiftV231ClamAVCategoryTest(unittest.TestCase):
         meta = parse_clamav_signature("Php.Trojan.C99shell-1234-0")
         self.assertEqual(meta.forensic_category, AV_CAT_WEBSHELL)
 
+    def test_family_override_c99_webshell(self):
+        meta = parse_clamav_signature("Php.Trojan.C99-1234-0")
+        self.assertEqual(meta.forensic_category, AV_CAT_WEBSHELL)
+
     def test_family_override_r57shell_webshell(self):
         meta = parse_clamav_signature("Php.Backdoor.R57shell-1-0")
         self.assertEqual(meta.forensic_category, AV_CAT_WEBSHELL)
@@ -2045,7 +2098,7 @@ class ChronoSiftV231ClamAVCategoryTest(unittest.TestCase):
     # ── Unknown / unrecognised category tokens default to malware ────────
 
     def test_unknown_category_token_defaults_malware(self):
-        """Category tokens not in _CLAMAV_CATEGORY_MAP default to malware."""
+        """Category tokens absent from policy use its configured default."""
         meta = parse_clamav_signature("Win.Fictitious.Agent-1-0")
         self.assertEqual(meta.forensic_category, AV_CAT_MALWARE)
 

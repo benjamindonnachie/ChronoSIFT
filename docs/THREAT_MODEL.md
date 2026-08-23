@@ -1,6 +1,6 @@
 # ChronoSIFT — Threat Model
 
-This document summarises the threat assumptions retained in ChronoSIFT v2.31. The engine combines deterministic behavioural detection with optional YARA, ClamAV, Luhn, NSRL, and GeoLite2 enrichment and referenced-file propagation. For current pipeline scope and limitations, see the public [README](../README.md); for implemented dead-box ATT&CK coverage, see the [ATT&CK matrix](ATTACK_MATRIX.md).
+This document summarises the threat assumptions retained in ChronoSIFT v2.31. The engine combines deterministic behavioural detection with optional YARA, ClamAV, Luhn, NSRL, and GeoLite2 enrichment and configured referenced-file correlation. For current pipeline scope and limitations, see the public [README](../README.md); for implemented dead-box ATT&CK coverage, see the [ATT&CK matrix](ATTACK_MATRIX.md).
 
 ## Purpose
 
@@ -39,12 +39,26 @@ Indicators include:
 -   brute force login attempts
 -   remote access tool execution
 -   anomalous login locations
+-   decoded web exploitation syntax, executable uploads, and qualified SQLi
+    response anomalies
 
 Signals may include:
 
 -   repeated_auth_failures
 -   impossible_travel
 -   suspicious_rdp_activity
+
+Web-request judgement is defined by the mandatory
+`web_request_classification` policy: request fields, decoding, patterns,
+upload outcomes, SQLi thresholds, direct-exploit branches, emissions, and
+evidence are configuration-owned. Attempts remain distinct from probable
+success. Web-shell artefact judgement is separately configuration-owned under
+`webshell_artifact`: YAML selects the path and text fields, web-root and script
+extension references, basename/text/signal support, threshold, emission, and
+evidence. Python retains best-effort path normalisation and sparse execution
+mechanics. The temporal web-shell activity and upload-to-execution sequences
+consume that precursor; the latter additionally requires a web-root or
+web-script execution context within its configured lookback.
 
 ------------------------------------------------------------------------
 

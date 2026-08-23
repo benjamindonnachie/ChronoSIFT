@@ -1,10 +1,50 @@
 profiling:
   hour_of_week:
+    enabled: true
     smoothing_alpha: 1
-    neighbour_smooth: true
-    quiet_threshold: 0.8
-    emit_hour_rarity_signal: true
-    emit_quiet_time_signal: true
+    quiet_quantile: 0.1
+    min_profile_events: 100
+    parser_field: parser
+    filename_field: filename
+    nsrl_is_os_component_field: nsrl_is_os_component
+    nsrl_application_type_field: nsrl_application_type
+    nsrl_exclusion_combine: any_available
+    include_parser_regex: '(?:mft|usnjrnl|filestat)'
+    insufficient_filtered_events: full_dataset
+    exclude_nsrl_application_type_contains:
+    - Operating System
+    exclude_parser_contains:
+    - apt_history
+    - dpkg
+    exclude_filename_contains:
+    - WinSxS
+    - SoftwareDistribution
+    hour_of_week_field: hour_of_week
+    rarity_signal: hour_rarity
+    quiet_signal: quiet_time_event
+    rarity_score_field: chronosift_hour_rarity_score
+    emit_hour_rarity_signal: false
+    emit_quiet_time_signal: false
+    rarity_signal_merge: maximum
+    quiet_signal_value: 1
+    quiet_signal_merge: maximum
+    rarity_explanation:
+      rule_id: HOUR_RARITY
+      description: Dataset activity profile rarity contributed to score
+      confidence: low
+      evidence_type: profiling
+      evidence: [score_column, rarity_column]
+    quiet_explanation:
+      rule_id: QUIET_TIME_EVENT
+      description: Event occurred during a configured quiet profile hour
+      confidence: low
+      evidence_type: profiling
+      evidence: [hour_of_week, quiet_quantile]
+    multiplier_explanation:
+      description: Profile multiplier applied (m = 1 + k * hour_rarity)
+      confidence: medium
+      evidence_type: profiling
+      evidence: [hour_rarity, k, multiplier, signals, targets]
 profile_multipliers:
 - id: QUIET_TIME_PRIV
   applies_to_signals:
@@ -38,22 +78,247 @@ profile_multipliers:
   - cross_border_transfer
   - archive_after_sensitive_access
   k: 0.75
+geoip_enrichment:
+  outputs:
+    city_geoname_id: geo_city_geoname_id
+    city_name: geo_city_name
+    country_iso: geo_country_iso
+    latitude: geo_latitude
+    longitude: geo_longitude
+    asn: geo_asn
+canonicalisation:
+  excluded_networks: [0.0.0.0/32, 127.0.0.0/8, '::/128', '::1/128']
+  windows_authentication:
+    output_merge: preserve_existing
+    selector:
+      parser_field: parser
+      parser_prefixes: [winevt, winevtx]
+      xml_field: xml_string
+    placeholders:
+    - '-'
+    - '::1'
+    - 127.0.0.1
+    - 0.0.0.0
+    - '::'
+    - local
+    - localhost
+    - local machine
+    fields:
+    - id: event_identifier
+      output_field: event_identifier
+      event_data_aliases: [EventID]
+      system_source: event_id
+    - id: logon_type
+      output_field: logon_type
+      event_data_aliases: [LogonType]
+      system_source: none
+    - id: client_address
+      output_field: client_address
+      event_data_aliases: [ClientAddress, ClientIP, IpAddress, RemoteAddress, RemoteIP]
+      system_source: none
+    - id: source_network_address
+      output_field: source_network_address
+      event_data_aliases: [SourceNetworkAddress, NetworkAddress, SourceIP, SrcIP, PeerAddress]
+      system_source: none
+    - id: workstation_name
+      output_field: workstation_name
+      event_data_aliases: [WorkstationName, Workstation]
+      system_source: none
+    - id: authentication_package
+      output_field: authentication_package
+      event_data_aliases: [AuthenticationPackageName, AuthenticationPackage]
+      system_source: none
+    - id: logon_process
+      output_field: logon_process
+      event_data_aliases: [LogonProcessName, LogonProcess]
+      system_source: none
+    - id: provider_name
+      output_field: provider_name
+      event_data_aliases: [ProviderName]
+      system_source: provider
+    - id: event_channel
+      output_field: event_channel
+      event_data_aliases: [Channel]
+      system_source: channel
+    - id: target_user_name
+      output_field: target_user_name
+      event_data_aliases: [TargetUserName]
+      system_source: none
+    - id: target_domain_name
+      output_field: target_domain_name
+      event_data_aliases: [TargetDomainName]
+      system_source: none
+    - id: subject_user_name
+      output_field: subject_user_name
+      event_data_aliases: [SubjectUserName]
+      system_source: none
+    - id: subject_domain_name
+      output_field: subject_domain_name
+      event_data_aliases: [SubjectDomainName]
+      system_source: none
+    - id: group_name
+      output_field: group_name
+      event_data_aliases: [GroupName]
+      system_source: none
+    - id: member_name
+      output_field: member_name
+      event_data_aliases: [MemberName, Member]
+      system_source: none
+    - id: share_name
+      output_field: share_name
+      event_data_aliases: [ShareName]
+      system_source: none
+    - id: share_local_path
+      output_field: share_local_path
+      event_data_aliases: [ShareLocalPath]
+      system_source: none
+    - id: relative_target_name
+      output_field: relative_target_name
+      event_data_aliases: [RelativeTargetName, RelativePathName]
+      system_source: none
+    - id: rdp_session_name
+      output_field: rdp_session_name
+      event_data_aliases: [SessionName]
+      system_source: none
+    - id: logon_id
+      output_field: logon_id
+      event_data_aliases: [TargetLogonId, LogonId, LogonGuid]
+      system_source: none
+    - id: session_id
+      output_field: session_id
+      event_data_aliases: [SessionId, SessionIdentifier]
+      system_source: none
+    - id: new_process_name
+      output_field: new_process_name
+      event_data_aliases: [NewProcessName]
+      system_source: none
+    - id: parent_process_name
+      output_field: parent_process_name
+      event_data_aliases: [ParentProcessName, ParentImage, CreatorProcessName]
+      system_source: none
+    - id: command_line
+      output_field: command_line
+      event_data_aliases: [CommandLine, ProcessCommandLine]
+      system_source: none
+    - id: parent_command_line
+      output_field: parent_command_line
+      event_data_aliases: [ParentCommandLine]
+      system_source: none
+    client_address:
+      source_field_ids: [client_address, source_network_address]
+      output_field: rdp_client_address
+      source_ip_output_field: src_ip
+    classifications:
+      event_identifier_field_id: event_identifier
+      logon_type_field_id: logon_type
+      outcome_output_field: auth_outcome
+      outcomes:
+      - event_ids: ['4624', '1149', '4778']
+        value: success
+      - event_ids: ['4625', '4779']
+        value: failure
+      direction_output_field: auth_direction
+      remote_direction_value: remote
+      remote_direction_condition: client_address_present
+      protocol_output_field: auth_protocol
+      protocol_branch_mode: first_match
+      protocols:
+      - event_ids: ['1149']
+        logon_types: []
+        match: any
+        require_client_address: false
+        value: rdp
+      - event_ids: []
+        logon_types: ['10']
+        match: any
+        require_client_address: false
+        value: rdp
+      - event_ids: []
+        logon_types: ['3']
+        match: any
+        require_client_address: true
+        value: windows-network
+    null_output_fields: [dst_ip]
+  ssh_authentication:
+    output_merge: preserve_existing
+    selector:
+      parser_field: parser
+      parser_values: [systemd_journal, syslog, text/syslog_traditional]
+      message_field: message
+      message_regex: '(?i)\bsshd\b'
+      match: any
+    escaped_control_regex: '(?i)(?:\\r|\\n|\\t)+'
+    outputs:
+      actor_user_auth: ssh_actor_user_auth
+      actor_user_session: ssh_actor_user_session
+      auth_method: ssh_auth_method
+      source_ip: src_ip
+      destination_ip: dst_ip
+      protocol: auth_protocol
+      direction: auth_direction
+      outcome: auth_outcome
+      session_id: session_id
+      logon_id: logon_id
+    values:
+      protocol: ssh
+      direction: remote
+      success_outcome: success
+      failure_outcome: failure
+    patterns:
+    - id: accepted
+      regex: '(?i)\baccepted\s+([a-z0-9_-]+(?:/[a-z0-9_-]+)?)\s+for\s+([A-Za-z0-9._$@-]+)\s+from\s+([0-9A-Fa-f:.]+)'
+      outcome: success
+      groups: {auth_method: 1, actor_user_auth: 2, source_ip: 3}
+      require_message_selector: false
+    - id: failed
+      regex: '(?i)\bfailed\s+([a-z0-9_-]+(?:/[a-z0-9_-]+)?)\s+for(?:\s+invalid\s+user)?\s+([A-Za-z0-9._$@-]+)\s+from\s+([0-9A-Fa-f:.]+)'
+      outcome: failure
+      groups: {auth_method: 1, actor_user_auth: 2, source_ip: 3}
+      require_message_selector: false
+    - id: invalid_user
+      regex: '(?i)\binvalid user\s+([A-Za-z0-9._$@-]+)\s+from\s+([0-9A-Fa-f:.]+)'
+      outcome: failure
+      groups: {actor_user_auth: 1, source_ip: 2}
+      require_message_selector: false
+    - id: session_opened
+      regex: '(?i)\bsession opened for user\s+([A-Za-z0-9._$@-]+)\b'
+      outcome: success
+      groups: {actor_user_session: 1}
+      require_message_selector: true
+  pivot_destination:
+    outputs:
+      identity: pivot_dest_key
+      ip: destination_ip
+      fqdn: destination_fqdn
+      hostname: destination_hostname
+    sources:
+      ip: [destination_ip, dst_ip, dest_ip, server_ip, target_ip]
+      fqdn: [destination_fqdn, dest_fqdn, target_fqdn, fqdn, server_name, dns_name]
+      hostname: [destination_hostname, dest_hostname, target_hostname, hostname, host_name, computer_name, workstation_name]
+    precedence:
+    - {role: ip, prefix: 'ip:'}
+    - {role: fqdn, prefix: 'fqdn:'}
+    - {role: hostname, prefix: 'host:'}
+    auth_like_any_fields: [auth_protocol, auth_direction, event_identifier, logon_type]
+  ip_recovery:
+    output_field: ip_address
+    parser_field: parser
+    windows_parser_prefixes: [winevt, winevtx]
+    context_regex: '(?i)(?:ftp://|sftp://|scp://|http://|https://|smb://|cifs://|rdp://|ssh://|\bhost\s*:|\bclient\b|\bremote\b|\bfrom\b|\bto\b|\bsrc\b|\bdst\b|\bconnect(?:ed)?\b|\blogon\b|\bauth\b)'
+    sources:
+    - kind: windows_fields
+      fields: [rdp_client_address, client_address, source_network_address]
+    - kind: windows_xml
+      fields: [xml_string]
+    - kind: windows_strings
+      fields: [strings]
+    - kind: text_fields
+      fields: [url, http_request, http_headers, http_request_referer, http_request_user_agent]
+      require_context: false
+    - kind: text_fields
+      fields: [message, text]
+      require_context: true
 normalisation:
-- name: ssh_actor_user_auth
-  from: message
-  method: regex_first
-  pattern: (?i)\b(?:accepted|failed)\s+\S+(?:\s+for(?:\s+invalid\s+user)?)\s+([A-Za-z0-9._$@-]+)\b
-  group: 1
-- name: ssh_actor_user_session
-  from: message
-  method: regex_first
-  pattern: (?i)\bsession opened for user\s+([A-Za-z0-9._$@-]+)\b
-  group: 1
-- name: ssh_auth_method
-  from: message
-  method: regex_first
-  pattern: (?i)\b(?:accepted|failed)\s+([a-z0-9_-]+(?:/[a-z0-9_-]+)?)\b
-  group: 1
 - name: actor_user
   method: coalesce
   fields:
@@ -202,6 +467,9 @@ normalisation:
 - name: file_ext
   from: filename
   method: file_extension
+rule_signal_merge:
+  atomic_rules: maximum
+  temporal_rules: maximum
 rules:
 - id: CRON_EXEC_LINUX
   description: Cron or scheduled command execution observed
@@ -1221,68 +1489,26 @@ rules:
     - field: http_request_user_agent
     - field: message
   confidence: medium
-- id: NEW_COUNTRY
-  description: Country change flag present (requires geo enrichment pre-step)
-  priority: 50
+- id: LUHN_SENSITIVE_DATA_HIT
+  description: Luhn enrichment identifies sensitive numeric data in the current artefact
+  priority: 60
   scope:
     any: []
     all: []
   when:
-    any:
-    - field: geo_new_country
-      op: eq
-      value: true
-    all: []
-  emit:
-    signals:
-    - name: new_country
-      value: 1
-    evidence:
-    - field: geo_country
-    - field: actor_ip_final
-  confidence: high
-- id: NEW_ASN
-  description: ASN change flag present (requires geo enrichment pre-step)
-  priority: 50
-  scope:
     any: []
-    all: []
-  when:
-    any:
-    - field: geo_new_asn
+    all:
+    - field: luhn_hit
       op: eq
       value: true
-    all: []
   emit:
     signals:
-    - name: new_asn
+    - name: luhn_hit
       value: 1
     evidence:
-    - field: geo_asn
-    - field: actor_ip_final
-  confidence: high
-- id: BOUNDARY_CROSSING
-  description: Boundary crossing flag present (requires geo enrichment pre-step)
-  priority: 55
-  scope:
-    any: []
-    all: []
-  when:
-    any:
-    - field: geo_boundary_crossing
-      op: eq
-      value: true
-    all: []
-  emit:
-    signals:
-    - name: boundary_crossing
-      value: 1
-    evidence:
-    - field: actor_ip_final
-    - field: geo_country
-    - field: geo_asn
-  confidence: high
-
+    - field: filename
+    - field: sha256_hash
+  confidence: medium
 # --- Plaso artifact presence rules (v2.30 gap closure) ---
 
 - id: PREFETCH_EXECUTION
@@ -1400,6 +1626,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: auth_remote_failure
     min_count: 3
@@ -1416,6 +1645,9 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: auth_remote_failure
     min_count: 3
@@ -1432,6 +1664,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: auth_local_failure
     min_count: 1
@@ -1448,6 +1683,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 2h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: luhn_hit
     min_count: 1
@@ -1464,6 +1702,9 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 2h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: luhn_hit
     min_count: 1
@@ -1480,6 +1721,9 @@ temporal_rules:
   key_by:
   - hostname
   lookback: 2h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: sensitive_file_access
     min_count: 1
@@ -1496,6 +1740,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: staging_archive
     min_count: 1
@@ -1512,6 +1759,9 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: staging_archive
     min_count: 1
@@ -1528,6 +1778,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: staging_archive
     min_count: 1
@@ -1544,6 +1797,9 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: staging_archive
     min_count: 1
@@ -1560,6 +1816,9 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: current_input
+  minimum_signal_value_exclusive: 0
   cooccur:
     all:
     - signal: transfer_execution
@@ -1577,6 +1836,9 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: current_input
+  minimum_signal_value_exclusive: 0
   cooccur:
     all:
     - signal: transfer_execution
@@ -1595,6 +1857,9 @@ temporal_rules:
   - hostname
   - actor_principal
   lookback: 2h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: exec_compiler_activity
     min_count: 1
@@ -1612,6 +1877,9 @@ temporal_rules:
   - hostname
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
   sequence:
   - signal: exec_archive_tool
     min_count: 1
@@ -1628,9 +1896,15 @@ temporal_rules:
   key_by:
   - src_ip
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: condition_match
+  minimum_signal_value_exclusive: 0
   condition:
     kind: change_detected
     field: actor_principal
+    empty_value_behavior: ignore
+    first_observation_behavior: suppress
+    reference_selection: previous_observation
   emit:
     signals:
     - name: auth_pivot_accounts_from_same_src
@@ -1642,31 +1916,3406 @@ temporal_rules:
   key_by:
   - actor_principal
   lookback: 6h
+  lookback_lower_bound: inclusive
+  emit_on: condition_match
+  minimum_signal_value_exclusive: 0
   condition:
     kind: change_detected
     field: pivot_dest_key
+    empty_value_behavior: ignore
+    first_observation_behavior: suppress
+    reference_selection: previous_observation
   emit:
     signals:
     - name: auth_pivot_destinations_for_same_user
       value: 1
   confidence: medium
-impossible_travel:
-  enabled: true
-  key_by:
-  - actor_principal
-  success_signal_keys:
-  - auth_remote_success
-  min_distance_km: 200
-  min_time_seconds: 60
-  velocity_kmh_threshold: 900
-  notes: Impossible travel is computed on canonical principal continuity (actor_principal) across canonical authentication
-    success events identified by success_signal_keys (matched case-insensitively in code). Thresholds are static for behavioural
-    stability; profile-based tuning may be introduced later.
+detector_policy:
+  version: 1
+  mode: authoritative
+  detectors:
+    geographic_continuity:
+      stage: temporal
+      executor: geographic_continuity
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        key_fields: [actor_principal]
+        success_signals: [auth_remote_success]
+        minimum_signal_value_exclusive: 0
+        country_field: geo_country_iso
+        asn_field: geo_asn
+        city_field: geo_city_name
+        ip_fields: [src_ip, ip_address]
+      history:
+        retention: lifetime
+        novelty_reference: all_seen
+        mark_first_observation: true
+        emit_first_observation: false
+        boundary_reference: previous_observation
+      output_fields:
+        new_country: geo_new_country
+        new_asn: geo_new_asn
+        new_city: geo_new_city
+        boundary_crossing: geo_boundary_crossing
+      emissions:
+        new_country:
+          name: new_country
+          value: 1
+          rule_id: NEW_COUNTRY
+          description: Successful remote authentication from a country not previously seen for the actor
+          confidence: high
+        new_asn:
+          name: new_asn
+          value: 1
+          rule_id: NEW_ASN
+          description: Successful remote authentication from an ASN not previously seen for the actor
+          confidence: high
+        new_city:
+          name: new_city
+          value: 1
+          rule_id: NEW_CITY
+          description: Successful remote authentication from a city not previously seen for the actor
+          confidence: medium
+        boundary_crossing:
+          name: boundary_crossing
+          value: 1
+          rule_id: BOUNDARY_CROSSING
+          description: Consecutive successful remote authentications crossed a country boundary for the same actor
+          confidence: high
+      evidence:
+        new_country:
+          geo_country_iso: {resolver: current_country}
+          previous_countries: {resolver: previous_countries, max_chars: 240}
+          ip_address: {resolver: current_ip}
+          key_by: {resolver: key_fields}
+          actor_key: {resolver: actor_key}
+        new_asn:
+          geo_asn: {resolver: current_asn}
+          previous_asns: {resolver: previous_asns, max_chars: 240}
+          ip_address: {resolver: current_ip}
+          key_by: {resolver: key_fields}
+          actor_key: {resolver: actor_key}
+        new_city:
+          geo_city_name: {resolver: current_city}
+          geo_country_iso: {resolver: current_country}
+          previous_cities: {resolver: previous_cities, max_chars: 240}
+          ip_address: {resolver: current_ip}
+          key_by: {resolver: key_fields}
+          actor_key: {resolver: actor_key}
+        boundary_crossing:
+          from_country: {resolver: previous_country}
+          to_country: {resolver: current_country}
+          from_ip: {resolver: previous_ip}
+          to_ip: {resolver: current_ip}
+          key_by: {resolver: key_fields}
+          actor_key: {resolver: actor_key}
+    impossible_travel:
+      stage: temporal
+      executor: impossible_travel
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        key_fields: [actor_principal]
+        success_signals: [auth_remote_success]
+        minimum_signal_value_exclusive: 0
+        latitude_field: geo_latitude
+        longitude_field: geo_longitude
+        country_field: geo_country_iso
+        ip_fields: [src_ip, ip_address]
+      state:
+        reference_selection: retained_reference
+        rejected_observation_update: retain_reference
+        qualifying_comparison_update: update_reference
+      thresholds:
+        minimum_distance_km: 200
+        minimum_distance_comparison: greater_than_or_equal
+        minimum_time_seconds: 60
+        minimum_time_comparison: greater_than_or_equal
+        velocity_kmh: 900
+        velocity_comparison: greater_than_or_equal
+      output_fields:
+        distance_km: travel_distance_km
+        dt_hours: travel_dt_hours
+        velocity_kmh: travel_velocity_kmh
+        from_country: travel_from_country
+        to_country: travel_to_country
+        from_ip: travel_from_ip
+      emissions:
+        impossible_travel:
+          name: impossible_travel
+          value: 1
+          rule_id: IMPOSSIBLE_TRAVEL
+          description: Velocity exceeds threshold between consecutive successful logons for same actor
+          confidence: high
+      evidence:
+        distance_km: {resolver: distance_km, round_digits: 3}
+        dt_hours: {resolver: dt_hours, round_digits: 4}
+        velocity_kmh: {resolver: velocity_kmh, round_digits: 1}
+        from_ip: {resolver: previous_ip}
+        to_ip: {resolver: current_ip}
+        from_country: {resolver: previous_country}
+        to_country: {resolver: current_country}
+        threshold_kmh: {resolver: velocity_threshold_kmh}
+        min_distance_km: {resolver: minimum_distance_km}
+        key_by: {resolver: key_fields}
+        actor_key: {resolver: actor_key}
+    ip_scope_continuity:
+      stage: temporal
+      executor: ip_scope_continuity
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        key_fields: [actor_principal]
+        ip_fields: [src_ip, ip_address]
+      history:
+        reference_selection: retained_reference
+        state_update: every_valid_observation
+      lookback:
+        duration: 24h
+        window_bounds: closed
+      conditions:
+        require_address_change: true
+      subnet_prefixes:
+        ipv4_prefix_length: 24
+        ipv6_prefix_length: 64
+      branch_mode: all_matches
+      transition_rules:
+      - id: private_address_change
+        previous_scope: private
+        current_scope: private
+        subnet_change: any
+        emission: changed_private_ip
+      - id: private_subnet_change
+        previous_scope: private
+        current_scope: private
+        subnet_change: required
+        emission: crossed_private_subnet
+      - id: private_to_public
+        previous_scope: private
+        current_scope: public
+        subnet_change: any
+        emission: private_to_public
+      - id: public_to_private
+        previous_scope: public
+        current_scope: private
+        subnet_change: any
+        emission: public_to_private
+      emissions:
+        changed_private_ip:
+          name: user_changed_private_ip
+          value: 1
+          rule_id: USER_CHANGED_PRIVATE_IP
+          description: Same actor observed from a different private IP within continuity window
+          confidence: low
+        crossed_private_subnet:
+          name: user_crossed_private_subnet
+          value: 1
+          rule_id: USER_CROSSED_PRIVATE_SUBNET
+          description: Same actor crossed private subnet within continuity window
+          confidence: medium
+        private_to_public:
+          name: user_private_to_public_ip
+          value: 1
+          rule_id: USER_PRIVATE_TO_PUBLIC_IP
+          description: Same actor moved from private to public IP within continuity window
+          confidence: low
+        public_to_private:
+          name: user_public_to_private_ip
+          value: 1
+          rule_id: USER_PUBLIC_TO_PRIVATE_IP
+          description: Same actor moved from public to private IP within continuity window
+          confidence: low
+      evidence:
+        changed_private_ip:
+          actor_principal: {resolver: actor_key}
+          previous_ip: {resolver: previous_ip}
+          current_ip: {resolver: current_ip}
+          delta_seconds: {resolver: delta_seconds}
+        crossed_private_subnet:
+          actor_principal: {resolver: actor_key}
+          previous_ip: {resolver: previous_ip}
+          current_ip: {resolver: current_ip}
+          delta_seconds: {resolver: delta_seconds}
+          previous_subnet: {resolver: previous_subnet}
+          current_subnet: {resolver: current_subnet}
+        private_to_public:
+          actor_principal: {resolver: actor_key}
+          previous_ip: {resolver: previous_ip}
+          current_ip: {resolver: current_ip}
+          delta_seconds: {resolver: delta_seconds}
+          previous_scope: {resolver: previous_scope}
+          current_scope: {resolver: current_scope}
+        public_to_private:
+          actor_principal: {resolver: actor_key}
+          previous_ip: {resolver: previous_ip}
+          current_ip: {resolver: current_ip}
+          delta_seconds: {resolver: delta_seconds}
+          previous_scope: {resolver: previous_scope}
+          current_scope: {resolver: current_scope}
+    clamav_classification:
+      stage: atomic
+      executor: clamav_classifier
+      enabled: true
+      evidence_type: direct
+      default_category: malware
+      category_tokens:
+        ransomware: ransomware
+        trojan: malware
+        backdoor: malware
+        virus: malware
+        worm: malware
+        malware: malware
+        dropper: malware
+        downloader: malware
+        loader: malware
+        infostealer: malware
+        spyware: malware
+        keylogger: malware
+        ircbot: malware
+        proxy: malware
+        rootkit: exploit
+        exploit: exploit
+        tool: offensive_tool
+        hacktool: offensive_tool
+        pua: pua
+        adware: pua
+        coinminer: pua
+        joke: pua
+        phishing: malware
+        packed: malware
+        packer: malware
+        file: malware
+        countermeasure: offensive_tool
+      family_overrides:
+      - contains: mimikatz
+        category: offensive_tool
+      - contains: pwdump
+        category: offensive_tool
+      - contains: lazagne
+        category: offensive_tool
+      - contains: rubeus
+        category: offensive_tool
+      - contains: impacket
+        category: offensive_tool
+      - contains: cobaltstrike
+        category: offensive_tool
+      - contains: metasploit
+        category: offensive_tool
+      - contains: meterpreter
+        category: offensive_tool
+      - contains: sharphound
+        category: offensive_tool
+      - contains: bloodhound
+        category: offensive_tool
+      - contains: c99shell
+        category: webshell
+      - contains: c99
+        category: webshell
+      - contains: r57shell
+        category: webshell
+      - contains: b374k
+        category: webshell
+      - contains: weevely
+        category: webshell
+      - contains: wso
+        category: webshell
+      - contains: petya
+        category: ransomware
+      - contains: wannacry
+        category: ransomware
+      - contains: lockbit
+        category: ransomware
+      - contains: conti
+        category: ransomware
+      - contains: revil
+        category: ransomware
+      - contains: ryuk
+        category: ransomware
+      - contains: maze
+        category: ransomware
+      - contains: blackcat
+        category: ransomware
+      - contains: alphv
+        category: ransomware
+      - contains: babuk
+        category: ransomware
+      - contains: akira
+        category: ransomware
+      - contains: razy
+        category: ransomware
+      generic:
+        emission:
+          name: av_hit
+          value: 1
+          rule_id: AV_HIT
+          description: 'Antivirus detection: {forensic_category}'
+          confidence: high
+        unclassified_description: Antivirus hit present
+        evidence:
+        - filename
+        - av_signature
+        - platform
+        - category
+        - family
+        - forensic_category
+      categories:
+        offensive_tool:
+          suppress_generic: false
+          emission:
+            name: av_offensive_tool
+            value: 1
+            rule_id: AV_OFFENSIVE_TOOL
+            description: Antivirus classified an offensive tool
+            confidence: high
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+          - forensic_category
+        ransomware:
+          suppress_generic: false
+          emission:
+            name: av_ransomware
+            value: 1
+            rule_id: AV_RANSOMWARE
+            description: Antivirus classified ransomware
+            confidence: high
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+          - forensic_category
+        exploit:
+          suppress_generic: false
+          emission:
+            name: av_exploit
+            value: 1
+            rule_id: AV_EXPLOIT
+            description: Antivirus classified an exploit or rootkit
+            confidence: high
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+          - forensic_category
+        malware:
+          suppress_generic: false
+          emission:
+            name: av_malware
+            value: 1
+            rule_id: AV_MALWARE
+            description: Antivirus classified malware
+            confidence: high
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+          - forensic_category
+        pua:
+          suppress_generic: true
+          emission:
+            name: av_pua
+            value: 1
+            rule_id: AV_PUA
+            description: Potentially Unwanted Application detected by antivirus
+            confidence: low
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+        webshell:
+          suppress_generic: false
+          emission:
+            name: av_webshell
+            value: 1
+            rule_id: AV_WEBSHELL
+            description: Antivirus classified a web shell
+            confidence: high
+          evidence:
+          - filename
+          - av_signature
+          - platform
+          - category
+          - family
+          - forensic_category
+    yara_classification:
+      stage: atomic
+      executor: yara_classifier
+      enabled: true
+      evidence_type: direct
+      metadata:
+        # The corpus is intentionally not redistributed. This repository-relative
+        # default may be replaced for a run with --yara-metadata-path.
+        path: rules/yara-forge-rules-extended.yar
+        on_missing: name_only
+        on_parse_error: name_only
+        defaults:
+          score: 75
+          quality: 70
+        unindexed_rule:
+          classification: name_only
+          score: 0
+          quality: 0
+      classification:
+        mode: first_match
+        default_category: malware
+        ordered_rules:
+        - id: tc_ransomware
+          category: ransomware
+          all:
+          - field: tc_detection_type
+            op: equals_any
+            values: [ransomware]
+        - id: tc_malware
+          category: malware
+          all:
+          - field: tc_detection_type
+            op: equals_any
+            values: [backdoor, trojan, rat, infostealer, pua]
+        - id: tc_exploit
+          category: exploit
+          all:
+          - field: tc_detection_type
+            op: equals_any
+            values: [exploit, rootkit]
+        - id: ransomware_tag
+          category: ransomware
+          all:
+          - field: tags
+            op: contains_any
+            values: [ransomware]
+        - id: informational_certificate_tag
+          category: certificate
+          all:
+          - field: tags
+            op: contains_any
+            values: [info]
+          - field: tags
+            op: contains_none
+            values: [malicious, malware]
+          - field: rule_name
+            op: contains_any
+            values: [cert, blocklist]
+        - id: informational_certificate_category
+          category: certificate
+          all:
+          - field: category
+            op: equals_any
+            values: [info]
+          - field: rule_name
+            op: contains_any
+            values: [cert, blocklist]
+        - id: certificate_name
+          category: certificate
+          all:
+          - field: rule_name
+            op: regex
+            pattern: 'Cert_Blocklist|INDICATOR_KB_CERT'
+        - id: webshell_name
+          category: webshell
+          all:
+          - field: rule_name
+            op: regex
+            pattern: 'Webshell|web_shell'
+        - id: offensive_tool_name
+          category: offensive_tool
+          all:
+          - field: rule_name
+            op: regex
+            pattern: 'Cobaltstrike|cobalt_strike|Mimikatz|Rubeus|HKTL_|Hacktool|INDICATOR_TOOL|SafetyKatz|SharpKatz|LaZagne|Impacket'
+        - id: ransomware_name
+          category: ransomware
+          all:
+          - field: rule_name
+            op: regex
+            pattern: 'Ransomware|Ransom_'
+        - id: apt_name
+          category: apt
+          all:
+          - field: rule_name
+            op: regex
+            pattern: '(?:^|_)APT(?:_|\d)|(?:^|_)Apt_'
+        - id: exploit_name
+          category: exploit
+          all:
+          - field: rule_name
+            op: regex
+            pattern: 'Exploit|Shellcode|CVE_\d|CVE\d|Rootkit|LOLDriver'
+      strength:
+        rule_count: distinct_rule_names
+        saturation_count: 3
+        score_multiplier:
+          aggregate: maximum
+          divisor: 100
+          floor: 0.6
+          ceiling: 1
+        unnamed_matches:
+          mode: raw_count
+          multiplier: 0.6
+        emission:
+          name: yara_hit_strength
+          value: 1
+          rule_id: YARA_HIT_STRENGTH
+          description: Category-aware YARA support excluding non-contributing categories and weighted by rule score
+          confidence: low
+        score_confidence:
+          minimum_score: 75
+          confidence: medium
+        evidence:
+        - yara_match_count
+        - contributing_rule_count
+        - strength
+        - best_score
+        - score_multiplier
+        - rule_names
+        max_rule_names: 10
+      categories:
+        offensive_tool:
+          contributes_to_strength: true
+          emission:
+            name: yara_offensive_tool
+            value: 1
+            rule_id: YARA_OFFENSIVE_TOOL
+            description: YARA Forge offensive tool detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        ransomware:
+          contributes_to_strength: true
+          emission:
+            name: yara_ransomware
+            value: 1
+            rule_id: YARA_RANSOMWARE
+            description: YARA Forge ransomware detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        webshell:
+          contributes_to_strength: true
+          emission:
+            name: yara_webshell
+            value: 1
+            rule_id: YARA_WEBSHELL
+            description: YARA Forge web shell detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        apt:
+          contributes_to_strength: true
+          emission:
+            name: yara_apt
+            value: 1
+            rule_id: YARA_APT
+            description: YARA Forge APT detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        exploit:
+          contributes_to_strength: true
+          emission:
+            name: yara_exploit
+            value: 1
+            rule_id: YARA_EXPLOIT
+            description: YARA Forge exploit or rootkit detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        certificate:
+          contributes_to_strength: false
+          emission:
+            name: yara_certificate_blocklist
+            value: 1
+            rule_id: YARA_CERTIFICATE
+            description: YARA Forge certificate blocklist detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+        malware:
+          contributes_to_strength: true
+          emission:
+            name: yara_malware
+            value: 1
+            rule_id: YARA_MALWARE
+            description: YARA Forge malware detection
+            confidence: medium
+          score_confidence: {minimum_score: 80, confidence: high}
+          evidence: [category, rule_count, rule_names, best_score, best_quality]
+          max_rule_names: 5
+      referenced_file_gate:
+        minimum_score: 75
+        minimum_quality: 70
+        categories:
+        - offensive_tool
+        - ransomware
+        - webshell
+        - apt
+        - exploit
+        - malware
+        allow_unnamed: false
+    web_request_classification:
+      stage: atomic
+      executor: web_request_classifier
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        parser: parser
+        message: message
+        request: http_request
+        url: url
+        headers: http_headers
+        response_code: http_response_code
+        response_bytes: http_response_bytes
+        source_ip_fields: [actor_ip, src_ip, ip_address]
+        user_agent: http_request_user_agent
+        referer: http_request_referer
+        body: http_request_body
+        content_disposition: http_content_disposition
+        upload_filename: http_upload_filename
+        upload_content_type: http_upload_content_type
+        upload_sha256: http_upload_sha256
+        request_content_length: http_request_content_length
+      outputs:
+        upload_names: chronosift_web_upload_names
+        upload_hashes: chronosift_web_upload_hashes
+        upload_outcome: chronosift_web_upload_outcome
+        web_outcome: chronosift_web_outcome
+        attack_indicators: chronosift_web_attack_indicators
+        source_ip: chronosift_web_source_ip
+        method: chronosift_web_method
+        endpoint: chronosift_web_endpoint
+        status: chronosift_web_status_code
+      matching:
+        web_log_parser_tokens: [apache, nginx, iis, w3c, msiis]
+      indicators:
+        decode_rounds: 2
+        sqli:
+          prefix: 'sqli:'
+          patterns:
+          - name: union_select
+            regex: >-
+              (?i)\bunion\s+(?:all\s+)?select\b
+          - name: schema_enumeration
+            regex: >-
+              (?i)\binformation_schema\b|\b(?:table|column)_name\b
+          - name: database_function
+            regex: >-
+              (?i)\b(?:database|version|current_user|user)\s*\(
+          - name: file_access
+            regex: >-
+              (?i)\b(?:load_file|into\s+(?:out|dump)file)\b
+          - name: time_delay
+            regex: >-
+              (?i)\b(?:sleep|benchmark|pg_sleep)\s*\(|\bwaitfor\s+delay\b
+          - name: error_based
+            regex: >-
+              (?i)\b(?:extractvalue|updatexml)\s*\(
+          - name: stacked_query
+            regex: >-
+              (?i);\s*(?:select|insert|update|delete|drop|alter|create)\b
+          - name: boolean_tautology
+            regex: >-
+              (?i)(?:['"`)]\s*(?:or|and)\s+[^\s&]{0,64}?=|\b(?:or|and)\s+\(?\s*\d+\s*=\s*(?:\d+\b|[\w.]*\()|\b(?:or|and)\s+['"`]\s*[^\s&'"`]*\s*['"`]?\s*=\s*['"`])
+          - name: ordered_probe
+            regex: >-
+              (?i)\border\s+by\s+\d+\s*(?:--|#|/\*)
+          - name: inline_subquery
+            regex: >-
+              (?i)(?:^|[?&])[^=&]*=\s*\(\s*select\b
+        path_traversal:
+          indicator: path_traversal
+          decoded_contains: ['../', '..\']
+          raw_contains: ['%2e%2e', '%252e']
+        local_file_inclusion:
+          indicator: local_file_inclusion
+          decoded_contains:
+          - /etc/passwd
+          - /etc/shadow
+          - proc/self/environ
+          - php://filter
+          - file://
+          - boot.ini
+          - win.ini
+        remote_file_inclusion:
+          indicator: remote_file_inclusion
+          regex_any:
+          - >-
+            (?i)(?:^|[?&])\s*(?:page|file|path|template|include|inc|doc|document|lang|module|dir|root|conf|config|load|read|show|pg)\s*=\s*https?://
+          - >-
+            (?i)(?:^|[?&])[^=&]+\s*=\s*https?://[^\s&]+\.(?:php|phtml|php[345]|asp|aspx|ashx|jsp|jspx|cgi|pl|py|rb|sh|txt)\b
+        command_injection:
+          indicator: command_injection
+          regex: >-
+            (?i)(?:&&|\|\||\$\(|`|;|\|)\s*/?(?:[\w.-]+/)*(?:sh|bash|dash|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|whoami|id|uname|cat|type|curl|wget|nc|netcat)\b(?!\s*=)
+        injection_probe:
+          indicator: injection_probe
+          breakout_regex: >-
+            ['"`]\s*[<>"'`]|[<>]\s*['"`]
+          metacharacter_regex: >-
+            ['"`()<>]
+          quote_regex: >-
+            ['"`]
+          minimum_metacharacters: 4
+          minimum_distinct_metacharacters: 2
+        webshell_command_parameter:
+          indicator: webshell_command_parameter
+          regex: >-
+            (?i)(?:^|[?&])(?:cmd|exec|command|shell)=
+      upload:
+        methods: [POST, PUT, PATCH]
+        query_parameter_names: [filename, file, name, path, upload, uploadfile, qqfile, dest, destination]
+        filename_extension_admission: nonempty_suffix
+        endpoint_tokens: [upload, filemanager, connector, ajaxfilemanager, ckfinder, elfinder]
+        nameless_methods: [PUT]
+        multipart_content_type: multipart/form-data
+        executable_extensions: [.php, .phtml, .php3, .php4, .php5, .asp, .aspx, .ashx, .jsp, .jspx, .cgi, .pl]
+        image_extensions: [.jpg, .jpeg, .png, .gif, .webp, .svg]
+        image_content_type_prefix: image/
+        mime_value_pairing: exactly_one
+        mime_mismatch:
+          match: any
+          branches:
+          - id: image_extension_non_image_content_type
+            all: [image_extension]
+            any: []
+            none: [image_content_type]
+          - id: executable_extension_image_content_type
+            all: [executable_extension, image_content_type]
+            any: []
+            none: []
+        double_extension_minimum_dots: 2
+        indicators:
+          file_upload: file_upload
+          executable_upload: executable_upload
+          double_extension_upload: double_extension_upload
+          mime_extension_mismatch: upload_mime_extension_mismatch
+      outcomes:
+        upload:
+          unknown: unknown
+          accepted: accepted
+          redirected: redirected
+          rejected: rejected
+        success_status: {minimum: 200, maximum_exclusive: 300}
+        redirect_status: {minimum: 300, maximum_exclusive: 400}
+        web:
+          observed: observed
+          attempt: attempt
+          probable_success: probable_success
+          selection:
+            strategy: maximum_rank
+            ranks:
+              observed: 0
+              attempt: 1
+              probable_success: 2
+          attempt_when:
+            indicators_any:
+            - path_traversal
+            - local_file_inclusion
+            - remote_file_inclusion
+            - command_injection
+            - injection_probe
+            - webshell_command_parameter
+            - file_upload
+            - executable_upload
+            - double_extension_upload
+            - upload_mime_extension_mismatch
+            indicator_prefixes_any: ['sqli:']
+      emissions:
+        sqli_attempt:
+          name: web_sqli_attempt
+          value: 1
+          rule_id: WEB_SQLI_ATTEMPT
+          description: Decoded web request contains high-confidence SQL injection syntax
+          confidence: medium
+        sqli_response_anomaly:
+          name: web_sqli_response_anomaly
+          value: 1
+          rule_id: WEB_SQLI_RESPONSE_ANOMALY
+          description: Successful SQLi-shaped request returned substantially more content than the endpoint baseline
+          confidence: medium
+        sqli_probable_success:
+          name: web_sqli_probable_success
+          value: 1
+          rule_id: WEB_SQLI_PROBABLE_SUCCESS
+          description: SQL injection syntax plus a successful anomalous response indicates probable exploitation
+          confidence: medium
+        public_facing_exploit:
+          name: exploit_public_facing_app
+          value: 1
+          rule_id: EXPLOIT_PUBLIC_FACING_APP
+          description: Qualified web evidence indicates public-facing application exploitation
+          confidence: medium
+      sqli:
+        baseline:
+          key_fields: [host, method, endpoint]
+          require_nonempty_keys: [endpoint]
+          scope: partition
+          lookback: unbounded
+          sample:
+            indicators: absent
+            response: successful
+            bytes: nonnegative
+          statistic: median
+          minimum_samples: 2
+          threshold_combine: maximum
+          threshold_terms: [response_minimum, baseline_ratio, baseline_delta]
+          threshold_comparison: greater_than_or_equal
+          response_ratio: 1.5
+          response_delta_bytes: 2048
+          response_minimum_bytes: 4096
+          absolute_large_response_bytes: 65536
+        decisions:
+          attempt: {all: [indicators], any: [], none: []}
+          response_anomaly: {all: [indicators, successful_response, response_bytes, threshold_exceeded], any: [], none: []}
+          probable_success: {all: [indicators, successful_response, response_bytes, threshold_exceeded], any: [], none: []}
+        emissions:
+          attempt: sqli_attempt
+          response_anomaly: sqli_response_anomaly
+          probable_success: sqli_probable_success
+        evidence:
+        - http_method
+        - http_path
+        - canonical_endpoint
+        - sqli_indicators
+        - http_response_code
+        - http_response_bytes
+        - baseline_response_statistic
+        - baseline_statistic
+        - baseline_sample_count
+        - response_anomaly_threshold
+        - actor_ip
+        - http_request_user_agent
+      exploit:
+        emission: public_facing_exploit
+        branches:
+          executable_upload:
+            conditions:
+              indicators_all: [file_upload, executable_upload]
+            description: Web request has upload semantics and targets an executable web script
+            confidence: high
+            evidence: [http_method, http_path, canonical_endpoint, http_response_code, attack_indicators, upload_name, upload_names, upload_outcome]
+          exploit_syntax:
+            conditions:
+              indicators_any: [path_traversal, local_file_inclusion, remote_file_inclusion, command_injection, webshell_command_parameter]
+            description: Decoded web request contains qualified public-facing exploitation syntax
+            confidence: medium
+            evidence: [http_method, http_path, canonical_endpoint, http_response_code, attack_indicators, actor_ip, http_request_user_agent]
+          configured_hint:
+            conditions:
+              signals_any: [web_exploitation_hint, web_sqli_probable_success]
+              minimum_signal_value_exclusive: 0
+            description: Configured web evidence suggests public-facing exploitation
+            confidence: low
+            evidence: [http_method, http_path, canonical_endpoint, http_response_code, attack_indicators, actor_ip]
+    referenced_file_correlation:
+      stage: contextual
+      executor: referenced_file_correlation
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        current_path: filename
+        message: message
+        execution_text_fields:
+        - image_path
+        - display_name
+        - command_line
+        - parent_command_line
+        execution_path_fields:
+        - new_process_name
+        - file_path
+        - parent_process_name
+        - service_dll
+        web:
+          feature_fields:
+            hit_types: chronosift_web_file_hit_types
+            categories: chronosift_web_file_categories
+            rules: chronosift_web_file_rules
+            families: chronosift_web_file_families
+          attack_techniques: chronosift_attack_techniques
+      matching:
+        exclude_self_reference: true
+        basename_fallback: relative_only
+        web_document_roots:
+        - /var/www/html
+        - /srv/www
+        - /usr/share/nginx/html
+        - /htdocs
+        - /httpdocs
+        - inetpub/wwwroot
+        - xampp/htdocs
+      web_outcome_merge:
+        strategy: maximum_rank
+        ranks:
+          observed: 0
+          attempt: 1
+          probable_success: 2
+          confirmed_follow_on: 3
+      emissions:
+        referenced_yara:
+          name: referenced_file_yara_hit
+          value: 0.5
+          rule_id: REFERENCED_FILE_YARA_HIT
+          description: Event references a file carrying raw YARA evidence
+          confidence: medium
+        referenced_av:
+          name: referenced_file_av_hit
+          value: 0.5
+          rule_id: REFERENCED_FILE_AV_HIT
+          description: Event references a file carrying antivirus evidence
+          confidence: high
+        referenced_luhn:
+          name: referenced_file_luhn_hit
+          value: 0.5
+          rule_id: REFERENCED_FILE_LUHN_HIT
+          description: Event references a file carrying Luhn-sensitive content evidence
+          confidence: low
+        web_file_access:
+          name: web_file_access
+          value: 1
+          rule_id: WEB_FILE_ACCESS
+          description: Web request accesses or uploads a file identity carrying forensic content hits
+          confidence: medium
+        web_malicious_file_access:
+          name: web_malicious_file_access
+          value: 1
+          rule_id: WEB_MALICIOUS_FILE_ACCESS
+          description: Web request targets a file with antivirus or strong YARA support
+          confidence: high
+        web_sensitive_file_download:
+          name: web_sensitive_file_download
+          value: 1
+          rule_id: WEB_SENSITIVE_FILE_DOWNLOAD
+          description: Successful web response served a file carrying Luhn-sensitive content
+          confidence: high
+        web_malicious_file_upload:
+          name: web_malicious_file_upload
+          value: 1
+          rule_id: WEB_MALICIOUS_FILE_UPLOAD
+          description: Web upload request names a file with antivirus or strong YARA support
+          confidence: high
+        web_confirmed_webshell_access:
+          name: web_confirmed_webshell_access
+          value: 1
+          rule_id: WEB_CONFIRMED_WEBSHELL_ACCESS
+          description: Web request targets a file classified as a web shell by AV or strong YARA evidence
+          confidence: high
+      propagation:
+        yara:
+          emission: referenced_yara
+          evidence: [evidence_type, signal_value, target_filename, source_path_count, referenced_paths, message]
+        av:
+          emission: referenced_av
+          evidence: [evidence_type, signal_value, target_filename, source_path_count, referenced_paths, message]
+        luhn:
+          emission: referenced_luhn
+          evidence: [evidence_type, signal_value, target_filename, source_path_count, referenced_paths, message]
+      web:
+        file_access:
+          source: either
+          hit_types: [av, luhn, yara]
+          response: any
+          emission: web_file_access
+          evidence: [evidence_type, http_method, http_path, canonical_web_path, http_response_code, http_response_bytes, upload_outcome, file_hit_types, file_categories, yara_rules, av_families, yara_rule_metadata]
+        malicious_file_access:
+          source: access
+          hit_types: [av, yara]
+          response: any
+          emission: web_malicious_file_access
+          evidence: [evidence_type, http_method, http_path, canonical_web_path, http_response_code, http_response_bytes, file_hit_types, file_categories, yara_rules, av_families, yara_rule_metadata]
+        sensitive_file_download:
+          source: access
+          hit_types: [luhn]
+          methods: [GET]
+          response: successful
+          emission: web_sensitive_file_download
+          evidence: [evidence_type, http_method, http_path, canonical_web_path, http_response_code, http_response_bytes, file_hit_types, file_categories]
+        malicious_file_upload:
+          source: upload
+          hit_types: [av, yara]
+          response: any
+          emission: web_malicious_file_upload
+          evidence: [evidence_type, http_method, http_path, canonical_web_path, http_response_code, upload_outcome, file_hit_types, file_categories, yara_rules, av_families, yara_rule_metadata]
+        confirmed_webshell_access:
+          source: access
+          categories: [webshell]
+          response: any
+          emission: web_confirmed_webshell_access
+          outcome:
+            successful_response: confirmed_follow_on
+            other: attempt
+          evidence: [evidence_type, http_method, http_path, canonical_web_path, http_response_code, http_response_bytes, file_hit_types, file_categories, yara_rules, av_families, yara_rule_metadata]
+      mappings:
+        enabled: true
+        outputs:
+          injection_probe:
+            emission:
+              name: web_injection_probe
+              value: 1
+              rule_id: WEB_INJECTION_PROBE
+              description: Request parameter contains quote or metacharacter breakout probing without stronger injection syntax
+              confidence: low
+          t1190:
+            attack_technique_id: T1190
+            emission:
+              name: mitre_t1190
+              value: 1
+              rule_id: MITRE_T1190
+              description: Web exploitation or injection probing maps to Exploit Public-Facing Application as an attempt
+              confidence: low
+          t1213_006:
+            attack_technique_id: T1213.006
+            emission:
+              name: mitre_t1213_006
+              value: 1
+              rule_id: MITRE_T1213_006
+              description: Probable successful SQL injection includes database enumeration or file-access syntax
+              confidence: medium
+          t1505_003:
+            attack_technique_id: T1505.003
+            emission:
+              name: mitre_t1505_003
+              value: 1
+              rule_id: MITRE_T1505_003
+              description: A web-accessible file is independently classified as a web shell
+              confidence: high
+          t1105:
+            attack_technique_id: T1105
+            emission:
+              name: mitre_t1105
+              value: 1
+              rule_id: MITRE_T1105
+              description: Accepted inbound web upload names a file with independent malicious-content evidence
+              confidence: high
+          external_sensitive_transfer:
+            emission:
+              name: web_external_sensitive_transfer
+              value: 1
+              rule_id: WEB_EXTERNAL_SENSITIVE_TRANSFER
+              description: Sensitive file was served successfully to a public source address; no exfiltration technique is asserted without channel context
+              confidence: high
+        branches:
+          injection_probe:
+            conditions:
+              match: all
+              indicators_any: [injection_probe]
+            exclude:
+              match: any
+              indicators_any: [path_traversal, local_file_inclusion, remote_file_inclusion, command_injection, webshell_command_parameter]
+              indicator_prefixes_any: ['sqli:']
+              signals_any: [web_sqli_attempt, web_sqli_probable_success]
+              minimum_signal_value_exclusive: 0
+            emissions: [injection_probe, t1190]
+            evidence: [attack_technique_id, http_method, canonical_endpoint, http_response_code, attack_indicators, file_categories, source_ip]
+          exploit_syntax:
+            conditions:
+              match: any
+              indicators_any: [path_traversal, local_file_inclusion, remote_file_inclusion, command_injection]
+              indicator_prefixes_any: ['sqli:']
+              signals_any: [web_sqli_attempt]
+              minimum_signal_value_exclusive: 0
+            emissions: [t1190]
+            evidence: [attack_technique_id, http_method, canonical_endpoint, http_response_code, attack_indicators, file_categories, source_ip]
+          database_collection:
+            conditions:
+              match: all
+              indicators_any: ['sqli:schema_enumeration', 'sqli:file_access']
+              signals_any: [web_sqli_probable_success]
+              minimum_signal_value_exclusive: 0
+            emissions: [t1213_006]
+            evidence: [attack_technique_id, http_method, canonical_endpoint, http_response_code, attack_indicators, source_ip]
+          confirmed_webshell:
+            conditions:
+              match: all
+              signals_any: [web_confirmed_webshell_access]
+              minimum_signal_value_exclusive: 0
+              categories_any: [webshell]
+            emissions: [t1505_003]
+            evidence: [attack_technique_id, http_method, canonical_endpoint, http_response_code, file_categories, source_ip]
+          accepted_malicious_upload:
+            conditions:
+              match: all
+              signals_any: [web_malicious_file_upload]
+              minimum_signal_value_exclusive: 0
+              upload_outcomes_any: [accepted]
+            emissions: [t1105]
+            evidence: [attack_technique_id, http_method, canonical_endpoint, http_response_code, upload_outcome, file_categories, source_ip]
+          external_sensitive_transfer:
+            conditions:
+              match: all
+              signals_any: [web_sensitive_file_download]
+              minimum_signal_value_exclusive: 0
+              source_ip_scopes_any: [public]
+            emissions: [external_sensitive_transfer]
+            evidence: [source_ip, http_method, canonical_endpoint, http_response_code, file_categories]
+    webshell_artifact:
+      stage: contextual
+      executor: webshell_artifact
+      enabled: true
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        combined_text:
+          resolver: concat_lower
+          fields:
+          - actor_cmd
+          - command_line
+          - message
+          first_existing:
+          - actor_url
+          - url
+      conditions:
+        path_contains: [/var/www/, /srv/www/, /usr/share/nginx/html/, /htdocs/, /httpdocs/, '/inetpub/wwwroot/', '/xampp/htdocs/']
+        extension_in: [.php, .phtml, .php3, .php4, .php5, .asp, .aspx, .ashx, .jsp, .jspx, .cgi, .pl]
+        support:
+          match: any
+          basename_contains:
+          - cmd
+          - shell
+          - webshell
+          - c99
+          - r57
+          - b374k
+          - wso
+          - filemanager
+          - upload
+          combined_text_contains:
+          - multipart/form-data
+          - filename=
+          - upload
+          signals_any:
+          - referenced_file_av_hit
+          - referenced_file_yara_hit
+          minimum_signal_value_exclusive: 0
+      emissions:
+      - name: webshell_artifact
+        value: 1
+        rule_id: WEBSHELL_ARTIFACT
+        description: Executable script under a web root exhibits web-shell-like naming or malware support
+        confidence: medium
+      evidence:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        filename:
+          resolver: row_field
+          field: filename
+        message:
+          resolver: row_field
+          field: message
+          max_chars: 240
+    file_lifecycle:
+      stage: contextual
+      executor: file_lifecycle
+      enabled: true
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+        timestamp_description_field: timestamp_desc
+        host_field: hostname
+        parser_field: parser
+        message_field: message
+        file_size_field: file_size
+        allocation_field: is_allocated
+      classification:
+        timestamp_kinds:
+          priority: [create, delete, modify, access]
+          contains:
+            create: [create, creation, birth]
+            delete: [delet]
+            modify: [modif, change, content, mtime]
+            access: [access, open, atime]
+        path_contains:
+          web_root:
+          - /var/www/
+          - /srv/www/
+          - /usr/share/nginx/html/
+          - /htdocs/
+          - /httpdocs/
+          - '\inetpub\wwwroot\'
+          - '\xampp\htdocs\'
+          sensitive:
+          - /etc/passwd
+          - /etc/shadow
+          - /etc/sudoers
+          - /root/.ssh/
+          - /.ssh/
+          - /.gnupg/
+          - /.bash_history
+          - /.zsh_history
+          - /.mysql_history
+          - /.psql_history
+          - id_rsa
+          - id_dsa
+          - id_ecdsa
+          - id_ed25519
+          - authorized_keys
+          - known_hosts
+          - '\windows\system32\config\sam'
+          - '\windows\system32\config\system'
+          - '\windows\system32\config\security'
+          - ntds.dit
+          - web.config
+          - '\repair\sam'
+          - '\repair\system'
+          database_dump_name: [dump, mysqldump, pg_dump, sqlite dump]
+          excluded_update:
+          - '\winsxs\'
+          - '\softwaredistribution\'
+          - '\windows\assembly\'
+          - '\windows\installer\'
+          - /usr/lib/
+          - /usr/share/doc/
+          - /usr/share/man/
+          - /var/cache/apt/
+          - /var/cache/dnf/
+          - /var/cache/yum/
+          - /var/lib/dpkg/
+          - /var/lib/rpm/
+        extensions:
+          web_script: [.php, .phtml, .php3, .php4, .php5, .asp, .aspx, .ashx, .jsp, .jspx, .cgi, .pl]
+          web_content: [.php, .phtml, .php3, .php4, .php5, .asp, .aspx, .jsp, .jspx, .cgi, .pl, .html, .htm, .js, .css]
+          database_dump: [.sql, .dump, .bak, .sqlite, .db]
+          archive: [.zip, .7z, .rar, .tar, .gz, .tgz, .bz2, .xz]
+        suspicious_temp_basename_contains: [tmp, temp]
+        ransomware_extension_suffixes:
+        - .locked
+        - .lockbit
+        - .encrypted
+        - .crypt
+        - .crypted
+        - .conti
+        - .akira
+        - .blackcat
+        - .cl0p
+        - .clop
+        - .zepto
+        - .cerber
+        - .deadbolt
+        - .wannacry
+        - .wncry
+        - .play
+        - .royal
+        - .phobos
+        derived_predicates:
+          suspicious_web:
+            all: [web_root, web_script_extension]
+            any: []
+            none: []
+          database_dump:
+            all: []
+            any: [database_dump_extension, database_dump_basename, database_dump_message]
+            none: []
+          unallocated_with_extension:
+            all: [unallocated, extension_present]
+            any: []
+            none: []
+          path_not_excluded_update:
+            all: [path_present]
+            any: []
+            none: [excluded_update_path]
+      conditions:
+        weight_aware_semantics: [created, modified, deleted]
+        row_emissions:
+          created:
+            match: all
+            timestamp_kinds: [create]
+            derived_predicates: [path_present]
+          modified:
+            match: all
+            timestamp_kinds: [modify]
+            derived_predicates: [path_present]
+          deleted:
+            match: any
+            timestamp_kinds: [delete]
+            derived_predicates: [unallocated_with_extension]
+          web_executable_created:
+            match: all
+            timestamp_kinds: [create]
+            derived_predicates: [path_present, web_root, web_script_extension]
+          archive_created:
+            match: all
+            timestamp_kinds: [create]
+            derived_predicates: [path_present, archive_extension]
+          database_dump_candidate:
+            match: all
+            timestamp_kinds: [create]
+            derived_predicates: [path_present, database_dump]
+          defacement_candidate:
+            match: all
+            timestamp_kinds: [modify]
+            derived_predicates: [path_present, web_root, web_content_extension]
+          sensitive_file_access:
+            match: all
+            timestamp_kinds: []
+            derived_predicates: [path_present, sensitive_path]
+        windows:
+          short_lived_file:
+            lookback: 2h
+            key_fields: [host, path]
+            source_timestamp_kinds: [create]
+            target_timestamp_kinds: [delete]
+            source_selection: latest
+            ordering: before_or_same
+            window_bounds: closed
+            emit_on: target
+            conditions:
+              any:
+              - all: [source_suspicious_web]
+              - all: [target_suspicious_web]
+              - all: [target_web_script_extension, target_suspicious_temp_basename]
+          mass_file_modification:
+            lookback: 10m
+            threshold: 25
+            threshold_comparison: at_least
+            window_bounds: closed
+            eligible_timestamp_kinds: [modify]
+            group_by: [host, parent_directory]
+            max_emissions_per_group: 1
+            conditions:
+              any:
+              - all: [path_present, path_not_excluded_update]
+          ransomware_extension_burst:
+            lookback: 15m
+            threshold: 6
+            threshold_comparison: at_least
+            window_bounds: closed
+            eligible_timestamp_kinds: [create, modify]
+            group_by: [host]
+            max_emissions_per_group: 1
+            conditions:
+              any:
+              - all: [path_present, path_not_excluded_update, ransomware_extension_suffix]
+      emissions:
+        created:
+          name: file_created
+          value: 1
+          rule_id: FILE_CREATED
+          description: File creation-like timestamp observed
+          confidence: low
+        modified:
+          name: file_modified
+          value: 1
+          rule_id: FILE_MODIFIED
+          description: File modification-like timestamp observed
+          confidence: low
+        deleted:
+          name: file_deleted
+          value: 1
+          rule_id: FILE_DELETED
+          description: File deletion-like artefact observed
+          confidence: low
+        web_executable_created:
+          name: web_executable_file_created
+          value: 1
+          rule_id: WEB_EXECUTABLE_FILE_CREATED
+          description: Executable web content created under a web root
+          confidence: medium
+        archive_created:
+          name: archive_created
+          value: 1
+          rule_id: ARCHIVE_CREATED
+          description: Archive creation artefact observed
+          confidence: medium
+        database_dump_candidate:
+          name: database_dump_candidate
+          value: 1
+          rule_id: DATABASE_DUMP_CANDIDATE
+          description: Database dump-like file artefact observed
+          confidence: medium
+        defacement_candidate:
+          name: defacement_candidate
+          value: 1
+          rule_id: DEFACEMENT_CANDIDATE
+          description: Web content modified under a web root
+          confidence: medium
+        sensitive_file_access:
+          name: sensitive_file_access
+          value: 1
+          rule_id: SENSITIVE_FILE_ACCESS
+          description: Sensitive path artefact observed
+          confidence: medium
+        short_lived_file:
+          name: short_lived_file
+          value: 1
+          rule_id: SHORT_LIVED_FILE
+          description: Suspicious file was created and deleted within a bounded window
+          confidence: medium
+        mass_file_modification:
+          name: mass_file_modification
+          value: 1
+          rule_id: MASS_FILE_MODIFICATION
+          description: Large number of file modifications observed within a bounded window
+          confidence: medium
+        ransomware_extension_burst:
+          name: ransomware_extension_burst
+          value: 1
+          rule_id: RANSOMWARE_EXTENSION_BURST
+          description: Burst of ransomware-style encrypted file extensions observed within a bounded window
+          confidence: medium
+      evidence:
+        created: [path, timestamp_desc]
+        modified: [path, timestamp_desc]
+        deleted: [path, timestamp_desc, is_allocated]
+        web_executable_created: [path, parser, hostname]
+        archive_created: [path, file_size]
+        database_dump_candidate: [path, message]
+        defacement_candidate: [path, hostname]
+        sensitive_file_access: [path, timestamp_desc]
+        short_lived_file: [path, create_timestamp, delete_timestamp, lifetime_seconds]
+        mass_file_modification: [host, directory, window_seconds, count_in_window]
+        ransomware_extension_burst: [host, window_seconds, count_in_window, extensions]
+    mft_timestomping:
+      stage: contextual
+      executor: mft_timestomping
+      enabled: true
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+        parser_field: parser
+        timestamp_description_field: timestamp_desc
+      conditions:
+        parser_contains: [mft]
+        creation_contains: [creation, birth]
+        attributes:
+          standard_information_contains:
+          - $standard_information
+          - $si
+          - standard information
+          file_name_contains:
+          - $file_name
+          - $fn
+          - file name
+        minimum_delta: 1s
+        excluded_path_contains:
+        - '\winsxs\'
+        - '\softwaredistribution\'
+        - '\windows\assembly\'
+        - '\windows\installer\'
+        - /usr/lib/
+        - /usr/share/doc/
+        - /usr/share/man/
+        - /var/cache/apt/
+        - /var/cache/dnf/
+        - /var/cache/yum/
+        - /var/lib/dpkg/
+        - /var/lib/rpm/
+        bulk_extraction:
+          group_by: parent_directory
+          threshold: 5
+      branches:
+        targeted:
+          description: MFT $STANDARD_INFORMATION creation predates $FILE_NAME creation, indicating timestamp manipulation (T1070.006)
+          confidence: high
+          evidence: [path, si_creation, fn_creation, delta_seconds]
+        bulk_extraction_likely:
+          description: MFT creation attributes differ across a bulk directory cohort, suggesting archive extraction or file copy rather than targeted timestomping
+          confidence: low
+          evidence: [path, si_creation, fn_creation, delta_seconds, bulk_extraction_dampened, directory_hit_count]
+      emissions:
+      - name: timestomping
+        value: 1
+        rule_id: TIMESTOMPING
+        description: MFT attribute timestamp inconsistency detected
+        confidence: high
+    persistence_configuration:
+      stage: contextual
+      executor: ordered_row_rules
+      enabled: true
+      phase: 19
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+          normalise: none
+        path_lower:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+          normalise: path_lower
+        timestamp_desc:
+          resolver: row_field
+          fields: [timestamp_desc]
+          normalise: none
+        timestamp_kind:
+          resolver: timestamp_kind
+          fields: [timestamp_desc]
+          normalise: lower
+          kinds:
+            priority: [create, delete, modify, access]
+            contains:
+              create: [create, creation, birth]
+              delete: [delet]
+              modify: [modif, change, content, mtime]
+              access: [access, open, atime]
+        parser:
+          resolver: row_field
+          fields: [parser]
+          normalise: none
+        parser_lower:
+          resolver: row_field
+          fields: [parser]
+          normalise: lower
+        hostname:
+          resolver: row_field
+          fields: [hostname]
+          normalise: none
+        message:
+          resolver: row_field
+          fields: [message]
+          normalise: none
+        message_lower:
+          resolver: row_field
+          fields: [message]
+          normalise: lower
+        xml_lower:
+          resolver: row_field
+          fields: [xml_string]
+          normalise: lower
+        event_identifier:
+          resolver: row_field
+          fields: [event_identifier]
+          normalise: none
+        target_user:
+          resolver: row_field
+          fields: [target_user_name]
+          normalise: none
+        group_lower:
+          resolver: row_field
+          fields: [group_name]
+          normalise: lower
+      ordered_rules:
+      - id: cron_path_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [/etc/crontab, /etc/anacrontab, /etc/cron.d/, /etc/cron.daily/, /etc/cron.hourly/, /etc/cron.monthly/, /etc/cron.weekly/, /var/spool/cron/, /var/spool/cron/crontabs/]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: cron_persistence
+        description: Cron configuration artefact changed
+        confidence: medium
+        evidence: [path, timestamp_desc]
+      - id: firewall_path_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [/etc/firewalld/, /etc/ufw/, /etc/sysconfig/iptables, /etc/iptables/, /sharedaccess/parameters/firewallpolicy/]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: firewall_modified
+        description: Firewall configuration artefact changed
+        confidence: medium
+        evidence: [path, timestamp_desc, hostname]
+      - id: group_policy_path_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [/grouppolicy/, /sysvol/, /policies/, registry.pol]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: group_policy_modified
+        description: Group policy artefact changed
+        confidence: medium
+        evidence: [path, timestamp_desc, hostname]
+      - id: winlogon_registry_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: ['/microsoft/windows nt/currentversion/winlogon']}
+          - any:
+            - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+            - {input: message_lower, op: contains_any, values: [value set, set value, modified, changed, deleted, created, added]}
+          - any:
+            - {input: path_lower, op: contains_any, values: [shell, userinit, notify, appinit_dlls, taskman]}
+            - {input: message_lower, op: contains_any, values: [shell, userinit, notify, appinit_dlls, taskman]}
+        emission: winlogon_helper_persistence
+        description: Winlogon helper registry value modified (T1547.004)
+        confidence: high
+        evidence: [path, parser, message, hostname]
+      - id: com_hijack_registry_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [/classes/clsid/, /classes/wow6432node/clsid/]}
+          - any:
+            - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+            - {input: message_lower, op: contains_any, values: [value set, set value, modified, changed, deleted, created, added]}
+          - any:
+            - {input: path_lower, op: contains_any, values: [inprocserver, treatas]}
+            - {input: message_lower, op: contains_any, values: [inprocserver, treatas]}
+        emission: com_hijack_persistence
+        description: COM CLSID InprocServer32 or TreatAs registry modification detected (T1546.015)
+        confidence: medium
+        evidence: [path, parser, message, hostname]
+      - id: service_configuration_path_change
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [/etc/systemd/system/, /lib/systemd/system/, /usr/lib/systemd/system/, /etc/init.d/, /system/currentcontrolset/services/]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: service_configuration_changed
+        description: Service configuration artefact changed
+        confidence: medium
+        evidence: [path, parser, timestamp_desc, hostname]
+      - id: service_configuration_registry_change
+        when:
+          all:
+          - {input: parser_lower, op: equals_any, values: [winreg/windows_services]}
+          - any:
+            - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+            - {input: message_lower, op: contains_any, values: [value set, set value, modified, changed, deleted, created, added]}
+        emission: service_configuration_changed
+        description: Service registry configuration changed
+        confidence: medium
+        evidence: [path, parser, timestamp_desc, hostname]
+      - id: firewall_message_change
+        when:
+          all:
+          - {input: message_lower, op: contains_any, values: [firewalld, iptables, ufw, windows firewall]}
+          - {input: message_lower, op: contains_any, values: [changed, modified, disabled, added, deleted]}
+        emission: firewall_modified
+        description: Firewall configuration change indicated by log message
+        confidence: medium
+        evidence: [message, hostname]
+      - id: defender_standalone_message
+        when:
+          any:
+          - {input: message_lower, op: contains_any, values: [realtime protection disabled, real-time protection disabled, microsoft defender antivirus has been disabled, windows defender has been turned off]}
+          - {input: xml_lower, op: contains_any, values: [realtime protection disabled, real-time protection disabled, microsoft defender antivirus has been disabled, windows defender has been turned off]}
+          - {input: path_lower, op: contains_any, values: [realtime protection disabled, real-time protection disabled, microsoft defender antivirus has been disabled, windows defender has been turned off]}
+        emission: defender_disabled
+        description: Defender disablement or real-time protection deactivation observed
+        confidence: high
+        evidence: [message, path, hostname]
+      - id: defender_registry_value_change
+        when:
+          all:
+          - any:
+            - {input: message_lower, op: contains_any, values: [disableantispyware, disablerealtimemonitoring]}
+            - {input: xml_lower, op: contains_any, values: [disableantispyware, disablerealtimemonitoring]}
+            - {input: path_lower, op: contains_any, values: [disableantispyware, disablerealtimemonitoring]}
+          - any:
+            - {input: timestamp_kind, op: equals_any, values: [create, modify]}
+            - all:
+              - {input: parser_lower, op: starts_with_any, values: [winreg]}
+              - any:
+                - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+                - {input: message_lower, op: contains_any, values: [value set, set value, modified, changed, deleted, created, added]}
+        emission: defender_disabled
+        description: Defender disablement registry value changed
+        confidence: high
+        evidence: [message, path, hostname]
+      - id: account_created_event
+        when: {input: event_identifier, op: equals_any, values: ['4720']}
+        emission: account_created
+        description: Account creation artefact observed
+        confidence: medium
+        evidence: [target_user, message, event_identifier, hostname]
+      - id: account_created_message
+        when: {input: message_lower, op: contains_any, values: [user account was created, 'useradd[']}
+        emission: account_created
+        description: Account creation artefact observed
+        confidence: medium
+        evidence: [target_user, message, event_identifier, hostname]
+      - id: privileged_group_addition
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['4728', '4732', '4756']}
+          - any:
+            - {input: group_lower, op: contains_any, values: [administrators, domain admins, enterprise admins, remote desktop users]}
+            - {input: message_lower, op: contains_any, values: [administrators, domain admins, enterprise admins, remote desktop users]}
+            - {input: xml_lower, op: contains_any, values: [administrators, domain admins, enterprise admins, remote desktop users]}
+        emission: privileged_account_created
+        description: Account added to a privileged or remote-access group
+        confidence: high
+        evidence: [target_user, group_name, event_identifier, hostname]
+      emissions:
+        cron_persistence: {name: cron_persistence, value: 1, rule_id: CRON_PERSISTENCE, description: Cron configuration artefact changed, confidence: medium}
+        firewall_modified: {name: firewall_modified, value: 1, rule_id: FIREWALL_MODIFIED, description: Firewall configuration changed, confidence: medium}
+        group_policy_modified: {name: group_policy_modified, value: 1, rule_id: GROUP_POLICY_MODIFIED, description: Group policy artefact changed, confidence: medium}
+        winlogon_helper_persistence: {name: winlogon_helper_persistence, value: 1, rule_id: WINLOGON_HELPER_PERSISTENCE, description: Winlogon helper registry value modified, confidence: high}
+        com_hijack_persistence: {name: com_hijack_persistence, value: 1, rule_id: COM_HIJACK_PERSISTENCE, description: COM hijack registry modification detected, confidence: medium}
+        service_configuration_changed: {name: service_configuration_changed, value: 1, rule_id: SERVICE_CONFIGURATION_CHANGED, description: Service configuration changed, confidence: medium}
+        defender_disabled: {name: defender_disabled, value: 1, rule_id: DEFENDER_DISABLED, description: Defender disablement observed, confidence: high}
+        account_created: {name: account_created, value: 1, rule_id: ACCOUNT_CREATED, description: Account creation artefact observed, confidence: medium}
+        privileged_account_created: {name: privileged_account_created, value: 1, rule_id: PRIVILEGED_ACCOUNT_CREATED, description: Privileged account membership created, confidence: high}
+      evidence:
+        path: {resolver: input, input: path}
+        timestamp_desc: {resolver: input, input: timestamp_desc, max_chars: 120}
+        hostname: {resolver: input, input: hostname}
+        parser: {resolver: input, input: parser}
+        message: {resolver: input, input: message, max_chars: 240}
+        target_user: {resolver: input, input: target_user}
+        group_name: {resolver: input, input: group_lower}
+        event_identifier: {resolver: input, input: event_identifier}
+    repeated_scheduled_execution:
+      stage: contextual
+      executor: grouped_signal_window
+      enabled: true
+      phase: 19
+      evidence_type: direct
+      inputs:
+        signals: [scheduled_exec, privileged_scheduled_exec]
+        minimum_value_exclusive: 0
+      key:
+        host_field: hostname
+        command_fields: [actor_cmd, command_line]
+        message_field: message
+        message_regex: '(?i)CMD\s*\((.*?)\)'
+        message_fallback_max_chars: 200
+        normalise: lower
+      lookback: 10m
+      threshold: 3
+      window_bounds: closed
+      max_emissions_per_key: 1
+      emissions:
+      - name: repeated_scheduled_exec
+        value: 1
+        rule_id: REPEATED_SCHEDULED_EXEC
+        description: Repeated scheduled command execution observed within a bounded window
+        confidence: medium
+      evidence: [hostname, command, count_in_window, window_seconds]
+    direct_attack_semantics:
+      stage: contextual
+      executor: ordered_row_rules
+      enabled: true
+      phase: 28
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+          normalise: none
+        path_lower:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+          normalise: path_lower
+        timestamp_desc: {resolver: row_field, fields: [timestamp_desc], normalise: none}
+        timestamp_kind:
+          resolver: timestamp_kind
+          fields: [timestamp_desc]
+          normalise: lower
+          kinds:
+            priority: [create, delete, modify, access]
+            contains:
+              create: [create, creation, birth]
+              delete: [delet]
+              modify: [modif, change, content, mtime]
+              access: [access, open, atime]
+        actor_user: {resolver: row_field, fields: [actor_principal], normalise: lower}
+        actor_cmd: {resolver: row_field, fields: [actor_cmd], normalise: none}
+        command_line: {resolver: row_field, fields: [command_line], normalise: none}
+        discovery_command: {resolver: first_nonempty, fields: [actor_cmd, command_line], normalise: none}
+        message: {resolver: row_field, fields: [message], normalise: none}
+        message_lower: {resolver: row_field, fields: [message], normalise: lower}
+        url: {resolver: first_nonempty, fields: [actor_url, url], normalise: none}
+        combined_text:
+          resolver: concat
+          fields: [actor_cmd, command_line, message]
+          first_existing: [actor_url, url]
+          normalise: lower
+        hostname: {resolver: row_field, fields: [hostname], normalise: none}
+        event_identifier: {resolver: row_field, fields: [event_identifier], normalise: none}
+        target_user: {resolver: row_field, fields: [target_user_name], normalise: none}
+        target_or_actor: {resolver: first_nonempty, fields: [target_user_name, actor_principal], normalise: none}
+        target_or_member: {resolver: first_nonempty, fields: [target_user_name, member_name], normalise: none}
+        group_name: {resolver: row_field, fields: [group_name], normalise: none}
+        group_lower: {resolver: row_field, fields: [group_name], normalise: lower}
+        member_name: {resolver: row_field, fields: [member_name], normalise: none}
+        member_lower: {resolver: row_field, fields: [member_name], normalise: lower}
+        share_name: {resolver: row_field, fields: [share_name], normalise: none}
+        share_lower: {resolver: row_field, fields: [share_name], normalise: lower}
+        share_local_path: {resolver: row_field, fields: [share_local_path], normalise: none}
+        relative_target_name: {resolver: row_field, fields: [relative_target_name], normalise: none}
+        relative_target_lower: {resolver: row_field, fields: [relative_target_name], normalise: lower}
+        auth_protocol: {resolver: row_field, fields: [auth_protocol], normalise: lower}
+        auth_outcome: {resolver: row_field, fields: [auth_outcome], normalise: lower}
+        logon_type: {resolver: row_field, fields: [logon_type], normalise: none}
+        workstation_name: {resolver: row_field, fields: [workstation_name], normalise: none}
+        authentication_package: {resolver: row_field, fields: [authentication_package], normalise: lower}
+        parser_lower: {resolver: row_field, fields: [parser], normalise: lower}
+        xml_lower: {resolver: row_field, fields: [xml_string], normalise: lower}
+        privileged_text:
+          resolver: concat
+          fields: [message, actor_cmd, command_line, xml_string, member_name, workstation_name]
+          first_existing: [actor_url, url]
+          normalise: lower
+        group_or_privileged_text:
+          resolver: concat
+          fields: [group_name, message, actor_cmd, command_line, xml_string, member_name, workstation_name]
+          first_existing: [actor_url, url]
+          normalise: lower
+      ordered_rules:
+      - id: authorized_keys_root_change
+        when:
+          all:
+          - {input: path_lower, op: ends_with_any, values: [/authorized_keys]}
+          - {input: path_lower, op: contains_any, values: [/root/]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: authorized_keys_root_persistence
+        description: SSH authorized_keys artefact changed
+        confidence: high
+        evidence: [path, timestamp_desc, actor_user]
+      - id: authorized_keys_nonroot_change
+        when:
+          all:
+          - {input: path_lower, op: ends_with_any, values: [/authorized_keys]}
+          - not: {input: path_lower, op: contains_any, values: [/root/]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify, delete]}
+        emission: authorized_keys_persistence
+        description: SSH authorized_keys artefact changed
+        confidence: medium
+        evidence: [path, timestamp_desc, actor_user]
+      - id: inhibit_recovery_command
+        when: {input: combined_text, op: contains_any, values: [vssadmin delete shadows, wmic shadowcopy delete, wbadmin delete, bcdedit /set, reagentc /disable, delete catalog, shadowcopy delete]}
+        emission: inhibit_system_recovery
+        description: System recovery inhibition command semantics observed
+        confidence: high
+        evidence: [command, message, hostname]
+      - id: credential_dump_command
+        when: {input: combined_text, op: contains_any, values: [procdump, comsvcs.dll, minidump, ntdsutil, 'reg save hklm\sam', 'reg save hklm\system', lsass.dmp, sekurlsa]}
+        emission: credential_dumping
+        description: Credential dumping command semantics observed
+        confidence: medium
+        evidence: [command, message, path]
+      - id: credential_dump_artifact
+        when:
+          all:
+          - any:
+            - {input: path_lower, op: contains_any, values: [lsass]}
+            - {input: path_lower, op: ends_with_any, values: [/ntds.dit]}
+          - {input: timestamp_kind, op: equals_any, values: [create, modify]}
+        emission: credential_dumping
+        description: Credential-store or dump artefact created or modified
+        confidence: low
+        evidence: [path, timestamp_desc]
+      - id: password_store_artifact
+        when:
+          all:
+          - {input: path_lower, op: contains_any, values: [login data, key4.db, logins.json, .kdbx, credentials, vault, web.config]}
+          - {input: timestamp_kind, op: equals_any, values: [access, modify, create]}
+        emission: password_store_access
+        description: Password-store or credential-container artefact was accessed or changed
+        confidence: low
+        evidence: [path, timestamp_desc, kind]
+      - id: password_store_copy_or_stage
+        when:
+          all:
+          - {input: combined_text, op: contains_any, values: [login data, 'login\ data', key4.db, logins.json, .kdbx, credentials, vault, web.config]}
+          - {input: combined_text, op: contains_any, values: ['copy ', 'cp ', 'xcopy ', 'robocopy ', 'move ', 'mv ', 'copy-item ', 'tar ', 'zip ', '7z ', 'rar ', 'scp ', 'sftp ', 'curl ', 'wget ']}
+        emission: password_store_access
+        description: Command semantics indicate password-store or credential-container copying or staging
+        confidence: medium
+        evidence: [command, message]
+      - id: file_and_directory_discovery
+        when:
+          all:
+          - {input: discovery_command, op: nonempty}
+          - {input: combined_text, op: contains_any, values: [' dir', 'dir ', ' ls', 'ls ', 'find ', 'tree ', 'locate ', 'grep ']}
+          - any:
+            - at_least:
+                count: 2
+                conditions:
+                - {input: combined_text, op: contains_any, values: [' dir', 'dir ', ' ls', 'ls ', 'find ', 'tree ', 'locate ', 'grep ']}
+                - {input: combined_text, op: contains_any, values: [net view, quser, qwinsta, arp -a, route print, ip neigh, 'nslookup ', resolve-dnsname, nltest /dclist, nltest.exe /dclist, ping -n 1, ping -c 1]}
+                - {input: combined_text, op: contains_any, values: [whoami, 'id ', hostname, uname -a, ipconfig, ifconfig]}
+            - {input: combined_text, op: contains_any, values: ['&&', '||', ';', ' | ']}
+            - {input: combined_text, op: contains_any, values: ['find ', 'tree ', 'locate ', 'grep ']}
+        emission: file_and_directory_discovery
+        description: File or directory discovery command semantics observed
+        confidence: low
+        evidence: [command, message]
+      - id: remote_system_discovery
+        when:
+          all:
+          - {input: discovery_command, op: nonempty}
+          - {input: combined_text, op: contains_any, values: [net view, quser, qwinsta, arp -a, route print, ip neigh, 'nslookup ', resolve-dnsname, nltest /dclist, nltest.exe /dclist, ping -n 1, ping -c 1]}
+        emission: remote_system_discovery
+        description: Remote-system discovery command semantics observed
+        confidence: low
+        evidence: [command, message]
+      - id: system_owner_user_discovery
+        when:
+          all:
+          - {input: discovery_command, op: nonempty}
+          - {input: combined_text, op: contains_any, values: [whoami, 'id ', hostname, uname -a, ipconfig, ifconfig]}
+          - any:
+            - at_least:
+                count: 2
+                conditions:
+                - {input: combined_text, op: contains_any, values: [' dir', 'dir ', ' ls', 'ls ', 'find ', 'tree ', 'locate ', 'grep ']}
+                - {input: combined_text, op: contains_any, values: [net view, quser, qwinsta, arp -a, route print, ip neigh, 'nslookup ', resolve-dnsname, nltest /dclist, nltest.exe /dclist, ping -n 1, ping -c 1]}
+                - {input: combined_text, op: contains_any, values: [whoami, 'id ', hostname, uname -a, ipconfig, ifconfig]}
+            - {input: combined_text, op: contains_any, values: ['&&', '||', ';', ' | ']}
+            - {input: combined_text, op: contains_any, values: [uname -a, ipconfig, ifconfig]}
+        emission: system_owner_user_discovery
+        description: System owner or host identity discovery command semantics observed
+        confidence: low
+        evidence: [command, message]
+      - id: cleanup_command
+        when: {input: combined_text, op: contains_any, values: [wevtutil cl, history -c, rm .bash_history, 'rm ~/.bash_history', truncate -s 0, 'shred ', sdelete, clear-eventlog]}
+        emission: indicator_removal_on_host
+        description: Cleanup or log/history clearing command semantics observed
+        confidence: medium
+        evidence: [command, message]
+      - id: log_artifact_deletion
+        when:
+          all:
+          - {input: timestamp_kind, op: equals_any, values: [delete]}
+          - {input: path_lower, op: contains_any, values: [/var/log/, /windows/system32/winevt/logs/, .bash_history, .zsh_history, .psql_history, .mysql_history]}
+        emission: indicator_removal_on_host
+        description: Log or shell-history artefact deletion observed
+        confidence: medium
+        evidence: [path, timestamp_desc]
+      - id: service_stop_command
+        when: {input: combined_text, op: contains_any, values: [sc stop, sc.exe stop, net stop, net.exe stop, stop-service, taskkill /f, taskkill.exe /f, systemctl stop]}
+        emission: service_stop
+        description: Service or process termination command semantics observed (T1489)
+        confidence: medium
+        evidence: [command, message, hostname]
+      - id: service_stopped_event
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['7036']}
+          - {input: message_lower, op: contains_any, values: [stopped]}
+        emission: service_stop
+        description: Windows Service Control Manager reports service entered stopped state (T1489)
+        confidence: low
+        evidence: [event_identifier, message, hostname]
+      - id: smb_admin_share_text
+        when: {input: combined_text, op: contains_any, values: ['\\c$', '\\admin$', '\\ipc$', /admin$, /ipc$]}
+        emission: smb_admin_share
+        description: Administrative share path observed in command, message, or URL text
+        confidence: medium
+        evidence: [command, message, url]
+      - id: smb_admin_share_unc
+        when: {input: combined_text, op: regex, pattern: '(?i)\\\\[^\\/\s]+\\(?:c\$|admin\$|ipc\$|print\$|netlogon|sysvol)'}
+        emission: smb_admin_share
+        description: UNC administrative share pattern observed
+        confidence: medium
+        evidence: [command, message, unc_path]
+      - id: smb_admin_share_event
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+          - any:
+            - {input: share_lower, op: contains_any, values: ['\\c$', '\\admin$', '\\ipc$', /admin$, /ipc$]}
+            - {input: share_lower, op: ends_with_any, values: ['\c$', '\admin$', '\ipc$', '\print$', '\netlogon', '\sysvol']}
+        emission: smb_admin_share
+        description: Windows share-access event references an administrative or lateral-movement share
+        confidence: medium
+        evidence: [event_identifier, share_name, share_local_path, relative_target_name]
+      - id: external_remote_admin_pipe
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+          - {input: relative_target_lower, op: contains_any, values: [svcctl, atsvc, winreg, samr, lsarpc, srvsvc, wkssvc, spoolss]}
+        emission: external_remote_service
+        description: Windows share-access semantics indicate remote administrative service or named-pipe activity
+        confidence: medium
+        evidence: [event_identifier, share_name, relative_target_name, share_local_path]
+      - id: external_remote_admin_share
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+          - any:
+            - {input: share_lower, op: contains_any, values: ['\\c$', '\\admin$', '\\ipc$', /admin$, /ipc$]}
+            - {input: share_lower, op: ends_with_any, values: ['\c$', '\admin$', '\ipc$', '\print$', '\netlogon', '\sysvol']}
+        emission: external_remote_service
+        description: Windows share-access semantics indicate remote administrative service or named-pipe activity
+        confidence: low
+        evidence: [event_identifier, share_name, relative_target_name, share_local_path]
+      - id: smb_network_logon_inference
+        when:
+          all:
+          # Preserve explicit share/pipe precedence: a type-3 authentication
+          # inference must not relabel an already-qualified share-access event.
+          - not:
+              any:
+              - all:
+                - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+                - any:
+                  - {input: share_lower, op: contains_any, values: ['\\c$', '\\admin$', '\\ipc$', /admin$, /ipc$]}
+                  - {input: share_lower, op: ends_with_any, values: ['\c$', '\admin$', '\ipc$', '\print$', '\netlogon', '\sysvol']}
+              - all:
+                - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+                - {input: relative_target_lower, op: contains_any, values: [svcctl, atsvc, winreg, samr, lsarpc, srvsvc, wkssvc, spoolss]}
+          - {input: auth_outcome, op: equals_any, values: [success]}
+          - {input: logon_type, op: equals_any, values: ['3']}
+          - any:
+            - {op: signal_any_positive, signals: [auth_service_logon, auth_newcredentials_logon], minimum_value_exclusive: 0}
+            - all:
+              - {op: signal_any_positive, signals: [lateral_movement_indicator], minimum_value_exclusive: 0}
+              - {input: authentication_package, op: equals_any, values: [ntlm, negotiate]}
+            - all:
+              - {input: authentication_package, op: equals_any, values: [ntlm, negotiate]}
+              - {input: workstation_name, op: nonempty}
+        emission: smb_admin_share
+        description: Network logon semantics and lateral-movement context suggest SMB or administrative share use
+        confidence: low
+        evidence: [event_identifier, logon_type, target_user, authentication_package, workstation_name]
+      - id: successful_windows_remote_service
+        when:
+          all:
+          - {input: auth_outcome, op: equals_any, values: [success]}
+          - {input: auth_protocol, op: equals_any, values: [windows-network]}
+          - any:
+            - {input: event_identifier, op: equals_any, values: ['5140', '5145']}
+            - {op: signal_any_positive, signals: [smb_admin_share, auth_newcredentials_logon, auth_ntlm_remote], minimum_value_exclusive: 0}
+        emission: external_remote_service
+        description: Successful remote-service access semantics observed
+        confidence: low
+        evidence: [auth_protocol, target_or_actor, event_identifier, share_name]
+      - id: successful_ssh_or_rdp_service
+        when:
+          all:
+          - {input: auth_outcome, op: equals_any, values: [success]}
+          - {input: auth_protocol, op: equals_any, values: [ssh, rdp]}
+          - any:
+            - {input: parser_lower, op: starts_with_any, values: [winevt]}
+            - {input: combined_text, op: contains_any, values: [sshd, rdp, remote desktop, ssh, winrm, terminalservices, session opened]}
+        emission: external_remote_service
+        description: Successful remote-service access semantics observed
+        confidence: low
+        evidence: [auth_protocol, target_or_actor, event_identifier, share_name]
+      - id: alternate_authentication_material
+        when:
+          all:
+          - any:
+            - {input: auth_outcome, op: equals_any, values: [success]}
+            - {input: event_identifier, op: equals_any, values: ['4648']}
+          - any:
+            - {op: signal_any_positive, signals: [auth_newcredentials_logon, auth_ntlm_remote], minimum_value_exclusive: 0}
+            - {input: event_identifier, op: equals_any, values: ['4648']}
+        emission: alternate_auth_material
+        description: Authentication semantics suggest alternate credential material, explicit credentials, or NTLM-based access
+        confidence: low
+        evidence: [event_identifier, logon_type, auth_protocol]
+      - id: application_protocol_text
+        when: {input: combined_text, op: contains_any, values: ['http://', 'https://', 'ftp://', 'sftp://', 'scp://', 'smb://', 'cifs://', '\\']}
+        emission: application_layer_protocol
+        description: Application-layer protocol indicator observed in command, URL, or message text
+        confidence: low
+        evidence: [command, url, message]
+      - id: application_protocol_transfer_signal
+        when: {op: signal_any_positive, signals: [data_transfer_tool_exec, large_http_transfer], minimum_value_exclusive: 0}
+        emission: application_layer_protocol
+        description: Transfer tooling or HTTP transfer suggests application-layer protocol use
+        confidence: low
+        evidence: [command, url]
+      - id: account_disabled_or_deleted
+        when: {input: event_identifier, op: equals_any, values: ['4725', '4726']}
+        emission: account_access_removal
+        description: Account disablement, deletion, or privilege removal semantics observed
+        confidence: medium
+        evidence: [event_identifier, target_or_member, member_name, message, group_name]
+      - id: privileged_group_removal
+        when:
+          all:
+          - {input: event_identifier, op: equals_any, values: ['4729', '4733', '4757']}
+          - {input: group_or_privileged_text, op: contains_any, values: [administrators, domain admins, enterprise admins, remote desktop users]}
+        emission: account_access_removal
+        description: Account disablement, deletion, or privilege removal semantics observed
+        confidence: medium
+        evidence: [event_identifier, target_or_member, member_name, message, group_name]
+      - id: other_account_access_removal
+        when:
+          any:
+          - {input: event_identifier, op: equals_any, values: ['4729', '4733', '4757']}
+          - {input: privileged_text, op: contains_any, values: [user account disabled, user account was disabled, user account deleted, removed from local group, removed from group, userdel]}
+        emission: account_access_removal
+        description: Account disablement, deletion, or privilege removal semantics observed
+        confidence: low
+        evidence: [event_identifier, target_or_member, member_name, message, group_name]
+      emissions:
+        authorized_keys_root_persistence: {name: authorized_keys_root_persistence, value: 1, rule_id: AUTHORIZED_KEYS_ROOT_PERSISTENCE, description: Root SSH authorized_keys persistence, confidence: high}
+        authorized_keys_persistence: {name: authorized_keys_persistence, value: 1, rule_id: AUTHORIZED_KEYS_PERSISTENCE, description: SSH authorized_keys persistence, confidence: medium}
+        inhibit_system_recovery: {name: inhibit_system_recovery, value: 1, rule_id: INHIBIT_SYSTEM_RECOVERY, description: System recovery inhibition semantics observed, confidence: high}
+        credential_dumping: {name: credential_dumping, value: 1, rule_id: CREDENTIAL_DUMPING, description: Credential dumping semantics observed, confidence: medium}
+        password_store_access: {name: password_store_access, value: 1, rule_id: PASSWORD_STORE_ACCESS, description: Password-store access semantics observed, confidence: medium}
+        file_and_directory_discovery: {name: file_and_directory_discovery, value: 1, rule_id: FILE_AND_DIRECTORY_DISCOVERY, description: File or directory discovery semantics observed, confidence: low}
+        remote_system_discovery: {name: remote_system_discovery, value: 1, rule_id: REMOTE_SYSTEM_DISCOVERY, description: Remote-system discovery semantics observed, confidence: low}
+        system_owner_user_discovery: {name: system_owner_user_discovery, value: 1, rule_id: SYSTEM_OWNER_USER_DISCOVERY, description: System owner or user discovery semantics observed, confidence: low}
+        indicator_removal_on_host: {name: indicator_removal_on_host, value: 1, rule_id: INDICATOR_REMOVAL_ON_HOST, description: Indicator removal semantics observed, confidence: medium}
+        service_stop: {name: service_stop, value: 1, rule_id: SERVICE_STOP, description: Service stop semantics observed, confidence: medium}
+        smb_admin_share: {name: smb_admin_share, value: 1, rule_id: SMB_ADMIN_SHARE, description: Administrative share semantics observed, confidence: medium}
+        external_remote_service: {name: external_remote_service, value: 1, rule_id: EXTERNAL_REMOTE_SERVICE, description: External remote service semantics observed, confidence: low}
+        alternate_auth_material: {name: alternate_auth_material, value: 1, rule_id: ALTERNATE_AUTH_MATERIAL, description: Alternate authentication material semantics observed, confidence: low}
+        application_layer_protocol: {name: application_layer_protocol, value: 1, rule_id: APPLICATION_LAYER_PROTOCOL, description: Application-layer protocol semantics observed, confidence: low}
+        account_access_removal: {name: account_access_removal, value: 1, rule_id: ACCOUNT_ACCESS_REMOVAL, description: Account access removal semantics observed, confidence: medium}
+      evidence:
+        path: {resolver: input, input: path}
+        timestamp_desc: {resolver: input, input: timestamp_desc, max_chars: 120}
+        actor_user: {resolver: input, input: actor_user}
+        kind: {resolver: input, input: timestamp_kind}
+        command: {resolver: input, input: discovery_command, max_chars: 240}
+        message: {resolver: input, input: message, max_chars: 240}
+        hostname: {resolver: input, input: hostname}
+        url: {resolver: input, input: url, max_chars: 240}
+        event_identifier: {resolver: input, input: event_identifier}
+        target_user: {resolver: input, input: target_user}
+        target_or_actor: {resolver: input, input: target_or_actor}
+        target_or_member: {resolver: input, input: target_or_member}
+        authentication_package: {resolver: input, input: authentication_package}
+        logon_type: {resolver: input, input: logon_type}
+        workstation_name: {resolver: input, input: workstation_name}
+        share_name: {resolver: input, input: share_name, max_chars: 240}
+        share_local_path: {resolver: input, input: share_local_path, max_chars: 240}
+        relative_target_name: {resolver: input, input: relative_target_name, max_chars: 240}
+        auth_protocol: {resolver: input, input: auth_protocol}
+        member_name: {resolver: input, input: member_name}
+        group_name: {resolver: input, input: group_name, max_chars: 120}
+        unc_path: {resolver: regex_capture, input: combined_text, pattern: '(?i)\\\\[^\\/\s]+\\(?:c\$|admin\$|ipc\$|print\$|netlogon|sysvol)', max_chars: 240}
+    contextual_signal_adjustments:
+      stage: contextual
+      executor: ordered_signal_adjustments
+      enabled: true
+      phase: 35
+      evidence_type: contextual
+      inputs:
+        command:
+          resolver: concat
+          fields: [actor_cmd, command_line, message]
+          normalise: none
+        combined_text_lower:
+          resolver: concat
+          fields: [actor_cmd, command_line, message]
+          normalise: lower
+        command_path_lower:
+          resolver: concat
+          fields: [actor_cmd, command_line, message]
+          normalise: path_lower
+      ordered_rules:
+      - id: discovery_reclassification
+        when:
+          input: combined_text_lower
+          op: contains_any
+          values: [net view, 'nslookup ', resolve-dnsname, nltest /dclist, nltest.exe /dclist, ping -n 1, ping -c 1]
+        signal_conditions:
+          minimum_value_exclusive: 0
+          required_any: [file_and_directory_discovery, remote_system_discovery, system_owner_user_discovery]
+          forbidden_any: [lolbin_suspicious_args]
+          preserved: [file_and_directory_discovery, remote_system_discovery, system_owner_user_discovery]
+        target_signals: [lolbin_windows, lolbin_linux, exec_shell_spawn, exec_network_tool, execution_lolbin, suspicious_execution]
+        action: {type: zero}
+        explanation:
+          rule_id: DISCOVERY_RECLASSIFICATION
+          description: Read-only discovery command was reclassified from generic execution to explicit discovery semantics
+          confidence: medium
+        evidence: [dampened_signals, preserved_discovery_signals, command]
+      - id: benign_admin_query_dampening
+        when:
+          all:
+          - not: {input: combined_text_lower, op: regex, pattern: '&&|\|\||;'}
+          - any:
+            - all:
+              - {input: combined_text_lower, op: contains_any, values: ['net user ']}
+              - not: {input: combined_text_lower, op: contains_any, values: [' /add', ' /delete', ' /active:', ' /expires:', ' /passwordchg:', ' /passwordreq:', ' /times:', ' /comment:', ' /fullname:', ' /homedir:', ' /scriptpath:', ' /usercomment:']}
+            - all:
+              - {input: combined_text_lower, op: contains_any, values: [net localgroup]}
+              - not: {input: combined_text_lower, op: contains_any, values: [' /add', ' /delete']}
+            - all:
+              - {input: combined_text_lower, op: contains_any, values: [cmd.exe /c klist]}
+              - not: {input: combined_text_lower, op: contains_any, values: [' purge', ' add_bind', ' kcd_cache']}
+            - all:
+              - {input: combined_text_lower, op: contains_any, values: [schtasks /query, schtasks.exe /query, 'wmic ', ' reg query', 'reg query ', sc query, sc qc, sc queryex, wevtutil qe, get-mppreference, get-netfirewallprofile, get-service, get-scheduledtask, get-nettcpconnection, get-process, get-ciminstance, get-winevent, test-netconnection, netsh advfirewall show, tasklist, 'netstat ', 'ps aux | grep', 'ps -ef | grep', 'ipconfig ', route print, arp -a, net accounts, gpresult /r, whoami /groups, whoami /priv, cmd.exe /c klist, get-computerinfo, get-localuser, get-localgroup, get-hotfix, get-netipaddress, get-netroute, get-dnsclientcache, get-netneighbor, netsh interface ip show, query user, query session, qwinsta, quser, auditpol /get, 'net user ', net localgroup, uname -a, uname -r, uname -s, hostnamectl status, cat /etc/os-release, lsb_release -a, ifconfig -a]}
+              - any:
+                - {input: combined_text_lower, op: contains_any, values: [get-scheduledtask, get-nettcpconnection, get-process, get-ciminstance, get-winevent, test-netconnection, tasklist, 'netstat ', 'ps aux | grep', 'ps -ef | grep', 'ipconfig ', route print, arp -a, query user, query session, qwinsta, quser, auditpol /get, 'net user ', net localgroup, net accounts, gpresult /r, whoami /groups, whoami /priv, get-computerinfo, get-localuser, get-localgroup, get-hotfix, get-netipaddress, get-netroute, get-dnsclientcache, get-netneighbor, netsh interface ip show, uname -a, uname -r, uname -s, hostnamectl status, cat /etc/os-release, lsb_release -a, ifconfig -a]}
+                - {input: combined_text_lower, op: contains_any, values: ['/query', ' query', ' list', ' get ', ' get-', ' qe ', 'enum ', ' /fo ', ' /v', ' show ', ' qc ', ' status', ' test-netconnection', ' | grep', ' /svc', ' -an', ' -ano', ' -a ']}
+        signal_conditions:
+          minimum_value_exclusive: 0
+          forbidden_any: [lolbin_suspicious_args]
+        target_signals: [lolbin_windows, exec_shell_spawn, exec_network_tool, data_transfer_tool_exec, transfer_execution, application_layer_protocol, file_and_directory_discovery, remote_system_discovery, system_owner_user_discovery, execution_lolbin, suspicious_execution]
+        action: {type: zero}
+        explanation:
+          rule_id: BENIGN_ADMIN_QUERY_DAMPENING
+          description: Query-only administrative command dampened generic LOLBin execution signals
+          confidence: medium
+        evidence: [signals, command]
+      - id: benign_backup_archive_dampening
+        when:
+          all:
+          - {input: command_path_lower, op: contains_any, values: ['tar ', 'zip ', '7z ', 'rar ', 'gzip ']}
+          - {input: command_path_lower, op: contains_any, values: [/var/backups/, /backup/, ' backup', .bak, .tgz, .tar.gz, .zip]}
+          - not: {input: command_path_lower, op: contains_any, values: ['login data', logins.json, key4.db, .kdbx, lsass, ntds.dit, sam.save, web.config]}
+        signal_conditions:
+          minimum_value_exclusive: 0
+          forbidden_any: [password_store_access, credential_dumping, sensitive_file_access]
+        target_signals: [lolbin_linux, exec_archive_tool, execution_lolbin, suspicious_execution]
+        action: {type: zero}
+        explanation:
+          rule_id: BENIGN_BACKUP_ARCHIVE_DAMPENING
+          description: Routine backup-style archive command dampened generic execution signals
+          confidence: medium
+        evidence: [signals, command]
+      evidence:
+        command: {resolver: input, input: command, max_chars: 240}
+        signals: {resolver: changed_signals}
+        dampened_signals: {resolver: changed_signals}
+        preserved_discovery_signals: {resolver: preserved_positive_signals}
+    systemd_service_persistence:
+      stage: contextual
+      executor: systemd_service_persistence
+      enabled: true
+      branch_mode: first_match
+      branch_order: [artifact_change, command_activity]
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        timestamp_kind:
+          resolver: timestamp_desc_kind
+          field: timestamp_desc
+          kinds:
+            priority: [create, delete, modify, access]
+            contains:
+              create: [create, creation, birth]
+              delete: [delet]
+              modify: [modif, change, content, mtime]
+              access: [access, open, atime]
+        combined_text:
+          resolver: concat_lower
+          fields:
+          - actor_cmd
+          - command_line
+          - message
+          first_existing:
+          - actor_url
+          - url
+      branches:
+        artifact_change:
+          conditions:
+            any:
+            - all: [artifact_path, unit_extension, timestamp_kind]
+          path_contains: [/etc/systemd/system/, /lib/systemd/system/, /usr/lib/systemd/system/, /etc/init.d/, '/system/currentcontrolset/services/']
+          extension_in: [.service, .socket, .timer, .mount, .path]
+          timestamp_kinds:
+          - create
+          - modify
+          - delete
+          description: Systemd unit artefact changed under a service manager path
+          confidence: high
+          evidence:
+          - path
+          - timestamp_desc
+          - hostname
+        command_activity:
+          conditions:
+            any:
+            - all: [persistent_token]
+            - all: [transient_token, unit_reference_extension]
+            - all: [transient_token, unit_reference_path]
+          persistent_tokens:
+          - systemctl enable
+          - systemctl link
+          - systemctl preset
+          - daemon-reload
+          transient_tokens:
+          - systemctl start
+          - systemctl restart
+          unit_reference_extensions: [.service, .socket, .timer, .mount, .path]
+          unit_reference_path_tokens:
+          - /etc/systemd/
+          - /lib/systemd/system/
+          - /usr/lib/systemd/system/
+          - /run/systemd/system/
+          description: Systemd enablement or unit-management semantics observed in command or log text
+          confidence: medium
+          evidence:
+          - command
+          - message
+          - hostname
+      emissions:
+      - name: systemd_service_persistence
+        value: 1
+        rule_id: SYSTEMD_SERVICE_PERSISTENCE
+      evidence:
+        path:
+          resolver: best_effort_file_path
+          fields: [filename, relative_path, display_name, pathspec, link_target]
+        timestamp_desc:
+          resolver: row_field
+          field: timestamp_desc
+          max_chars: 120
+        hostname: {resolver: row_field, field: hostname}
+        command:
+          resolver: first_nonempty
+          fields: [actor_cmd, command_line, message, actor_url, url]
+          max_chars: 240
+        message:
+          resolver: first_nonempty
+          fields: [message, actor_url, url, actor_cmd, command_line]
+          max_chars: 240
+    download_to_execution:
+      stage: temporal
+      executor: signal_sequence_by_artifact
+      enabled: true
+      evidence_type: contextual
+      lookback: 2h
+      ordering: source_at_or_before_target
+      window_bounds: closed
+      source_selection: earliest_in_window
+      emit_on: target
+      key:
+        scope: deadbox_global
+        host_field: hostname
+        artifact:
+          resolver: best_effort_file_basename
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+      source:
+        any_signals:
+        - browser_download
+        minimum_signal_value_exclusive: 0
+      target:
+        any_signals:
+        - suspicious_execution
+        - prefetch_execution
+        - amcache_execution
+        - execution_lolbin
+        - execution_interpreter
+        minimum_signal_value_exclusive: 0
+      emissions:
+      - name: user_execution_after_download
+        value: 1
+        rule_id: USER_EXECUTION_AFTER_DOWNLOAD
+        description: Downloaded item was executed within a bounded window
+        confidence: medium
+      - name: ingress_tool_transfer
+        value: 1
+        rule_id: INGRESS_TOOL_TRANSFER
+        description: Downloaded or retrieved tool was subsequently executed
+        confidence: medium
+      evidence:
+      - filename
+      - download_timestamp
+      - execution_timestamp
+      - hostname
+    canonical_authentication:
+      stage: atomic
+      executor: canonical_authentication
+      enabled: true
+      evidence_type: direct
+      inputs:
+        fields:
+          outcome: auth_outcome
+          protocol: auth_protocol
+          direction: auth_direction
+          logon_type: logon_type
+          message: message
+          authentication_package: authentication_package
+        source_signals:
+          success: [auth_success_generic, ssh_success, rdp_success]
+          failure: [auth_fail_generic, ssh_fail, rdp_fail]
+          minimum_signal_value_exclusive: 0
+      outcomes:
+        success: success
+        failure: failure
+        outcome_source_match: any
+        conflict_resolution: allow_both
+      semantics:
+        remote:
+          match: any
+          direction_values: [remote]
+          protocol_values: [ssh, rdp, windows-network]
+        remote_interactive:
+          match: any
+          protocol_values: [rdp]
+          logon_types: ['10']
+        remote_shell:
+          protocol_values: [ssh]
+        invalid_user:
+          message_contains: [invalid user, unknown user]
+        new_credentials:
+          logon_types: ['9']
+        service_logon:
+          logon_types: ['4', '5']
+        ntlm_remote:
+          authentication_packages: [ntlm]
+        lateral_movement:
+          include_remote: true
+          logon_types: ['3', '10']
+          authentication_packages: [ntlm]
+          minimum_matches: 2
+      eligibility: {all: [], any: [success, failure], none: []}
+      decisions:
+        success: {all: [success], any: [], none: []}
+        failure: {all: [failure], any: [], none: []}
+        remote_success: {all: [success, remote], any: [], none: []}
+        remote_failure: {all: [failure, remote], any: [], none: []}
+        local_success: {all: [success], any: [], none: [remote]}
+        local_failure: {all: [failure], any: [], none: [remote]}
+        remote_interactive_success: {all: [success, remote, remote_interactive], any: [], none: []}
+        remote_shell_success: {all: [success, remote, remote_shell], any: [], none: []}
+        invalid_user: {all: [failure, invalid_user], any: [], none: []}
+        new_credentials_logon: {all: [success, new_credentials], any: [], none: []}
+        service_logon: {all: [success, service_logon], any: [], none: []}
+        ntlm_remote: {all: [success, remote, ntlm_package], any: [], none: []}
+        lateral_movement: {all: [success, lateral_movement], any: [], none: []}
+      emissions:
+        success:
+          name: auth_success
+          value: 1
+          rule_id: AUTH_SUCCESS
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        failure:
+          name: auth_failure
+          value: 1
+          rule_id: AUTH_FAILURE
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        remote_success:
+          name: auth_remote_success
+          value: 1
+          rule_id: AUTH_REMOTE_SUCCESS
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        remote_failure:
+          name: auth_remote_failure
+          value: 1
+          rule_id: AUTH_REMOTE_FAILURE
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        local_success:
+          name: auth_local_success
+          value: 1
+          rule_id: AUTH_LOCAL_SUCCESS
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        local_failure:
+          name: auth_local_failure
+          value: 1
+          rule_id: AUTH_LOCAL_FAILURE
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        remote_interactive_success:
+          name: auth_remote_interactive_success
+          value: 1
+          rule_id: AUTH_REMOTE_INTERACTIVE_SUCCESS
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        remote_shell_success:
+          name: auth_remote_shell_success
+          value: 1
+          rule_id: AUTH_REMOTE_SHELL_SUCCESS
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        invalid_user:
+          name: auth_invalid_user
+          value: 1
+          rule_id: AUTH_INVALID_USER
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        new_credentials_logon:
+          name: auth_newcredentials_logon
+          value: 1
+          rule_id: AUTH_NEWCREDENTIALS_LOGON
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        service_logon:
+          name: auth_service_logon
+          value: 1
+          rule_id: AUTH_SERVICE_LOGON
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        ntlm_remote:
+          name: auth_ntlm_remote
+          value: 1
+          rule_id: AUTH_NTLM_REMOTE
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+        lateral_movement:
+          name: lateral_movement_indicator
+          value: 1
+          rule_id: LATERAL_MOVEMENT_INDICATOR
+          description: Canonical authentication signal derived from protocol-specific success/failure semantics
+          confidence: high
+      evidence: [derived_from]
+    execution_context_classifier:
+      stage: atomic
+      executor: execution_context_classifier
+      enabled: true
+      evidence_type: direct
+      inputs:
+        path:
+          resolver: first_nonempty
+          fields: [image_path, new_process_name, file_path, filename, relative_path, display_name, pathspec, path]
+        command:
+          resolver: first_nonempty
+          fields: [actor_cmd, command_line, command, message]
+        actor:
+          resolver: first_nonempty
+          fields: [actor_principal, actor_user]
+      classification:
+        temporary_path_contains:
+        - /tmp/
+        - /var/tmp/
+        - /dev/shm/
+        - '\temp\'
+        - '%temp%'
+        - '\windows\temp\'
+        - '\appdata\local\temp\'
+        user_writable_path_contains:
+        - /tmp/
+        - /var/tmp/
+        - /dev/shm/
+        - /home/
+        - /users/
+        - /downloads/
+        - '\users\public\'
+        - '\users\'
+        - '\temp\'
+        - '\appdata\'
+        - '%temp%'
+        - '%appdata%'
+        - '\windows\temp\'
+        - '\appdata\local\temp\'
+        suspicious_path_contains:
+        - /run/
+        - /var/run/
+        - /opt/
+        - '\programdata\'
+        - '\perflogs\'
+        - '\recycler\'
+        - '\windows\debug\'
+        - '\intel\'
+        system_binary_names: [svchost.exe, lsass.exe, explorer.exe, sshd, bash]
+        command_names:
+          compiler: [gcc, cc, make]
+          shell: [sh, bash, cmd, cmd.exe, powershell, pwsh]
+          network: [nc, netcat, ncat, socat, curl, wget, ftp, scp, sftp]
+          archive: [tar, zip, 7z, rar, gzip]
+        privileged_actors: [root, administrator, admin]
+        suid_regex: '(?i)(?:chmod\s+4[0-7]{3}|chmod\s+u\+s|setuid|setgid|chown\s+root(?::root)?|suid)'
+      decisions:
+        from_tmp: {all: [temporary_path], any: [], none: []}
+        from_user_writable: {all: [], any: [temporary_path, user_writable_path], none: []}
+        suspicious_path: {all: [suspicious_path], any: [], none: [temporary_path, user_writable_path]}
+        system_binary_in_user_path: {all: [system_binary_name], any: [temporary_path, user_writable_path, suspicious_path], none: []}
+        compiler_activity: {all: [compiler_command], any: [], none: []}
+        shell_spawn: {all: [shell_command], any: [], none: []}
+        network_tool: {all: [network_command], any: [], none: []}
+        archive_tool: {all: [archive_command], any: [], none: []}
+        privileged_context: {all: [privileged_actor], any: [], none: []}
+        new_suid_binary: {all: [suid_command], any: [], none: []}
+      emissions:
+        from_tmp:
+          name: exec_from_tmp
+          value: 1
+          rule_id: EXEC_FROM_TMP
+          description: Execution path indicates a temporary directory
+          confidence: medium
+        from_user_writable:
+          name: exec_from_user_writable
+          value: 1
+          rule_id: EXEC_FROM_USER_WRITABLE
+          description: Execution path indicates a user-writable location
+          confidence: medium
+        suspicious_path:
+          name: exec_suspicious_path
+          value: 1
+          rule_id: EXEC_SUSPICIOUS_PATH
+          description: Execution path indicates a suspicious location
+          confidence: medium
+        system_binary_in_user_path:
+          name: exec_system_binary_in_user_path
+          value: 1
+          rule_id: EXEC_SYSTEM_BINARY_IN_USER_PATH
+          description: System binary name executed from a suspicious or user-writable path
+          confidence: medium
+        compiler_activity:
+          name: exec_compiler_activity
+          value: 1
+          rule_id: EXEC_COMPILER_ACTIVITY
+          description: Compiler or build-tool activity observed
+          confidence: medium
+        shell_spawn:
+          name: exec_shell_spawn
+          value: 1
+          rule_id: EXEC_SHELL_SPAWN
+          description: Shell execution observed
+          confidence: medium
+        network_tool:
+          name: exec_network_tool
+          value: 1
+          rule_id: EXEC_NETWORK_TOOL
+          description: Network transfer tooling observed
+          confidence: medium
+        archive_tool:
+          name: exec_archive_tool
+          value: 1
+          rule_id: EXEC_ARCHIVE_TOOL
+          description: Archive tooling observed
+          confidence: medium
+        privileged_context:
+          name: exec_privileged_context
+          value: 1
+          rule_id: EXEC_PRIVILEGED_CONTEXT
+          description: Execution occurred in a privileged user context
+          confidence: medium
+        new_suid_binary:
+          name: exec_new_suid_binary
+          value: 1
+          rule_id: EXEC_NEW_SUID_BINARY
+          description: Privilege-escalation or SUID-related command semantics observed
+          confidence: high
+      evidence: [path, command, actor_user, derived_from]
+    execution_lolbin:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - lolbin_windows
+        - lolbin_linux
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: execution_lolbin
+        value: 1
+        rule_id: EXECUTION_LOLBIN
+        description: Canonical execution signal derived from execution-related source detections
+        confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    execution_lolbin_suspicious_args:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - lolbin_suspicious_args
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: execution_lolbin_suspicious_args
+        value: 1
+        rule_id: EXECUTION_LOLBIN_SUSPICIOUS_ARGS
+        description: Canonical execution signal derived from execution-related source detections
+        confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    execution_interpreter:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - interpreter_exec_linux
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: execution_interpreter
+        value: 1
+        rule_id: EXECUTION_INTERPRETER
+        description: Canonical execution signal derived from execution-related source detections
+        confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    execution_scheduled:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - scheduled_exec
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: execution_scheduled
+        value: 1
+        rule_id: EXECUTION_SCHEDULED
+        description: Canonical execution signal derived from execution-related source detections
+        confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    execution_privileged_scheduled:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - privileged_scheduled_exec
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: execution_privileged_scheduled
+        value: 1
+        rule_id: EXECUTION_PRIVILEGED_SCHEDULED
+        description: Canonical execution signal derived from execution-related source detections
+        confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    suspicious_execution:
+      stage: atomic
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - interpreter_exec_linux
+        - lolbin_windows
+        - lolbin_linux
+        - lolbin_suspicious_args
+        - scheduled_exec
+        - privileged_scheduled_exec
+        - data_transfer_tool_exec
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: suspicious_execution
+        value: 1
+        rule_id: SUSPICIOUS_EXECUTION
+        description: Suspicious execution family derived from execution-related atomic detections
+        confidence: medium
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    masquerading:
+      stage: contextual
+      executor: signal_gate
+      enabled: true
+      evidence_type: direct
+      inputs:
+        signals:
+        - exec_system_binary_in_user_path
+      conditions:
+        match: any
+        minimum_value_exclusive: 0
+      emissions:
+      - name: masquerading
+        value: 1
+        rule_id: MASQUERADING
+        description: Trusted or system binary name executed from an unexpected user-writable or suspicious path
+        confidence: medium
+      evidence:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        command:
+          resolver: first_nonempty
+          fields:
+          - actor_cmd
+          max_chars: 240
+        hostname:
+          resolver: row_field
+          field: hostname
+    automated_collection:
+      stage: contextual
+      executor: signal_gate
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        signals:
+        - sensitive_file_access
+        - password_store_access
+        - archive_created
+        - large_archive_created
+        - repeated_scheduled_exec
+      conditions:
+        match: all
+        minimum_value_exclusive: 0
+        groups:
+        - match: any
+          signals:
+          - sensitive_file_access
+          - password_store_access
+        - match: any
+          signals:
+          - archive_created
+          - large_archive_created
+          - repeated_scheduled_exec
+      emissions:
+      - name: automated_collection
+        value: 1
+        rule_id: AUTOMATED_COLLECTION
+        description: Sensitive access combined with archiving or repeated scheduled execution suggests automated collection
+        confidence: low
+      evidence:
+        hostname:
+          resolver: row_field
+          field: hostname
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+    canonical_persistence_projection:
+      stage: contextual
+      executor: signal_projection
+      enabled: true
+      evidence_type: direct
+      projections:
+      - inputs:
+          signals: [persistence_service, persistence_scheduled_task, persistence_runkey, systemd_service_persistence, authorized_keys_persistence, authorized_keys_root_persistence]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: persistence_mechanism
+          value: 1
+          rule_id: PERSISTENCE_MECHANISM
+          description: Canonical persistence signal derived from persistence-related source detections
+          confidence: high
+      - inputs:
+          signals: [persistence_service, systemd_service_persistence]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: persistence_service_install
+          value: 1
+          rule_id: PERSISTENCE_SERVICE_INSTALL
+          description: Canonical persistence signal derived from persistence-related source detections
+          confidence: high
+      - inputs:
+          signals: [persistence_scheduled_task]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: persistence_scheduled
+          value: 1
+          rule_id: PERSISTENCE_SCHEDULED
+          description: Canonical persistence signal derived from persistence-related source detections
+          confidence: high
+      - inputs:
+          signals: [persistence_runkey]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: persistence_registry
+          value: 1
+          rule_id: PERSISTENCE_REGISTRY
+          description: Canonical persistence signal derived from persistence-related source detections
+          confidence: high
+      - inputs:
+          signals: [account_or_group_change, authorized_keys_persistence, authorized_keys_root_persistence]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: identity_persistence_change
+          value: 1
+          rule_id: IDENTITY_PERSISTENCE_CHANGE
+          description: Canonical identity persistence signal derived from broader account/group change provenance
+          confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    canonical_transfer_projection:
+      stage: contextual
+      executor: signal_projection
+      enabled: true
+      evidence_type: direct
+      projections:
+      - inputs:
+          signals: [large_archive_created, archive_created]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: staging_archive
+          value: 1
+          rule_id: STAGING_ARCHIVE
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      - inputs:
+          signals: [data_transfer_tool_exec]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: transfer_execution
+          value: 1
+          rule_id: TRANSFER_EXECUTION
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      - inputs:
+          signals: [large_http_transfer]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: transfer_large_http
+          value: 1
+          rule_id: TRANSFER_LARGE_HTTP
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    canonical_transfer_post_temporal_projection:
+      stage: temporal
+      executor: signal_projection
+      enabled: true
+      evidence_type: direct
+      projections:
+      - inputs:
+          signals: [staging_then_transfer]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: transfer_exfiltration_pattern
+          value: 1
+          rule_id: TRANSFER_EXFILTRATION_PATTERN
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      - inputs:
+          signals: [cross_border_transfer]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: transfer_cross_border
+          value: 1
+          rule_id: TRANSFER_CROSS_BORDER
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      - inputs:
+          signals: [sensitive_data_staged, archive_after_sensitive_access]
+        conditions: {match: any, minimum_value_exclusive: 0}
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: transfer_sensitive_staging
+          value: 1
+          rule_id: TRANSFER_SENSITIVE_STAGING
+          description: Canonical transfer/exfiltration signal derived from staging, transfer, or exfiltration-pattern detections
+          confidence: high
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    ransomware_impact:
+      stage: temporal
+      executor: temporal_context_branches
+      enabled: true
+      evidence_type: contextual
+      lookback: 2h
+      window_bounds: closed
+      key:
+        scope: deadbox_global
+      emit_on: source
+      source:
+        any_signals:
+        - mass_file_modification
+        - ransomware_extension_burst
+        - yara_ransomware
+        - av_ransomware
+        minimum_signal_value_exclusive: 0
+      branches:
+        prior_support:
+          direction: before_or_same
+          any_signals:
+          - defender_disabled
+          - inhibit_system_recovery
+          - suspicious_execution
+          minimum_signal_value_exclusive: 0
+          description: Ransomware-like activity followed defense impairment, recovery inhibition, or suspicious execution within a bounded window
+        ransom_note:
+          direction: same_or_after
+          path:
+            resolver: best_effort_file_path
+            fields:
+            - filename
+            - relative_path
+            - display_name
+            - pathspec
+            - link_target
+          basename_contains:
+          - readme
+          - decrypt
+          - recover
+          - restore
+          - how_to
+          - ransom
+          description: Ransomware-like file-change activity was followed by likely ransom-note creation within a bounded window
+      emissions:
+      - name: ransomware_impact
+        value: 1
+        rule_id: RANSOMWARE_IMPACT
+        description: Ransomware-like activity has bounded supporting impact context
+        confidence: medium
+      evidence:
+        hostname: {resolver: row_field, field: hostname}
+        source_signals: {resolver: matched_source_signals}
+        support_timestamp: {resolver: support_timestamp}
+        ransom_note_timestamp: {resolver: ransom_note_timestamp}
+    automated_exfiltration:
+      stage: temporal
+      executor: counted_signal_window
+      enabled: true
+      evidence_type: contextual
+      lookback: 30m
+      window_bounds: closed
+      key:
+        scope: deadbox_global
+      emit_on:
+      - counted
+      - current_support
+      threshold: 2
+      minimum_signal_value_exclusive: 0
+      count:
+        mode: rows_once
+        any_signals:
+        - transfer_execution
+        - data_transfer_tool_exec
+        - staging_then_transfer
+        - large_http_transfer
+      support:
+        window_any_signals:
+        - sensitive_file_access
+        - password_store_access
+        current_any_signals:
+        - suspicious_execution
+        - application_layer_protocol
+        - staging_then_transfer
+        - cross_border_transfer
+      emissions:
+      - name: automated_exfiltration
+        value: 1
+        rule_id: AUTOMATED_EXFILTRATION
+        description: Repeated transfer behaviour co-occurred with sensitive access, staging, or exfiltration context within a bounded window
+        confidence: low
+      evidence:
+        hostname: {resolver: row_field, field: hostname}
+        count_in_window: {resolver: count_in_window}
+        window_seconds: {resolver: window_seconds}
+    credential_dump_collection:
+      stage: temporal
+      executor: artifact_follow_on_sequence
+      enabled: true
+      evidence_type: contextual
+      lookback: 1h
+      window_bounds: closed
+      ordering: source_at_or_before_follow_on
+      key:
+        scope: deadbox_global
+      emit_on: source
+      source:
+        any_signals:
+        - credential_dumping
+        - yara_offensive_tool
+        - av_offensive_tool
+        minimum_signal_value_exclusive: 0
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        combined_text:
+          resolver: concat_lower
+          fields:
+          - message
+          - command_line
+      labels:
+        contains_any:
+        - lsass.dmp
+        - lsass
+        - ntds.dit
+        - sam.save
+        - security.save
+        - system.save
+        - comsvcs.dll
+        - minidump
+        - procdump
+        - sekurlsa
+      copy_stage:
+        command_tokens:
+        - 'copy '
+        - 'cp '
+        - 'xcopy '
+        - robocopy
+        - 'move '
+        - 'mv '
+        - copy-item
+        - 'tar '
+        - 'zip '
+        - '7z '
+        - 'rar '
+        - 'scp '
+        - 'sftp '
+        - 'curl '
+        - 'wget '
+        support_text_tokens:
+        - login data
+        - key4.db
+        - logins.json
+        - .kdbx
+        - credentials
+        - vault
+        - web.config
+        support_signals:
+        - credential_dumping
+        - password_store_access
+        minimum_signal_value_exclusive: 0
+      follow_on:
+        any_signals:
+        - transfer_execution
+        - data_transfer_tool_exec
+        - staging_then_transfer
+        - large_http_transfer
+        - archive_created
+        - large_archive_created
+        minimum_signal_value_exclusive: 0
+        allow_unlabelled: true
+      follow_on_qualification:
+        any:
+        - all: [copy_command, copy_text_support]
+        - all: [copy_command, copy_signal_support]
+        - all: [follow_on_signal]
+      emissions:
+      - name: credential_dump_collection
+        value: 1
+        rule_id: CREDENTIAL_DUMP_COLLECTION
+        description: Credential-dumping or offensive-tool evidence was followed by copying, archiving, or transfer activity within a bounded window
+        confidence: medium
+      evidence:
+        hostname: {resolver: row_field, field: hostname}
+        source_timestamp: {resolver: source_timestamp}
+        window_seconds: {resolver: window_seconds}
+    password_store_exfil_chain:
+      stage: temporal
+      executor: artifact_follow_on_sequence
+      enabled: true
+      evidence_type: contextual
+      lookback: 1h
+      window_bounds: closed
+      ordering: source_at_or_before_follow_on
+      key:
+        scope: deadbox_global
+      emit_on: source
+      source:
+        any_signals:
+        - password_store_access
+        minimum_signal_value_exclusive: 0
+      inputs:
+        path:
+          resolver: best_effort_file_path
+          fields:
+          - filename
+          - relative_path
+          - display_name
+          - pathspec
+          - link_target
+        combined_text:
+          resolver: concat_lower
+          fields:
+          - message
+          - command_line
+      labels:
+        contains_any:
+        - login data
+        - key4.db
+        - logins.json
+        - .kdbx
+        - credentials
+        - vault
+        - web.config
+      copy_stage:
+        command_tokens:
+        - 'copy '
+        - 'cp '
+        - 'xcopy '
+        - robocopy
+        - 'move '
+        - 'mv '
+        - copy-item
+        - 'tar '
+        - 'zip '
+        - '7z '
+        - 'rar '
+        - 'scp '
+        - 'sftp '
+        - 'curl '
+        - 'wget '
+        support_text_tokens:
+        - login data
+        - key4.db
+        - logins.json
+        - .kdbx
+        - credentials
+        - vault
+        - web.config
+        support_signals:
+        - credential_dumping
+        - password_store_access
+        minimum_signal_value_exclusive: 0
+      follow_on:
+        any_signals:
+        - transfer_execution
+        - data_transfer_tool_exec
+        - staging_then_transfer
+        - large_http_transfer
+        - archive_created
+        - large_archive_created
+        minimum_signal_value_exclusive: 0
+        allow_unlabelled: true
+      follow_on_qualification:
+        any:
+        - all: [copy_command, copy_text_support]
+        - all: [copy_command, copy_signal_support]
+        - all: [follow_on_signal]
+      emissions:
+      - name: password_store_exfil_chain
+        value: 1
+        rule_id: PASSWORD_STORE_EXFIL_CHAIN
+        description: Password-store access was followed by copy, archive, or transfer activity within a bounded window
+        confidence: medium
+      evidence:
+        hostname: {resolver: row_field, field: hostname}
+        source_timestamp: {resolver: source_timestamp}
+        window_seconds: {resolver: window_seconds}
+    webshell_activity:
+      stage: temporal
+      executor: signal_sequence
+      enabled: true
+      evidence_type: contextual
+      lookback: 30m
+      ordering: source_at_or_before_target
+      window_bounds: closed
+      source_selection: earliest_in_window
+      emit_on: target
+      key:
+        scope: deadbox_global
+      source:
+        any_signals:
+        - webshell_artifact
+        minimum_signal_value_exclusive: 0
+      target:
+        any_signals:
+        - web_exploitation_hint
+        - exploit_public_facing_app
+        minimum_signal_value_exclusive: 0
+      emissions:
+      - name: webshell_activity
+        value: 1
+        rule_id: WEBSHELL_ACTIVITY
+        description: Web-shell-like file artefact and suspicious web request activity co-occurred within a bounded window
+        confidence: high
+      evidence:
+        hostname:
+          resolver: target_field
+          field: hostname
+        artifact_timestamp:
+          resolver: source_timestamp
+        request_timestamp:
+          resolver: target_timestamp
+    web_upload_execution_chain:
+      stage: temporal
+      executor: signal_sequence
+      enabled: true
+      evidence_type: contextual
+      lookback: 30m
+      ordering: source_at_or_before_target
+      window_bounds: closed
+      source_selection: earliest_in_window
+      emit_on: target
+      key:
+        scope: deadbox_global
+      source:
+        any_signals:
+        - webshell_artifact
+        minimum_signal_value_exclusive: 0
+      target:
+        any_signals:
+        - prefetch_execution
+        - amcache_execution
+        - suspicious_execution
+        - execution_lolbin
+        - execution_interpreter
+        minimum_signal_value_exclusive: 0
+        where:
+          match: any
+          path:
+            resolver: best_effort_file_path
+            fields: [filename, relative_path, display_name, pathspec, link_target]
+            contains_any: [/var/www/, /srv/www/, /usr/share/nginx/html/, /htdocs/, /httpdocs/, '/inetpub/wwwroot/', '/xampp/htdocs/']
+          combined_text:
+            resolver: concat_lower
+            fields: [message, command_line, filename, relative_path, display_name, pathspec, link_target]
+            contains_any:
+            - /var/www/
+            - /srv/www/
+            - inetpub
+            - wwwroot
+            - .php
+            - .aspx
+            - .jsp
+            - .jspx
+            - .ashx
+      emissions:
+      - name: web_upload_execution_chain
+        value: 1
+        rule_id: WEB_UPLOAD_EXECUTION_CHAIN
+        description: Web-root script artefact was followed by suspicious execution within a bounded window
+        confidence: medium
+      evidence:
+        hostname:
+          resolver: target_field
+          field: hostname
+        artifact_timestamp:
+          resolver: source_timestamp
+        execution_timestamp:
+          resolver: target_timestamp
 engine_notes:
-  temporal_profiling: 'ChronoSift can inject context signals derived from a dataset-wide hour-of-week activity profile: hour_rarity
-    (0..1, surprisal with smoothing) and quiet_time_event (0/1, bottom-quantile hours). These are computed from host-resident
-    events (excluding web access telemetry) and are injected into chronosift_signals after rule evaluation and before scoring.
-    No explicit DSL rules are required.'
+  temporal_profiling: 'ChronoSift derives dataset-wide hour-of-week rarity from host-resident events (excluding web access
+    telemetry). The shipped policy uses that dense profile only for configured multipliers. Optional hour_rarity (0..1,
+    surprisal with smoothing) and quiet_time_event emissions can be enabled explicitly; when enabled they enter the ordinary
+    signal map before scoring with their configured value, merge, and explanation policies.'
   geoip_metadata: When GeoLite2 City/ASN databases are provided, ChronoSift records input DB paths and file modification times
     in df.attrs['chronosift_metadata']['geoip'] for reproducibility.
   config_hygiene: ChronoSift lowercases signal keys during scoring to avoid case drift. Config validation checks (optional)
@@ -1682,23 +5331,39 @@ engine_notes:
     empty list values ([]) from being treated as hits while preserving the raw yara_match field for analyst-facing evidence.
   message_context_hardening: Rules keyed on privileged-account names or transfer-tool names are restricted to structured actor
     or execution-history contexts where possible, to avoid false positives from file paths or file content.
-  referenced_file_hit_propagation: The engine emits referenced_file_yara_hit, referenced_file_av_hit, and referenced_file_luhn_hit
-    when a row references an exact file path that has direct YARA, AV, or Luhn hits elsewhere in the timeline. For web-server
-    logs, configurable document roots add canonical URL-path aliases; successful Luhn-positive GET downloads and access or upload
-    of AV/strong-YARA files receive direction-aware signals without a maximum time window. Manifest schema v4 retains AV
-    signature/family/category and strong YARA rule/category/score/quality metadata for evidence-qualified downstream mapping,
-    and adds SHA-256 hit/identity indexes for hash-based upload correlation. Older manifests are rebuilt automatically.
-  yara_strength: 'Binary YARA_HIT is removed. The engine derives yara_hit_strength from yara_match_count using bounded linear
-    scaling: min(1, yara_match_count / 3). One, two, and three-or-more matches therefore contribute one-third, two-thirds,
-    and full YARA support respectively.'
-  referenced_file_path_normalisation: Referenced-file correlation normalises extracted paths, trims shell punctuation, and
-    recognises relative execution forms such as ./tool and ../tool. Exact-path matching is used by default, with basename
-    fallback only for explicitly relative paths.
+  web_request_classification: detector_policy.detectors.web_request_classification is authoritative for raw web fields and
+    sidecar aliases, parser tokens, bounded decoding and attack patterns, upload methods and outcomes, SQLi response inference,
+    ordered direct-exploit branches, emissions, and explanation metadata. Python supplies bounded parsing, canonical request
+    normalization, typed feature materialisation, endpoint baselines, and sparse execution mechanics.
+  referenced_file_correlation: detector_policy.detectors.referenced_file_correlation is authoritative for filesystem and web-identity
+    fields, document roots, propagation emissions, ordered web identity branches, and ordered web-evidence/ATT&CK mapping outputs
+    and branches. It inherits normalized request fields, parser qualification, upload methods, and status semantics from the web
+    classifier so each judgement has a single configuration owner. Python supplies canonical path/hash and sparse identity mechanics.
+    Manifest schema v7 retains AV signature/family/category and strong YARA rule/category/score/quality metadata, records the
+    ClamAV, YARA, correlation-policy, and source-input digests, and rebuilds automatically on a schema or digest mismatch. Weak
+    YARA never enters web or hash indexes. URL/basename aliases shared by multiple hit-bearing filesystem paths are omitted,
+    and a resolved exact upload hash takes precedence over weaker basename identity.
+  webshell_artifact: detector_policy.detectors.webshell_artifact is authoritative for the contextual phase-27 web-shell artefact
+    judgement. YAML owns its best-effort path and combined-text fields, web-root and script-extension references,
+    basename/text/signal support, exclusive threshold, emission, evidence, confidence, and enablement. It runs after
+    referenced-file correlation so configured AV/YARA propagation outputs are available. Python supplies path coalescing and
+    normalization, basename/extension extraction, literal predicate evaluation, and sparse max-merge mechanics.
+  yara_strength: 'detector_policy.detectors.yara_classification is authoritative for YARA metadata loading, ordered category
+    classification, contributing categories, distinct-rule saturation, score scaling, confidence, evidence, output names,
+    and the referenced-file gate. The baseline saturates at three contributing rules, excludes certificate-only matches from
+    strength, and applies a configured 0.6..1 score multiplier.'
+  referenced_file_path_normalisation: The correlation policy selects fields and matching behaviour; Python normalises extracted
+    paths, trims shell punctuation, and recognises relative execution forms such as ./tool and ../tool. Exact-path matching is
+    used by default, with basename fallback only for explicitly relative paths. Empty document-root lists disable URL aliases;
+    empty parser-token or upload-method lists independently disable those routes in the web classifier.
   web_sqli_inference: SQL injection syntax is evaluated after bounded URL decoding. A probable-success signal additionally
     requires a 2xx response whose byte count is anomalously large against successful non-SQLi responses for the same host,
     HTTP method, and canonical endpoint. Large responses without SQLi syntax do not imply successful exploitation; redirects and error responses remain
     attempts only.
-  private_ip_continuity: When geolocation is unavailable because activity originates from private address space, the engine
+  web_upload_execution_chain: detector_policy.detectors.web_upload_execution_chain is an independent signal_sequence. Its
+    web-shell source, execution targets, target path/text context, dead-box scope, ordering, lookback, emission, and evidence are
+    YAML-owned; it does not require webshell_activity to be enabled.
+  ip_scope_continuity: When geolocation is unavailable because activity originates from private address space, the engine
     falls back to actor-IP continuity analysis and emits user_changed_private_ip, user_crossed_private_subnet, user_private_to_public_ip,
     and user_public_to_private_ip.
   profile_multiplier_dedup: Profile multipliers are applied at most once per signal per event, and explanation entries are
@@ -1706,493 +5371,55 @@ engine_notes:
   account_change_linux_scope: ACCOUNT_CHANGE_LINUX is restricted to execution/history contexts (text/syslog_traditional, shell
     history, cron) to reduce benign metadata noise.
 engine_config:
-  # Path to YARA Forge .yar file for category-aware YARA signal scoring.
-  # When set, the engine parses rule metadata to classify YARA matches into
-  # forensic categories (offensive_tool, ransomware, webshell, apt, exploit,
-  # certificate, malware) and applies differential weighting.
-  # Download this file locally or override it with --yara-metadata-path. The
-  # upstream YARA Forge rule corpus is intentionally not redistributed here.
-  yara_forge_metadata_path: "rules/yara-forge-rules-extended.yar"
-
-  canonical_auth_signals:
-    success_target: auth_success
-    fail_target: auth_failure
-    success_sources:
-    - auth_success_generic
-    - ssh_success
-    - rdp_success
-    fail_sources:
-    - auth_fail_generic
-    - ssh_fail
-    - rdp_fail
   config_validation:
     enabled: true
     strict: false
     notes: If enabled, ChronoSift validates that emitted signal names have corresponding weights and optionally warns on unused
       weights. Set strict=true to raise an error instead of warnings.
   schema_aliases:
-    actor_principal:
-    - actor_user
-    - username
-    - user
-    - target_user_name
-    src_ip:
-    - ip_address
-    - source_ip
-    - client_ip
-    - remote_ip
-    - ip
-    - actor_ip_final
-    destination_ip:
-    - dst_ip
-    - dest_ip
-    - server_ip
-    - target_ip
-  path_taxonomy:
-    web_root_patterns:
-    - /var/www/
-    - /srv/www/
-    - /usr/share/nginx/html/
-    - /htdocs/
-    - /httpdocs/
-    - \inetpub\wwwroot\
-    - \xampp\htdocs\
-    sensitive_path_patterns:
-    - /etc/passwd
-    - /etc/shadow
-    - /etc/sudoers
-    - /root/.ssh/
-    - /.ssh/
-    - /.gnupg/
-    - /.bash_history
-    - /.zsh_history
-    - /.mysql_history
-    - /.psql_history
-    - id_rsa
-    - id_dsa
-    - id_ecdsa
-    - id_ed25519
-    - authorized_keys
-    - known_hosts
-    - \windows\system32\config\sam
-    - \windows\system32\config\system
-    - \windows\system32\config\security
-    - ntds.dit
-    - web.config
-    - \repair\sam
-    - \repair\system
-    database_dump_patterns:
-    - dump
-    - mysqldump
-    - pg_dump
-    - sqlite dump
-    cron_path_patterns:
-    - /etc/crontab
-    - /etc/anacrontab
-    - /etc/cron.d/
-    - /etc/cron.daily/
-    - /etc/cron.hourly/
-    - /etc/cron.monthly/
-    - /etc/cron.weekly/
-    - /var/spool/cron/
-    - /var/spool/cron/crontabs/
-    service_config_patterns:
-    - /etc/systemd/system/
-    - /lib/systemd/system/
-    - /usr/lib/systemd/system/
-    - /etc/init.d/
-    - \system\currentcontrolset\services\
-    firewall_path_patterns:
-    - /etc/firewalld/
-    - /etc/ufw/
-    - /etc/sysconfig/iptables
-    - /etc/iptables/
-    - \sharedaccess\parameters\firewallpolicy\
-    group_policy_path_patterns:
-    - \grouppolicy\
-    - \sysvol\
-    - \policies\
-    - registry.pol
-    winlogon_path_patterns:
-    - \microsoft\windows nt\currentversion\winlogon
-    com_hijack_path_patterns:
-    - \classes\clsid\
-    - \classes\wow6432node\clsid\
-    os_update_path_patterns:
-    - \winsxs\
-    - \softwaredistribution\
-    - \windows\assembly\
-    - \windows\installer\
-    - /usr/lib/
-    - /usr/share/doc/
-    - /usr/share/man/
-    - /var/cache/apt/
-    - /var/cache/dnf/
-    - /var/cache/yum/
-    - /var/lib/dpkg/
-    - /var/lib/rpm/
-  detection_vocabulary:
-    archive_extensions:
-    - .zip
-    - .7z
-    - .rar
-    - .tar
-    - .gz
-    - .tgz
-    - .bz2
-    - .xz
-    web_script_extensions:
-    - .php
-    - .phtml
-    - .php3
-    - .php4
-    - .php5
-    - .asp
-    - .aspx
-    - .ashx
-    - .jsp
-    - .jspx
-    - .cgi
-    - .pl
-    web_content_extensions:
-    - .php
-    - .phtml
-    - .php3
-    - .php4
-    - .php5
-    - .asp
-    - .aspx
-    - .jsp
-    - .jspx
-    - .cgi
-    - .pl
-    - .html
-    - .htm
-    - .js
-    - .css
-    database_dump_extensions:
-    - .sql
-    - .dump
-    - .bak
-    - .sqlite
-    - .db
-    suspicious_temp_web_name_tokens:
-    - tmp
-    - temp
-    defender_disable_tokens:
-    - disableantispyware
-    - disablerealtimemonitoring
-    - realtime protection disabled
-    - real-time protection disabled
-    - microsoft defender antivirus has been disabled
-    - windows defender has been turned off
-    windows_privileged_group_tokens:
-    - administrators
-    - domain admins
-    - enterprise admins
-    - remote desktop users
-    windows_remote_admin_pipe_tokens:
-    - svcctl
-    - atsvc
-    - winreg
-    - samr
-    - lsarpc
-    - srvsvc
-    - wkssvc
-    - spoolss
-    firewall_message_tokens:
-    - firewalld
-    - iptables
-    - ufw
-    - windows firewall
-    firewall_change_tokens:
-    - changed
-    - modified
-    - disabled
-    - added
-    - deleted
-    account_created_message_tokens:
-    - user account was created
-    - ' useradd['
-    - useradd[
-    systemd_unit_extensions:
-    - .service
-    - .socket
-    - .timer
-    - .mount
-    - .path
-    systemd_enable_tokens:
-    - systemctl enable
-    - systemctl start
-    - systemctl restart
-    - systemctl link
-    - systemctl preset
-    - daemon-reload
-    webshell_name_tokens:
-    - cmd
-    - shell
-    - webshell
-    - c99
-    - r57
-    - b374k
-    - wso
-    - filemanager
-    - upload
-    recovery_inhibit_command_tokens:
-    - vssadmin delete shadows
-    - wmic shadowcopy delete
-    - wbadmin delete
-    - bcdedit /set
-    - reagentc /disable
-    - delete catalog
-    - shadowcopy delete
-    cleanup_command_tokens:
-    - wevtutil cl
-    - history -c
-    - rm .bash_history
-    - rm ~/.bash_history
-    - truncate -s 0
-    - 'shred '
-    - sdelete
-    - clear-eventlog
-    credential_dump_command_tokens:
-    - procdump
-    - comsvcs.dll
-    - minidump
-    - ntdsutil
-    - reg save hklm\sam
-    - reg save hklm\system
-    - lsass.dmp
-    - sekurlsa
-    password_store_path_tokens:
-    - login data
-    - key4.db
-    - logins.json
-    - .kdbx
-    - credentials
-    - vault
-    - web.config
-    password_store_message_tokens:
-    - login data
-    - key4.db
-    - logins.json
-    - .kdbx
-    - credentials
-    - vault
-    - web.config
-    file_discovery_command_tokens:
-    - ' dir'
-    - 'dir '
-    - ' ls'
-    - 'ls '
-    - 'find '
-    - 'tree '
-    - 'locate '
-    - 'grep '
-    remote_discovery_command_tokens:
-    - net view
-    - quser
-    - qwinsta
-    - arp -a
-    - route print
-    - ip neigh
-    - 'nslookup '
-    - resolve-dnsname
-    - nltest /dclist
-    - nltest.exe /dclist
-    - ping -n 1
-    - ping -c 1
-    system_owner_discovery_command_tokens:
-    - whoami
-    - 'id '
-    - hostname
-    - uname -a
-    - ipconfig
-    - ifconfig
-    admin_share_tokens:
-    - \\c$
-    - \\admin$
-    - \\ipc$
-    - /admin$
-    - /ipc$
-    account_access_removed_message_tokens:
-    - user account disabled
-    - user account was disabled
-    - user account deleted
-    - removed from local group
-    - removed from group
-    - userdel
-    log_artifact_tokens:
-    - /var/log/
-    - \windows\system32\winevt\logs\
-    - .bash_history
-    - .zsh_history
-    - .psql_history
-    - .mysql_history
-    application_protocol_tokens:
-    - http://
-    - https://
-    - ftp://
-    - sftp://
-    - scp://
-    - smb://
-    - cifs://
-    - \\
-    web_upload_tokens:
-    - multipart/form-data
-    - filename=
-    - upload
-    web_upload_endpoint_tokens:
-    - upload
-    - filemanager
-    - connector
-    - ajaxfilemanager
-    - ckfinder
-    - elfinder
-    web_log_parser_tokens:
-    - apache
-    - nginx
-    - iis
-    - w3c
-    - msiis
-    credential_copy_command_tokens:
-    - 'copy '
-    - 'cp '
-    - 'xcopy '
-    - robocopy
-    - 'move '
-    - 'mv '
-    - copy-item
-    - 'tar '
-    - 'zip '
-    - '7z '
-    - 'rar '
-    - 'scp '
-    - 'sftp '
-    - 'curl '
-    - 'wget '
-    ransom_note_name_tokens:
-    - readme
-    - decrypt
-    - recover
-    - restore
-    - how_to
-    - ransom
-    ransom_extension_tokens:
-    - .locked
-    - .lockbit
-    - .encrypted
-    - .crypt
-    - .crypted
-    - .conti
-    - .akira
-    - .blackcat
-    - .cl0p
-    - .clop
-    - .zepto
-    - .cerber
-    - .deadbolt
-    - .wannacry
-    - .wncry
-    - .play
-    - .royal
-    - .phobos
-    service_stop_command_tokens:
-    - sc stop
-    - sc.exe stop
-    - net stop
-    - net.exe stop
-    - stop-service
-    - taskkill /f
-    - taskkill.exe /f
-    - systemctl stop
-    winlogon_persistence_value_tokens:
-    - shell
-    - userinit
-    - notify
-    - appinit_dlls
-    - taskman
-    remote_service_message_tokens:
-    - rdp
-    - remote desktop
-    - ssh
-    - winrm
-    - terminalservices
-    - session opened
-  detection_event_ids:
-    account_created:
-    - '4720'
-    account_disabled:
-    - '4725'
-    account_deleted:
-    - '4726'
-    privileged_group_change:
-    - '4728'
-    - '4732'
-    - '4756'
-    group_removal_change:
-    - '4729'
-    - '4733'
-    - '4757'
-    share_access:
-    - '5140'
-    - '5145'
-    explicit_credential_logon:
-    - '4648'
-    service_stopped:
-    - '7036'
-    service_start_type_changed:
-    - '7040'
-  detection_thresholds:
-    short_lived_file_window: 2h
-    mass_file_modification_window: 10m
-    mass_file_modification_threshold: 25
-    ransom_extension_burst_window: 15m
-    ransom_extension_burst_threshold: 6
-    repeated_scheduled_exec_window: 10m
-    repeated_scheduled_exec_threshold: 3
-    download_exec_window: 2h
-    webshell_activity_window: 30m
-    automated_exfiltration_window: 30m
-    automated_exfiltration_threshold: 2
-    credential_collection_window: 1h
-    web_sqli_baseline_min_samples: 2
-    web_sqli_response_ratio: 1.5
-    web_sqli_response_delta_bytes: 2048
-    web_sqli_response_min_bytes: 4096
-    web_sqli_absolute_large_response_bytes: 65536
-  profiling:
-    exclude_nsrl_application_type_contains:
-    - Operating System
-    exclude_parser_contains:
-    - apt_history
-    - dpkg
-    exclude_filename_contains:
-    - WinSxS
-    - SoftwareDistribution
-  referenced_file_hit_propagation:
-    propagated_multiplier: 0.5
-    web_document_roots:
-    - /var/www/html
-    - /srv/www
-    - /usr/share/nginx/html
-    - /htdocs
-    - /httpdocs
-    - inetpub/wwwroot
-    - xampp/htdocs
-    web_yara_min_score: 75
-    web_yara_min_quality: 70
-    web_yara_categories:
-    - offensive_tool
-    - ransomware
-    - webshell
-    - apt
-    - exploit
-    - malware
-    web_yara_allow_unnamed: false
+    event_identifier: [event_id, eventid]
+    actor_user: [user_name, account_name, target_username]
+    actor_principal: [actor_user, username, user, target_user_name]
+    ip_address: [source_ip, src_ip, client_ip, remote_ip, ip]
+    src_ip: [ip_address, source_ip, client_ip, remote_ip, ip, actor_ip_final]
+    dst_ip: [destination_ip, dest_ip, server_ip, target_ip]
+    destination_ip: [dst_ip, dest_ip, server_ip, target_ip]
+    destination_fqdn: [dest_fqdn, target_fqdn, fqdn, server_name, dns_name]
+    destination_hostname: [dest_hostname, target_hostname, hostname, host_name, computer_name, workstation_name]
+    provider_name: [provider]
+    event_channel: [channel]
+    group_name: [group, groupname]
+    member_name: [member, membername]
+    share_name: [sharename]
+    share_local_path: [sharelocalpath]
+    relative_target_name: [relativetargetname, relativepathname]
+    logon_id: [target_logon_id, logonid, logon_guid]
+    session_id: [sessionid]
+    http_request_body: [request_body, request_body_text, post_data, form_data, http_post_data]
+    http_content_disposition: [content_disposition, multipart_content_disposition, part_content_disposition]
+    http_upload_filename: [upload_filename, multipart_filename, part_filename, file_name]
+    http_upload_content_type: [upload_content_type, multipart_content_type, part_content_type, mime_type]
+    http_upload_sha256: [upload_sha256, body_sha256, request_body_sha256, part_sha256]
+    http_request_content_length: [request_content_length, content_length, body_size, request_body_bytes]
+  temporal_signal_policy:
+    ineligible_signals:
+    - referenced_file_yara_hit
+    - referenced_file_av_hit
+    - referenced_file_luhn_hit
+    - impossible_travel
+    - user_changed_private_ip
+    - user_crossed_private_subnet
+    - user_private_to_public_ip
+    - user_public_to_private_ip
   trust_dampening:
     enabled: false
     multiplier: 0.5
+    selector_match: any
+    reason_precedence: [principal_literal, principal_regex, ip, asn]
+    inputs:
+      principal_field: actor_principal
+      ip_field: ip_address
+      asn_field: geo_asn
     signals:
     - impossible_travel
     - fail_then_success_user
@@ -2207,10 +5434,9 @@ engine_config:
     trusted_actor_principal_regex: []
     trusted_ips: []
     trusted_asns: []
-private_ip_continuity:
-  enabled: true
-  key_by:
-  - actor_principal
-  lookback: 24h
-  subnet_prefix_v4: 24
-  subnet_prefix_v6: 64
+    explanation:
+      rule_id: TRUST_DAMPENING
+      description: Trusted principal or infrastructure dampened selected behavioural signals
+      confidence: medium
+      evidence_type: contextual
+      evidence: [reason, multiplier, signals]
