@@ -114,8 +114,8 @@ minimum-event floor, leave-one-week-out validation, whole-week bootstrap,
 the positive-activity-deficit gate, optional sparse emissions, output names,
 score-amplifier semantics, trust
 selector composition/reason precedence, and explanation metadata have no
-Python fallback. The shipped profile keeps its disabled, unweighted rarity and
-quiet signals out of sparse state. Once temporal detectors, post-temporal
+Python fallback. The shipped profile keeps its disabled, unweighted activity-
+deficit and quiet-time signals out of sparse state. Once temporal detectors, post-temporal
 projections, and trust dampening are complete, an accepted profile applies one
 dataset-derived factor to the complete event score. Rejected or inconclusive
 profiles are neutral. No detector-family multiplier coefficients remain.
@@ -269,6 +269,15 @@ See [rules/README.md](rules/README.md) for expected file schemas, the [YARA enri
 ChronoSIFT is a research engine, not a verdict generator. A high score prioritises an event for investigation; it does not prove maliciousness. Coverage depends on source retention, Plaso parser coverage, enrichment currency, configuration, and the evidential artefacts available in the image. Preserve timestamps in UTC, record the rules and weights used for every run, and validate important findings against the underlying artefacts.
 
 The engine records reproducibility metadata and can emit reports, stage telemetry, a profile manifest, and a referenced-file hit manifest. Sidecar mode preserves the base timeline and writes only stable keys plus derived enrichment and scoring columns.
+
+Hour-of-week profiles use UTC weekday/hour bins. Local habits spanning a
+daylight-saving transition can be split across adjacent UTC bins, weakening
+the profile. The conservative uncertainty band also narrows with evidence
+volume, so otherwise similar datasets can receive different out-of-hours
+factors. Treat those factors as within-dataset prioritisation values, preserve
+the complete profile manifest, and see the
+[forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md) before making
+cross-dataset comparisons.
 
 Referenced-file manifest schema v7 maps configured web document roots to
 canonical URL paths. The mandatory `web_request_classification` policy owns

@@ -8677,9 +8677,9 @@ class ChronoSiftV231DetectorPolicyTest(unittest.TestCase):
 
         rules = deepcopy(BASE_RULES)
         self._web_request_config(rules)["outputs"]["method"] = (
-            "chronosift_hour_rarity_score"
+            "chronosift_activity_deficit_score"
         )
-        cases.append((rules, r"reserved field chronosift_hour_rarity_score"))
+        cases.append((rules, r"reserved field chronosift_activity_deficit_score"))
 
         rules = deepcopy(BASE_RULES)
         web = self._web_request_config(rules)

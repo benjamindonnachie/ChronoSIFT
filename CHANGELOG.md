@@ -22,6 +22,17 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
   below the uniform reference; this avoids reporting an accepted but inert
   amplifier and allows the configured filtered-to-full-dataset fallback to
   continue.
+- Renamed the optional profiling surface from hour “rarity” to the quantity it
+  now carries: `out_of_hours_activity_deficit`. The strict YAML keys,
+  materialised contribution field, explanation rule and evidence binding use
+  activity-deficit terminology; the former names are not compatibility aliases.
+- Added numerical sanity guards for bootstrap validation. Confidence must be
+  greater than `0.5` and less than `1`; resampling must include at least 100
+  draws and at least five expected observations in each confidence tail.
+- Documented that hour-of-week bins use UTC, daylight-saving transitions can
+  split a recurring local-time habit, uncertainty and factor magnitude depend
+  on retained evidence volume, and “out of hours” is a potentially broad
+  dataset-relative off-peak classification rather than a rare-event label.
 - Added a mandatory strict top-level `canonicalisation` policy for Windows
   authentication extraction, SSH authentication parsing, pivot-destination
   identity, and structured-first IP recovery. YAML now owns parser/field
@@ -158,8 +169,8 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
   `profiling.hour_of_week`, and trust field bindings, selectors, targets,
   multiplier and explanation metadata into `engine_config.trust_dampening`.
   Profile emissions now use the ordinary signal map and scorer; the shipped
-  unweighted emissions are disabled to retain sparse scaling, while rarity
-  still drives post-temporal multipliers. Profile multipliers and trust
+  unweighted emissions are disabled to retain sparse scaling, while the dense
+  activity deficit drives the validated post-trust event factor. Profiling and trust
   dampening now run after temporal detection and post-temporal projection,
   fixing previously unreachable geo/temporal targets.
 - Added explicit NSRL exclusion composition for both in-memory and DuckDB
