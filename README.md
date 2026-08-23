@@ -13,7 +13,7 @@ ChronoSIFT combines atomic artefact rules, typed detector policy, temporal relat
 - authentication failures, success-after-failure, account pivots, privileged activity, and newly observed users or IPs through first-seen/change rules;
 - new cities, countries, and autonomous systems (ASNs), network-boundary changes, private/public IP transitions, and impossible travel;
 - suspicious execution, LOLBins, web shells, persistence, credential access, collection, staging, transfer, exfiltration, and impact;
-- quiet-time and hour-of-week rarity profiling;
+- statistically validated hour-of-week out-of-hours amplification;
 - YARA, antivirus, Luhn, known-file, and referenced-file enrichment; and
 - direct and composite mappings to ATT&CK techniques that can be evidenced from disk artefacts.
 
@@ -109,18 +109,15 @@ roles allowed to receive their emission. Both generic temporal rules and
 counted windows declare a mandatory exclusive input-signal threshold.
 
 Hour-of-week profiling and trust dampening are also strict config-owned
-policies. Their fields, quiet-hour quantile, exclusion composition, mandatory
-signal/value/merge bindings with optional emission flags, output names,
-selector composition/reason precedence, targets, multipliers, and
-explanation metadata have no Python fallback. The shipped profile keeps its
-disabled, unweighted rarity and quiet signals out of sparse state while the dense
-rarity column still drives configured multipliers. Profiling multipliers and
-trust dampening run after temporal detectors and post-temporal projections, so
-configured geo and temporal targets can actually be adjusted.
-Because the shipped multiplier coefficients predate post-temporal application,
-they are an explicit baseline hypothesis rather than a calibrated result.
-Evaluate their sensitivity against downstream window/antigen separation before
-interpreting affected findings; the event-score cap can hide marginal changes.
+policies. Their selection fields, quiet-hour annotation, exclusion composition,
+minimum-event floor, leave-one-week-out validation, whole-week bootstrap,
+optional sparse emissions, output names, score-amplifier semantics, trust
+selector composition/reason precedence, and explanation metadata have no
+Python fallback. The shipped profile keeps its disabled, unweighted rarity and
+quiet signals out of sparse state. Once temporal detectors, post-temporal
+projections, and trust dampening are complete, an accepted profile applies one
+dataset-derived factor to the complete event score. Rejected or inconclusive
+profiles are neutral. No detector-family multiplier coefficients remain.
 
 GeoIP enrichment has a mandatory six-role output mapping in
 `geoip_enrichment.outputs`. The MaxMind lookup uses the canonical IP-recovery
@@ -169,7 +166,7 @@ flowchart LR
 
 4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. Typed detector-policy executors handle configured atomic classification, contextual gates, and stateful semantics that do not fit the ordinary rule language. YAML owns their configured inputs, detection judgement, and emissions; Python owns validation, normalisation, and reusable executor mechanics. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
 
-5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, profiles activity by hour of week, applies noise dampening, and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
+5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, applies its conservative out-of-hours factor only when supported by whole-week bootstrap uncertainty, applies noise dampening, and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
 
 6. **Sparse temporal candidate filtering.** Rows carrying a temporal prerequisite, plus the bounded neighbouring windows needed for correlation, are selected for temporal/stateful passes when the configured rules make reduction safe. Whole-partition non-temporal coverage is therefore preserved while avoiding a full-partition temporal replay where it adds no evidence.
 

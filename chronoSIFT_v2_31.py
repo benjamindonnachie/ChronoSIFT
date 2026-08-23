@@ -42,8 +42,8 @@ and emits:
 # forensic processing benefits from the explicit enrichment-table approach.
 # -----------------------------------------------------------------------------
 - per-event `chronosift_signals`: dict(signal_name -> numeric or auxiliary)
-- per-event `chronosift_score`: weighted sum of numeric signals (capped)
-- per-event `chronosift_explain`: list of rule firings + modifiers + profiling multipliers
+- per-event `chronosift_score`: weighted sum, optional validated profile factor, then cap
+- per-event `chronosift_explain`: list of rule firings, modifiers, and profile evidence
 
 Key research-driven design decisions
 -----------------------------------
@@ -69,10 +69,13 @@ Key research-driven design decisions
      False on None/empty. Use `exists` when you want explicit intent.
    - Future option (parked): an engine flag could auto-inject `exists` guards to keep YAML concise.
 
-7) Dataset-wide quiet-time profiling:
-   - Builds hour-of-week baseline (168 buckets) from the dataset itself.
-   - Computes per-event `hour_rarity` in [0, 1] (surprisal with smoothing).
-   - Quiet time does not create danger itself; it can modulate selected signals via multipliers.
+7) Dataset-wide out-of-hours profiling:
+   - Builds a Laplace-smoothed hour-of-week baseline (168 buckets).
+   - Requires leave-one-complete-week-out log-score improvement over uniform,
+     with a positive deterministic whole-week-bootstrap lower bound.
+   - Uses a simultaneous upper probability band to derive a conservative
+     activity deficit in [0, 1]. Accepted profiles apply `1 + deficit` once to
+     the post-trust event score; rejected profiles are neutral.
 
 8) Temporal composite saturation (PATCH ADDED):
    - Temporal rules may be keyed by multiple actor anchors (e.g., user and IP).
@@ -2252,34 +2255,158 @@ def _hour_of_week(dt: pd.Series) -> pd.Series:
     h = dt.dt.hour.astype("Int64")
     return (d * 24 + h).astype("Int64")
 
-def _compute_hour_of_week_profile(
-    df: pd.DataFrame,
+def _calendar_week_start(dt: pd.Series) -> pd.Series:
+    """Return the Monday boundary containing each timestamp."""
+    day = dt.dt.floor("D")
+    return day - pd.to_timedelta(dt.dt.dayofweek.fillna(0), unit="D")
+
+
+def _complete_week_hour_counts_from_frame(
+    selected: pd.DataFrame,
+    source: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return selected event counts for non-boundary calendar weeks."""
+    source_dt = _ensure_datetime_series(source).dropna()
+    if source_dt.empty:
+        return pd.DataFrame(columns=range(168), dtype="float64")
+    source_weeks = _calendar_week_start(source_dt)
+    first_week = source_weeks.min()
+    last_week = source_weeks.max()
+    if first_week >= last_week:
+        return pd.DataFrame(columns=range(168), dtype="float64")
+    complete_source_weeks = pd.Index(sorted(pd.unique(
+        source_weeks[(source_weeks > first_week) & (source_weeks < last_week)]
+    )))
+    if complete_source_weeks.empty:
+        return pd.DataFrame(columns=range(168), dtype="float64")
+
+    selected_dt = _ensure_datetime_series(selected).dropna()
+    if selected_dt.empty:
+        return pd.DataFrame(columns=range(168), dtype="float64")
+    selected_weeks = _calendar_week_start(selected_dt)
+    selected_how = _hour_of_week(selected_dt)
+    counts = (
+        pd.DataFrame({"week": selected_weeks, "how": selected_how})
+        .dropna()
+        .value_counts(sort=False)
+        .rename("n")
+        .reset_index()
+        .pivot(index="week", columns="how", values="n")
+        .reindex(columns=range(168), fill_value=0.0)
+        .fillna(0.0)
+        .astype("float64")
+    )
+    return counts.reindex(
+        index=complete_source_weeks,
+        columns=range(168),
+        fill_value=0.0,
+    ).fillna(0.0)
+
+
+def _validate_weekly_hour_profile(
+    weekly_counts: pd.DataFrame,
     *,
     alpha: float,
-    quiet_quantile: float,
-) -> tuple[dict[int, float], set[int]]:
-    """Compute normalised surprisal profile (0..1) and quiet-hour set."""
-    dt = _ensure_datetime_series(df)
-    how = _hour_of_week(dt)
-    counts = how.value_counts(dropna=True).reindex(range(168), fill_value=0).astype(float)
+    minimum_complete_weeks: int,
+    confidence_level: float,
+    bootstrap_resamples: int,
+    random_seed: int,
+) -> Dict[str, Any]:
+    """Validate repeated hour-of-week structure against a uniform reference."""
+    counts = np.asarray(weekly_counts, dtype=np.float64)
+    week_count = int(counts.shape[0]) if counts.ndim == 2 else 0
+    reference_probability = 1.0 / 168.0
+    result: Dict[str, Any] = {
+        "status": "inconclusive",
+        "accepted": False,
+        "complete_week_count": week_count,
+        "method": "leave_one_calendar_week_out_log_score",
+        "reference": "uniform_hour_of_week",
+        "block": "complete_calendar_week",
+        "reference_probability": reference_probability,
+        "minimum_complete_weeks": int(minimum_complete_weeks),
+        "confidence_level": float(confidence_level),
+        "bootstrap_resamples": int(bootstrap_resamples),
+        "random_seed": int(random_seed),
+        "acceptance": "bootstrap_lower_bound_above_zero",
+        "uncertainty_band": "simultaneous_bootstrap_upper_probability",
+    }
+    if week_count < int(minimum_complete_weeks):
+        result["reason"] = "insufficient_complete_weeks"
+        return result
 
-    total = float(counts.sum())
-    denom = total + 168.0 * float(alpha)
-    p = (counts + float(alpha)) / denom
+    total_counts = counts.sum(axis=0)
+    week_totals = counts.sum(axis=1)
+    if float(total_counts.sum()) <= 0.0:
+        result["reason"] = "no_events_in_complete_weeks"
+        return result
 
-    surprisal = pd.Series(-np.log(p.to_numpy()), index=p.index)
-    s_min = float(surprisal.min())
-    s_max = float(surprisal.max())
-    if s_max > s_min:
-        s_norm = (surprisal - s_min) / (s_max - s_min)
-    else:
-        s_norm = surprisal * 0.0
+    deltas = np.zeros(week_count, dtype=np.float64)
+    for week_i in range(week_count):
+        held_total = float(week_totals[week_i])
+        if held_total <= 0.0:
+            continue
+        training = total_counts - counts[week_i]
+        training_total = float(training.sum())
+        probabilities = (training + alpha) / (
+            training_total + 168.0 * alpha
+        )
+        deltas[week_i] = float(
+            np.dot(
+                counts[week_i],
+                np.log(probabilities / reference_probability),
+            )
+            / held_total
+        )
 
-    threshold = float(p.quantile(float(quiet_quantile)))
-    quiet_hours = set(int(i) for i, pv in p.items() if float(pv) <= threshold)
+    rng = np.random.default_rng(int(random_seed))
+    multiplicities = rng.multinomial(
+        week_count,
+        np.full(week_count, 1.0 / week_count),
+        size=int(bootstrap_resamples),
+    ).astype(np.float64, copy=False)
+    boot_delta = (multiplicities @ deltas) / float(week_count)
+    lower_bound = float(np.quantile(boot_delta, 1.0 - confidence_level))
+    mean_delta = float(deltas.mean())
+    accepted = bool(lower_bound > 0.0)
+    result.update({
+        "status": "accepted" if accepted else "rejected",
+        "accepted": accepted,
+        "reason": (
+            "lower_confidence_bound_above_zero"
+            if accepted
+            else "lower_confidence_bound_not_above_zero"
+        ),
+        "mean_log_score_improvement": mean_delta,
+        "lower_confidence_bound": lower_bound,
+        "weekly_log_score_improvements": [float(value) for value in deltas],
+    })
+    if not accepted:
+        return result
 
-    profile = {int(i): float(v) for i, v in s_norm.items()}
-    return profile, quiet_hours
+    probabilities = (total_counts + alpha) / (
+        float(total_counts.sum()) + 168.0 * alpha
+    )
+    boot_counts = multiplicities @ counts
+    boot_probabilities = (boot_counts + alpha) / (
+        boot_counts.sum(axis=1, keepdims=True) + 168.0 * alpha
+    )
+    simultaneous_radius = float(np.quantile(
+        np.max(boot_probabilities - probabilities, axis=1),
+        confidence_level,
+    ))
+    upper_probability = np.minimum(1.0, probabilities + simultaneous_radius)
+    activity_deficit = np.maximum(
+        0.0,
+        1.0 - (upper_probability / reference_probability),
+    )
+    result.update({
+        "probabilities": probabilities,
+        "upper_probability_bounds": upper_probability,
+        "activity_deficits": activity_deficit,
+        "simultaneous_upper_radius": simultaneous_radius,
+    })
+    return result
 
 # -----------------------------------------------------------------------------
 # Configuration hygiene: signal ↔ weight alignment
@@ -12817,21 +12944,6 @@ class TemporalGroupPlan:
 
 
 @dataclass(frozen=True)
-class ProfileMultiplier:
-    """
-    Dataset-derived quiet-time is not danger by itself; it modulates other signals.
-
-    Multiplier formula (deliberately constrained for reproducibility):
-        m = 1 + k * hour_rarity
-
-    Applied to the *signal value* of selected signals (not to the whole event score).
-    """
-    mid: str
-    applies_to: Set[str]
-    k: float
-
-
-@dataclass(frozen=True)
 class ConfigValidationPolicy:
     enabled: bool
     strict: bool
@@ -12885,6 +12997,28 @@ class ProfilingExplanationPolicy:
 
 
 @dataclass(frozen=True)
+class HourOfWeekValidationPolicy:
+    method: str
+    reference: str
+    block: str
+    minimum_complete_weeks: int
+    confidence_level: float
+    bootstrap_resamples: int
+    random_seed: int
+    acceptance: str
+    uncertainty_band: str
+
+
+@dataclass(frozen=True)
+class HourOfWeekAmplifierPolicy:
+    enabled: bool
+    method: str
+    scope: str
+    on_invalid_profile: str
+    explanation: ProfilingExplanationPolicy
+
+
+@dataclass(frozen=True)
 class HourOfWeekProfilingPolicy:
     enabled: bool
     smoothing_alpha: float
@@ -12912,7 +13046,143 @@ class HourOfWeekProfilingPolicy:
     quiet_signal_merge: str
     rarity_explanation: ProfilingExplanationPolicy
     quiet_explanation: ProfilingExplanationPolicy
-    multiplier_explanation: ProfilingExplanationPolicy
+    validation: HourOfWeekValidationPolicy
+    score_amplifier: HourOfWeekAmplifierPolicy
+
+
+def _parse_hour_of_week_validation_policy(
+    raw: Any, parent_path: str
+) -> HourOfWeekValidationPolicy:
+    path = f"{parent_path}.validation"
+    cfg = _policy_mapping(raw, path)
+    _policy_keys(
+        cfg,
+        path,
+        required={
+            "method", "reference", "block", "minimum_complete_weeks",
+            "confidence_level", "bootstrap_resamples", "random_seed",
+            "acceptance", "uncertainty_band",
+        },
+    )
+    confidence_level = _policy_positive_number(
+        cfg["confidence_level"], f"{path}.confidence_level"
+    )
+    if confidence_level >= 1.0:
+        raise ValueError(
+            f"{path}.confidence_level: expected a value less than 1"
+        )
+    return HourOfWeekValidationPolicy(
+        method=_policy_enum(
+            cfg["method"],
+            f"{path}.method",
+            {"leave_one_calendar_week_out_log_score"},
+        ),
+        reference=_policy_enum(
+            cfg["reference"],
+            f"{path}.reference",
+            {"uniform_hour_of_week"},
+        ),
+        block=_policy_enum(
+            cfg["block"],
+            f"{path}.block",
+            {"complete_calendar_week"},
+        ),
+        minimum_complete_weeks=_policy_positive_int(
+            cfg["minimum_complete_weeks"],
+            f"{path}.minimum_complete_weeks",
+        ),
+        confidence_level=confidence_level,
+        bootstrap_resamples=_policy_positive_int(
+            cfg["bootstrap_resamples"], f"{path}.bootstrap_resamples"
+        ),
+        random_seed=_policy_nonnegative_int(
+            cfg["random_seed"], f"{path}.random_seed"
+        ),
+        acceptance=_policy_enum(
+            cfg["acceptance"],
+            f"{path}.acceptance",
+            {"bootstrap_lower_bound_above_zero"},
+        ),
+        uncertainty_band=_policy_enum(
+            cfg["uncertainty_band"],
+            f"{path}.uncertainty_band",
+            {"simultaneous_bootstrap_upper_probability"},
+        ),
+    )
+
+
+def _parse_hour_of_week_amplifier_policy(
+    raw: Any, parent_path: str
+) -> HourOfWeekAmplifierPolicy:
+    path = f"{parent_path}.score_amplifier"
+    cfg = _policy_mapping(raw, path)
+    _policy_keys(
+        cfg,
+        path,
+        required={
+            "enabled", "method", "scope", "on_invalid_profile", "explanation",
+        },
+    )
+    explanation_path = f"{path}.explanation"
+    explanation_cfg = _policy_mapping(
+        cfg["explanation"], explanation_path
+    )
+    _policy_keys(
+        explanation_cfg,
+        explanation_path,
+        required={
+            "rule_id", "description", "confidence", "evidence_type", "evidence",
+        },
+    )
+    evidence = _policy_string_list(
+        explanation_cfg["evidence"], f"{explanation_path}.evidence"
+    )
+    allowed_evidence = {
+        "hour_of_week", "activity_probability", "upper_probability_bound",
+        "reference_probability", "activity_deficit", "multiplier",
+        "validation_lower_bound", "complete_week_count",
+    }
+    unsupported = sorted(set(evidence) - allowed_evidence)
+    if unsupported:
+        raise ValueError(
+            f"{explanation_path}.evidence: unsupported value(s): "
+            + ", ".join(unsupported)
+        )
+    return HourOfWeekAmplifierPolicy(
+        enabled=_policy_bool(cfg["enabled"], f"{path}.enabled"),
+        method=_policy_enum(
+            cfg["method"],
+            f"{path}.method",
+            {"one_plus_conservative_relative_activity_deficit"},
+        ),
+        scope=_policy_enum(
+            cfg["scope"], f"{path}.scope", {"post_trust_event_score"}
+        ),
+        on_invalid_profile=_policy_enum(
+            cfg["on_invalid_profile"],
+            f"{path}.on_invalid_profile",
+            {"neutral"},
+        ),
+        explanation=ProfilingExplanationPolicy(
+            rule_id=_policy_string(
+                explanation_cfg["rule_id"], f"{explanation_path}.rule_id"
+            ),
+            description=_policy_string(
+                explanation_cfg["description"],
+                f"{explanation_path}.description",
+            ),
+            confidence=_policy_confidence(
+                explanation_cfg["confidence"],
+                f"{explanation_path}.confidence",
+            ),
+            evidence_type=_policy_enum(
+                explanation_cfg["evidence_type"],
+                f"{explanation_path}.evidence_type",
+                {"profiling"},
+            ),
+            evidence=evidence,
+        ),
+    )
 
 
 def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
@@ -12933,7 +13203,7 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
             "emit_quiet_time_signal", "rarity_signal_merge",
             "quiet_signal_value", "quiet_signal_merge",
             "rarity_explanation", "quiet_explanation",
-            "multiplier_explanation",
+            "validation", "score_amplifier",
         },
     )
     quiet_quantile = _policy_positive_number(
@@ -13148,10 +13418,9 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
             require_rule_id=True,
             allowed_evidence={"hour_of_week", "quiet_quantile"},
         ),
-        multiplier_explanation=parse_explanation(
-            "multiplier_explanation",
-            require_rule_id=False,
-            allowed_evidence={"hour_rarity", "k", "multiplier", "signals", "targets"},
+        validation=_parse_hour_of_week_validation_policy(cfg["validation"], path),
+        score_amplifier=_parse_hour_of_week_amplifier_policy(
+            cfg["score_amplifier"], path
         ),
     )
 
@@ -13916,7 +14185,7 @@ class ChronoSiftEngine:
             "rules configuration",
             required={
                 "canonicalisation", "normalisation", "rules", "temporal_rules",
-                "engine_config", "profiling", "profile_multipliers",
+                "engine_config", "profiling",
                 "geoip_enrichment", "rule_signal_merge", "detector_policy",
             },
             optional={"engine_notes"},
@@ -13997,9 +14266,6 @@ class ChronoSiftEngine:
         self.profiling_policy = _parse_hour_of_week_profiling_policy(
             profiling_root["hour_of_week"]
         )
-        self.profile_multipliers: List[ProfileMultiplier] = self._parse_profile_multipliers(
-            rules_doc["profile_multipliers"]
-        )
         profile_output_names = {
             self.profiling_policy.hour_of_week_field,
             self.profiling_policy.rarity_signal,
@@ -14042,7 +14308,7 @@ class ChronoSiftEngine:
         profile_rule_ids = [
             self.profiling_policy.rarity_explanation.rule_id,
             self.profiling_policy.quiet_explanation.rule_id,
-            *(multiplier.mid for multiplier in self.profile_multipliers),
+            self.profiling_policy.score_amplifier.explanation.rule_id,
         ]
         duplicate_profile_rule_ids = sorted({
             rule_id
@@ -14051,7 +14317,7 @@ class ChronoSiftEngine:
         })
         if duplicate_profile_rule_ids:
             raise ValueError(
-                "profiling/profile_multipliers: explanation rule_id(s) must "
+                "profiling.hour_of_week: explanation rule_id(s) must "
                 "be unique: " + ", ".join(duplicate_profile_rule_ids)
             )
         non_profile_rule_ids = {
@@ -14071,7 +14337,7 @@ class ChronoSiftEngine:
         )
         if profile_rule_id_collisions:
             raise ValueError(
-                "profiling/profile_multipliers: explanation rule_id(s) already "
+                "profiling.hour_of_week: explanation rule_id(s) already "
                 "owned by another configured rule: "
                 + ", ".join(profile_rule_id_collisions)
             )
@@ -14112,19 +14378,6 @@ class ChronoSiftEngine:
                     f"temporal_rules[{index}]: input signal(s) are configured "
                     "as temporally ineligible: " + ", ".join(forbidden_inputs)
                 )
-        unknown_multiplier_targets = sorted(
-            {
-                signal_name
-                for multiplier in self.profile_multipliers
-                for signal_name in multiplier.applies_to
-            }
-            - declared_signals
-        )
-        if unknown_multiplier_targets:
-            raise ValueError(
-                "profile_multipliers: target signal(s) have no declared producer: "
-                + ", ".join(unknown_multiplier_targets)
-            )
         unknown_trust_targets = sorted(
             self.trust_dampening_policy.signals - declared_signals
         )
@@ -14159,9 +14412,9 @@ class ChronoSiftEngine:
             )
             for emission in definition.emissions:
                 registry[emission.rule_id] = [emission.name]
-        self.profile_multiplier_ids: Set[str] = {
-            str(pm.mid).strip() for pm in self.profile_multipliers if str(pm.mid).strip()
-        }
+        self.profile_amplifier_rule_id = (
+            self.profiling_policy.score_amplifier.explanation.rule_id
+        )
 
         # Required columns for stable evaluation across datasets
         self.required_fields: Set[str] = self._collect_required_fields()
@@ -16241,7 +16494,14 @@ class ChronoSiftEngine:
 
         logger.info("Contextual stage: scoring contextual output")
         df["chronosift_score"] = self._score_signal_map_sparse(
-            len(df), signal_map, index=df.index
+            len(df),
+            signal_map,
+            index=df.index,
+            score_multipliers=(
+                self._profile_score_amplifier_values(df)
+                if apply_profiling
+                else None
+            ),
         )
 
         if materialise_event_columns:
@@ -16430,15 +16690,15 @@ class ChronoSiftEngine:
         *,
         apply_profiling: bool,
     ) -> None:
-        # Multipliers and trust selectors deliberately run after temporal
-        # detectors so configuration can target both atomic/contextual and
-        # temporal outputs from the same event.
+        # Trust changes signal values first. The validated profile then explains
+        # the single event-score amplifier that scoring applies to the complete
+        # post-trust signal map.
+        self._apply_trust_dampening_sparse(df, signal_map, explain_map)
         if apply_profiling and self.profiling_policy.enabled:
-            logger.info("Contextual stage: applying temporal profiling signals")
-            self._apply_profile_signals_and_multipliers_sparse(
+            logger.info("Contextual stage: applying validated profile amplifier")
+            self._append_profile_score_amplifier_explanations_sparse(
                 df, signal_map, explain_map
             )
-        self._apply_trust_dampening_sparse(df, signal_map, explain_map)
 
     def _apply_temporal_contextual_sparse(
         self,
@@ -16662,7 +16922,7 @@ class ChronoSiftEngine:
         if (
             rule_id == self.profiling_policy.rarity_explanation.rule_id
             or rule_id == self.profiling_policy.quiet_explanation.rule_id
-            or rule_id in self.profile_multiplier_ids
+            or rule_id == self.profile_amplifier_rule_id
         ):
             return "profiling"
         if rule_id == self.trust_dampening_policy.rule_id:
@@ -16883,6 +17143,29 @@ class ChronoSiftEngine:
             return hour_series.fillna(0.0).astype("float64", copy=False).to_numpy(copy=False)
         return pd.to_numeric(hour_series, errors="coerce").fillna(0.0).to_numpy(dtype="float64", copy=False)
 
+    def _profile_score_amplifier_values(
+        self, df: Optional[pd.DataFrame]
+    ) -> Optional[Any]:
+        policy = self.profiling_policy
+        if not policy.enabled or not policy.score_amplifier.enabled:
+            return None
+        manifest = (
+            (df.attrs.get("_chronosift_profile_manifest", {}) or {})
+            if df is not None
+            else {}
+        )
+        validation = manifest.get("validation", {}) or {}
+        if not bool(validation.get("accepted", False)):
+            return None
+        rarity = self._hour_rarity_values(df)
+        if rarity is None:
+            return None
+        return 1.0 + np.clip(
+            np.nan_to_num(rarity, nan=0.0, posinf=0.0, neginf=0.0),
+            0.0,
+            1.0,
+        )
+
     def _hour_rarity_contribution_values(
         self,
         n_rows: int,
@@ -16913,6 +17196,7 @@ class ChronoSiftEngine:
         n_rows: int,
         signal_map: Dict[int, Dict[str, Any]],
         index=None,
+        score_multipliers: Optional[Any] = None,
     ) -> pd.Series:
         scores = [0.0] * n_rows
         for row_i, signals in signal_map.items():
@@ -16920,6 +17204,18 @@ class ChronoSiftEngine:
         if index is None:
             index = range(n_rows)
         score_series = pd.Series(scores, index=index, dtype="float64")
+        if score_multipliers is not None:
+            factors = np.asarray(score_multipliers, dtype=np.float64)
+            if len(factors) != n_rows:
+                raise ValueError(
+                    "profile score amplifier length does not match score rows"
+                )
+            factors = np.clip(
+                np.nan_to_num(factors, nan=1.0, posinf=1.0, neginf=1.0),
+                1.0,
+                2.0,
+            )
+            score_series = score_series * factors
 
         return score_series.clip(upper=self.max_event_score)
 
@@ -19819,69 +20115,95 @@ class ChronoSiftEngine:
                 self._sparse_explain_list(explain_map, row_i).append(
                     _quiet_time_explain_item(policy, int(hour_bin))
                 )
-    def _apply_profile_signals_and_multipliers_sparse(
+    def _append_profile_score_amplifier_explanations_sparse(
         self,
         df: pd.DataFrame,
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
     ) -> None:
         policy = self.profiling_policy
-        if policy.rarity_signal not in df.columns:
+        amplifier_policy = policy.score_amplifier
+        if (
+            not amplifier_policy.enabled
+            or policy.rarity_signal not in df.columns
+        ):
             return
 
-        hour_rarity_vals = df[policy.rarity_signal].values
+        rarity_values = self._hour_rarity_values(df)
+        if rarity_values is None:
+            return
+        hour_values = (
+            df[policy.hour_of_week_field].to_numpy(copy=False)
+            if policy.hour_of_week_field in df.columns
+            else np.full(len(df), None, dtype=object)
+        )
+        manifest = dict(
+            df.attrs.get("_chronosift_profile_manifest", {}) or {}
+        )
+        probabilities = {
+            int(key): float(value)
+            for key, value in (manifest.get("probabilities", {}) or {}).items()
+        }
+        upper_bounds = {
+            int(key): float(value)
+            for key, value in (
+                manifest.get("upper_probability_bounds", {}) or {}
+            ).items()
+        }
+        validation = dict(manifest.get("validation", {}) or {})
+        if not bool(validation.get("accepted", False)):
+            df.attrs.pop("_chronosift_quiet_hours_profile", None)
+            return
+        reference_probability = float(
+            validation.get("reference_probability", 1.0 / 168.0)
+        )
+        validation_lower_bound = float(
+            validation.get("lower_confidence_bound", 0.0) or 0.0
+        )
+        complete_week_count = int(
+            validation.get("complete_week_count", 0) or 0
+        )
+        explanation = amplifier_policy.explanation
         for i in sorted(signal_map):
-            r = float(hour_rarity_vals[i]) if not _is_null(hour_rarity_vals[i]) else 0.0
             sig = signal_map.get(i)
             if not isinstance(sig, dict):
                 continue
+            activity_deficit = float(np.clip(rarity_values[i], 0.0, 1.0))
+            if activity_deficit <= 0.0 or self._score_signals(sig) <= 0.0:
+                continue
+            hour_value = hour_values[i]
+            hour = int(hour_value) if not _is_null(hour_value) else -1
+            evidence_values = {
+                "hour_of_week": hour,
+                "activity_probability": probabilities.get(hour, 0.0),
+                "upper_probability_bound": upper_bounds.get(hour, 0.0),
+                "reference_probability": reference_probability,
+                "activity_deficit": activity_deficit,
+                "multiplier": 1.0 + activity_deficit,
+                "validation_lower_bound": validation_lower_bound,
+                "complete_week_count": complete_week_count,
+            }
+            weighted_signals = sorted(
+                str(name)
+                for name, value in sig.items()
+                if (
+                    isinstance(value, (int, float))
+                    and float(value) != 0.0
+                    and float(self.weights.get(str(name).strip().lower(), 0.0))
+                    != 0.0
+                )
+            )
+            self._sparse_explain_list(explain_map, i).append({
+                "rule_id": explanation.rule_id,
+                "description": explanation.description,
+                "confidence": explanation.confidence,
+                "evidence_type": explanation.evidence_type,
+                "signals": weighted_signals,
+                "evidence": {
+                    name: evidence_values[name] for name in explanation.evidence
+                },
+            })
 
-            applied_signal_targets: Set[str] = set()
-            emitted_multiplier_notes: Set[Tuple[str, str]] = set()
-
-            for pm in self.profile_multipliers:
-                mval = 1.0 + pm.k * r
-                if mval == 1.0:
-                    continue
-                applied_targets: List[str] = []
-                for target in pm.applies_to:
-                    if target in applied_signal_targets:
-                        continue
-                    if target in sig and isinstance(sig[target], (int, float)):
-                        original_value = float(sig[target])
-                        adjusted_value = original_value * mval
-                        if adjusted_value == original_value:
-                            continue
-                        sig[target] = adjusted_value
-                        applied_targets.append(target)
-                        applied_signal_targets.add(target)
-
-                if applied_targets:
-                    target_key = ",".join(sorted(applied_targets))
-                    note_key = (str(pm.mid), target_key)
-                    if note_key not in emitted_multiplier_notes:
-                        explanation = policy.multiplier_explanation
-                        evidence_values = {
-                            "hour_rarity": r,
-                            "k": pm.k,
-                            "multiplier": mval,
-                            "signals": target_key,
-                            "targets": target_key,
-                        }
-                        expl = self._sparse_explain_list(explain_map, i)
-                        expl.append({
-                            "rule_id": pm.mid,
-                            "description": explanation.description,
-                            "confidence": explanation.confidence,
-                            "evidence_type": explanation.evidence_type,
-                            "evidence": {
-                                name: evidence_values[name]
-                                for name in explanation.evidence
-                            },
-                        })
-                        emitted_multiplier_notes.add(note_key)
-
-        _delete_columns_inplace(df, ["_quiet_hours_profile"])
         df.attrs.pop("_chronosift_quiet_hours_profile", None)
 
     def _apply_private_ip_continuity_sparse(
@@ -21263,43 +21585,108 @@ class ChronoSiftEngine:
         how_all = _hour_of_week(dt_all)
         out[policy.hour_of_week_field] = how_all
 
-        if profile_manifest:
-            profile = {int(k): float(v) for k, v in (profile_manifest.get("profile", {}) or {}).items()}
-            quiet_hours = frozenset(int(x) for x in (profile_manifest.get("quiet_hours", []) or []))
-            _profile_arr = np.zeros(168, dtype=np.float64)
-            for _k, _v in profile.items():
-                _profile_arr[int(_k)] = float(_v)
-            _valid = how_all.notna()
-            _idx = how_all.to_numpy(dtype=np.float64, na_value=0.0).astype(np.intp)
-            np.clip(_idx, 0, 167, out=_idx)
-            out[policy.rarity_signal] = np.where(
-                _valid.to_numpy(), _profile_arr[_idx], 0.0
+        if profile_manifest is None:
+            profile_df = _select_profile_events(out, policy)
+            component_field_available = (
+                policy.nsrl_is_os_component_field in out.columns
             )
-            out.attrs["_chronosift_quiet_hours_profile"] = quiet_hours
-            out.attrs["_chronosift_profile_metadata"] = {
-                "selection_mode": profile_manifest.get("selection_mode"),
-                "used_filtered_subset": bool(profile_manifest.get("used_filtered_subset", False)),
-                "source_event_count": int(profile_manifest.get("source_event_count", 0) or 0),
-                "selected_event_count": int(profile_manifest.get("selected_event_count", 0) or 0),
+            filters_applied = bool(
+                policy.parser_field in out.columns
+                or component_field_available
+                or (
+                    policy.nsrl_application_type_field in out.columns
+                    and (
+                        policy.nsrl_exclusion_combine == "any_available"
+                        or not component_field_available
+                    )
+                    and policy.exclude_nsrl_application_type_contains
+                )
+                or (
+                    policy.filename_field in out.columns
+                    and policy.exclude_filename_contains
+                )
+            )
+
+            def build_attempt(
+                selected: pd.DataFrame,
+                *,
+                selection_mode: str,
+                used_filtered_subset: bool,
+                filters: List[str],
+            ) -> Dict[str, Any]:
+                if len(selected) < policy.min_profile_events:
+                    return _empty_hour_of_week_manifest(
+                        alpha=policy.smoothing_alpha,
+                        quiet_quantile=policy.quiet_quantile,
+                        selection_mode=selection_mode,
+                        source_event_count=len(out),
+                        selected_event_count=len(selected),
+                        selection_filters=filters,
+                        validation={
+                            "status": "inconclusive",
+                            "accepted": False,
+                            "reason": "insufficient_profile_events",
+                            "method": policy.validation.method,
+                            "reference": policy.validation.reference,
+                            "block": policy.validation.block,
+                            "selected_event_count": len(selected),
+                            "minimum_profile_events": policy.min_profile_events,
+                        },
+                    )
+                return _hour_of_week_manifest_from_weekly_counts(
+                    _complete_week_hour_counts_from_frame(selected, out),
+                    policy,
+                    selection_mode=selection_mode,
+                    used_filtered_subset=used_filtered_subset,
+                    source_event_count=len(out),
+                    selected_event_count=len(selected),
+                    selection_filters=filters,
+                )
+
+            initial_mode = "filtered" if filters_applied else "unfiltered"
+            profile_manifest = build_attempt(
+                profile_df,
+                selection_mode=initial_mode,
+                used_filtered_subset=filters_applied,
+                filters=["in_memory_profile_selection"] if filters_applied else [],
+            )
+            if (
+                not profile_manifest.get("profile")
+                and filters_applied
+                and policy.insufficient_filtered_events == "full_dataset"
+            ):
+                first_attempt = {
+                    "selection_mode": initial_mode,
+                    **dict(profile_manifest.get("validation", {})),
+                }
+                profile_manifest = build_attempt(
+                    out,
+                    selection_mode="fallback_full_dataset",
+                    used_filtered_subset=False,
+                    filters=["fallback:filtered_profile_not_validated"],
+                )
+                profile_manifest["validation_attempts"] = [first_attempt]
+
+        profile_is_validated = bool(
+            (profile_manifest.get("validation", {}) or {}).get(
+                "accepted", False
+            )
+        )
+        profile = (
+            {
+                int(k): float(v)
+                for k, v in (profile_manifest.get("profile", {}) or {}).items()
             }
-            return out
-
-        profile_df = _select_profile_events(out, policy)
-        if (
-            len(profile_df) < policy.min_profile_events
-            and policy.insufficient_filtered_events == "full_dataset"
-        ):
-            profile_df = out
-
-        if len(profile_df) < policy.min_profile_events:
-            out[policy.rarity_signal] = 0.0
-            out.attrs["_chronosift_quiet_hours_profile"] = frozenset()
-            return out
-
-        profile, quiet_hours = _compute_hour_of_week_profile(
-            profile_df,
-            alpha=policy.smoothing_alpha,
-            quiet_quantile=policy.quiet_quantile,
+            if profile_is_validated
+            else {}
+        )
+        quiet_hours = frozenset(
+            int(x)
+            for x in (
+                profile_manifest.get("quiet_hours", [])
+                if profile_is_validated
+                else []
+            )
         )
 
         _profile_arr = np.zeros(168, dtype=np.float64)
@@ -21312,45 +21699,24 @@ class ChronoSiftEngine:
             _valid.to_numpy(), _profile_arr[_idx], 0.0
         )
         out.attrs["_chronosift_quiet_hours_profile"] = frozenset(quiet_hours)
+        out.attrs["_chronosift_profile_manifest"] = profile_manifest
+        out.attrs["_chronosift_profile_metadata"] = {
+            "selection_mode": profile_manifest.get("selection_mode"),
+            "used_filtered_subset": bool(
+                profile_manifest.get("used_filtered_subset", False)
+            ),
+            "source_event_count": int(
+                profile_manifest.get("source_event_count", 0) or 0
+            ),
+            "selected_event_count": int(
+                profile_manifest.get("selected_event_count", 0) or 0
+            ),
+            "validation": dict(profile_manifest.get("validation", {}) or {}),
+            "validation_attempts": list(
+                profile_manifest.get("validation_attempts", []) or []
+            ),
+        }
         return out
-
-
-    def _parse_profile_multipliers(self, raw: List[Dict[str, Any]]) -> List[ProfileMultiplier]:
-        if not isinstance(raw, list):
-            raise ValueError("profile_multipliers: expected a list")
-        parsed: List[ProfileMultiplier] = []
-        seen_ids: Set[str] = set()
-        owned_targets: Dict[str, str] = {}
-        for index, raw_multiplier in enumerate(raw):
-            path = f"profile_multipliers[{index}]"
-            multiplier_cfg = _policy_mapping(raw_multiplier, path)
-            _policy_keys(
-                multiplier_cfg,
-                path,
-                required={"id", "applies_to_signals", "k"},
-            )
-            mid = _policy_string(multiplier_cfg["id"], f"{path}.id")
-            if mid in seen_ids:
-                raise ValueError(f"{path}.id: duplicate multiplier id {mid!r}")
-            seen_ids.add(mid)
-            applies = set(_policy_signal_list(
-                multiplier_cfg["applies_to_signals"],
-                f"{path}.applies_to_signals",
-            ))
-            duplicate_targets = sorted(set(applies) & set(owned_targets))
-            if duplicate_targets:
-                owners = ", ".join(
-                    f"{name} ({owned_targets[name]})" for name in duplicate_targets
-                )
-                raise ValueError(
-                    f"{path}.applies_to_signals: target signal(s) already owned "
-                    f"by an earlier multiplier: {owners}"
-                )
-            k = _policy_positive_number(multiplier_cfg["k"], f"{path}.k")
-            for signal_name in applies:
-                owned_targets[signal_name] = mid
-            parsed.append(ProfileMultiplier(mid=mid, applies_to=applies, k=k))
-        return parsed
 
 
     # -------------------------------------------------------------------------
@@ -22296,6 +22662,33 @@ class ChronoSiftEngine:
                         )
                         if profile_manifest_path:
                             save_profile_manifest(profile_manifest, profile_manifest_path)
+            profile_validation = dict(
+                (profile_manifest or {}).get("validation", {}) or {}
+            )
+            profile_summary = {
+                "selection_mode": (profile_manifest or {}).get("selection_mode"),
+                "accepted": bool(profile_validation.get("accepted", False)),
+                "reason": profile_validation.get("reason"),
+                "complete_week_count": int(
+                    profile_validation.get("complete_week_count", 0) or 0
+                ),
+                "mean_log_score_improvement": profile_validation.get(
+                    "mean_log_score_improvement"
+                ),
+                "lower_confidence_bound": profile_validation.get(
+                    "lower_confidence_bound"
+                ),
+            }
+            logger.info(
+                "Profile validation | selection=%s accepted=%s reason=%s "
+                "complete_weeks=%d lower_bound=%s",
+                profile_summary["selection_mode"],
+                profile_summary["accepted"],
+                profile_summary["reason"],
+                profile_summary["complete_week_count"],
+                profile_summary["lower_confidence_bound"],
+            )
+            telemetry.emit("profile_validation", **profile_summary)
 
             logger.info("Pipeline stage: preparing referenced-file hit manifest")
             with telemetry.stage("prepare_file_hit_manifest"):
@@ -22531,6 +22924,7 @@ class ChronoSiftEngine:
                     len(atomic),
                     signal_map,
                     index=atomic.index,
+                    score_multipliers=self._profile_score_amplifier_values(atomic),
                 )
 
                 logger.info("Pipeline stage: trimming overlap and preparing output for partition %04d-%02d", year, month)
@@ -22607,6 +23001,7 @@ class ChronoSiftEngine:
                     "output": out_path,
                     "output_mode": output_mode,
                     "retain_zero_weight_lifecycle_signals": bool(retain_zero_weight_lifecycle_signals),
+                    "profile_validation": dict(profile_summary),
                     "report": report,
                 })
                 telemetry.emit(
@@ -23137,59 +23532,94 @@ def load_plaso_parquet_dataset(path: str, columns: Optional[List[str]] = None) -
 
 
 
-def _empty_hour_of_week_manifest(alpha: float, quiet_quantile: float) -> Dict[str, Any]:
-    return {
-        "profile": {},
-        "quiet_hours": [],
-        "alpha": alpha,
-        "quiet_quantile": quiet_quantile,
-        "selection_mode": "empty",
-        "used_filtered_subset": False,
-        "source_event_count": 0,
-        "selected_event_count": 0,
-        "selection_filters": [],
-    }
-
-
-def _hour_of_week_manifest_from_counts(
-    counts: pd.Series,
+def _empty_hour_of_week_manifest(
     alpha: float,
     quiet_quantile: float,
-    selection_mode: str = "filtered",
-    used_filtered_subset: bool = True,
+    *,
+    selection_mode: str = "empty",
     source_event_count: int = 0,
     selected_event_count: int = 0,
     selection_filters: Optional[List[str]] = None,
+    validation: Optional[Dict[str, Any]] = None,
+    validation_attempts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    total = float(counts.sum())
-    if total <= 0.0:
-        return _empty_hour_of_week_manifest(alpha=alpha, quiet_quantile=quiet_quantile)
-
-    alpha = max(float(alpha), 1e-12)
-    denom = total + 168.0 * alpha
-    p = (counts + alpha) / denom
-    surprisal = pd.Series(-np.log(p.to_numpy()), index=p.index)
-    s_min = float(surprisal.min())
-    s_max = float(surprisal.max())
-    if s_max > s_min:
-        s_norm = (surprisal - s_min) / (s_max - s_min)
-    else:
-        s_norm = surprisal * 0.0
-
-    threshold = float(p.quantile(float(quiet_quantile)))
-    quiet_hours = set(int(i) for i, pv in p.items() if float(pv) <= threshold)
-    profile = {int(i): float(v) for i, v in s_norm.items()}
     return {
-        "profile": profile,
-        "quiet_hours": sorted(int(x) for x in quiet_hours),
-        "alpha": alpha,
-        "quiet_quantile": quiet_quantile,
+        "profile": {},
+        "probabilities": {},
+        "upper_probability_bounds": {},
+        "amplifiers": {},
+        "quiet_hours": [],
+        "alpha": float(alpha),
+        "quiet_quantile": float(quiet_quantile),
         "selection_mode": selection_mode,
-        "used_filtered_subset": bool(used_filtered_subset),
+        "used_filtered_subset": False,
         "source_event_count": int(source_event_count),
-        "selected_event_count": int(selected_event_count or total),
+        "selected_event_count": int(selected_event_count),
         "selection_filters": list(selection_filters or []),
+        "validation": dict(validation or {}),
+        "validation_attempts": list(validation_attempts or []),
     }
+
+
+def _hour_of_week_manifest_from_weekly_counts(
+    weekly_counts: pd.DataFrame,
+    policy: HourOfWeekProfilingPolicy,
+    *,
+    selection_mode: str,
+    used_filtered_subset: bool,
+    source_event_count: int,
+    selected_event_count: int,
+    selection_filters: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    validation = _validate_weekly_hour_profile(
+        weekly_counts,
+        alpha=float(policy.smoothing_alpha),
+        minimum_complete_weeks=policy.validation.minimum_complete_weeks,
+        confidence_level=policy.validation.confidence_level,
+        bootstrap_resamples=policy.validation.bootstrap_resamples,
+        random_seed=policy.validation.random_seed,
+    )
+    manifest = _empty_hour_of_week_manifest(
+        alpha=policy.smoothing_alpha,
+        quiet_quantile=policy.quiet_quantile,
+        selection_mode=selection_mode,
+        source_event_count=source_event_count,
+        selected_event_count=selected_event_count,
+        selection_filters=selection_filters,
+        validation=validation,
+    )
+    manifest["used_filtered_subset"] = bool(used_filtered_subset)
+    if not validation.get("accepted", False):
+        return manifest
+
+    probabilities = np.asarray(validation.pop("probabilities"), dtype=np.float64)
+    upper_bounds = np.asarray(
+        validation.pop("upper_probability_bounds"), dtype=np.float64
+    )
+    deficits = np.asarray(validation.pop("activity_deficits"), dtype=np.float64)
+    for transient_key in (
+        "probabilities", "upper_probability_bounds", "activity_deficits"
+    ):
+        manifest["validation"].pop(transient_key, None)
+    quiet_threshold = float(np.quantile(probabilities, policy.quiet_quantile))
+    manifest.update({
+        "profile": {int(i): float(value) for i, value in enumerate(deficits)},
+        "probabilities": {
+            int(i): float(value) for i, value in enumerate(probabilities)
+        },
+        "upper_probability_bounds": {
+            int(i): float(value) for i, value in enumerate(upper_bounds)
+        },
+        "amplifiers": {
+            int(i): float(1.0 + value) for i, value in enumerate(deficits)
+        },
+        "quiet_hours": [
+            int(i)
+            for i, value in enumerate(probabilities)
+            if float(value) <= quiet_threshold
+        ],
+    })
+    return manifest
 
 
 def build_global_hour_of_week_manifest(
@@ -23215,28 +23645,70 @@ def build_global_hour_of_week_manifest(
     dataset_glob = _parquet_dataset_glob(dataset_root)
     con = _get_duckdb_connection()
 
-    def _fetch_counts(where_parts: Optional[List[str]]) -> Tuple[pd.Series, int]:
+    bounds_row = con.execute(
+        f'SELECT date_trunc(\'week\', MIN("{dt_col}")), '
+        f'date_trunc(\'week\', MAX("{dt_col}")), COUNT(*) '
+        f'FROM read_parquet(?, hive_partitioning=1, union_by_name=1)',
+        [dataset_glob],
+    ).fetchone()
+    first_week, last_week, source_event_count = bounds_row or (None, None, 0)
+    if first_week is None or last_week is None:
+        return _empty_hour_of_week_manifest(
+            alpha=alpha, quiet_quantile=quiet_quantile
+        )
+    # DuckDB returns extended-year timestamps as strings because Python's
+    # datetime cannot represent them. DuckDB performs the chronological sort;
+    # Python only removes the two boundary-week labels and uses their stable
+    # string forms as matrix keys.
+    source_week_rows = con.execute(
+        f'SELECT DISTINCT date_trunc(\'week\', "{dt_col}") '
+        f'FROM read_parquet(?, hive_partitioning=1, union_by_name=1) '
+        f'ORDER BY 1',
+        [dataset_glob],
+    ).fetchall()
+    source_week_keys = [str(row[0]) for row in source_week_rows if row]
+    complete_week_keys = source_week_keys[1:-1]
+
+    def _fetch_weekly_counts(
+        where_parts: Optional[List[str]],
+    ) -> Tuple[pd.DataFrame, int]:
         where_sql = ""
         if where_parts:
             where_sql = " WHERE " + " AND ".join(where_parts)
         sql = (
             f'SELECT '
+            f'date_trunc(\'week\', "{dt_col}") AS week_start, '
             f'CAST((((EXTRACT(dow FROM "{dt_col}") + 6) % 7) * 24) + EXTRACT(hour FROM "{dt_col}") AS INTEGER) AS how, '
             f'COUNT(*) AS n '
             f'FROM read_parquet(?, hive_partitioning=1, union_by_name=1)'
             f'{where_sql} '
-            f'GROUP BY 1 ORDER BY 1'
+            f'GROUP BY 1, 2 ORDER BY 1, 2'
         )
         rows = con.execute(sql, [dataset_glob]).fetchall()
-        counts = pd.Series(0.0, index=range(168), dtype="float64")
-        total_rows = 0
-        for how, n in rows:
-            if how is None:
+        total_rows = int(sum(int(row[2]) for row in rows))
+        complete_rows: List[Tuple[Any, int, float]] = []
+        for week_start, how, n in rows:
+            if week_start is None or how is None:
                 continue
+            week_key = str(week_start)
             hi = int(how)
             if 0 <= hi < 168:
-                counts.iat[hi] = float(n)
-                total_rows += int(n)
+                complete_rows.append((week_key, hi, float(n)))
+        if complete_rows:
+            counts = pd.DataFrame(
+                complete_rows, columns=["week", "how", "n"]
+            ).pivot(index="week", columns="how", values="n")
+        else:
+            counts = pd.DataFrame(dtype="float64")
+        counts = (
+            counts.reindex(
+                index=complete_week_keys,
+                columns=range(168),
+                fill_value=0.0,
+            )
+            .fillna(0.0)
+            .astype("float64")
+        )
         return counts, total_rows
 
     filtered_where_parts: List[str] = []
@@ -23299,40 +23771,75 @@ def build_global_hour_of_week_manifest(
                 f"exclude:{policy.filename_field} contains {token}"
             )
 
-    total_counts, total_rows = _fetch_counts([])
-    source_event_count = int(total_counts.sum())
-
-    counts, total_rows = _fetch_counts(filtered_where_parts)
     filters_were_requested = bool(filtered_where_parts)
-    used_filtered_subset = bool(filters_were_requested and total_rows >= min_profile_events)
-    if (
-        total_rows < min_profile_events
-        and filters_were_requested
-        and policy.insufficient_filtered_events == "full_dataset"
-    ):
-        counts, total_rows = _fetch_counts([])
-        used_filtered_subset = False
-        selection_filters = ["fallback:filters_not_applied"]
+    validation_attempts: List[Dict[str, Any]] = []
 
-    if total_rows >= min_profile_events:
-        if used_filtered_subset:
-            _sel_mode = "filtered"
-        elif filters_were_requested:
-            _sel_mode = "fallback_full_dataset"
-        else:
-            _sel_mode = "unfiltered"
-        return _hour_of_week_manifest_from_counts(
-            counts,
-            alpha=alpha,
-            quiet_quantile=quiet_quantile,
-            selection_mode=_sel_mode,
+    def build_attempt(
+        where_parts: List[str],
+        *,
+        selection_mode: str,
+        used_filtered_subset: bool,
+        attempt_filters: List[str],
+    ) -> Dict[str, Any]:
+        weekly_counts, selected_rows = _fetch_weekly_counts(where_parts)
+        if selected_rows < min_profile_events:
+            return _empty_hour_of_week_manifest(
+                alpha=alpha,
+                quiet_quantile=quiet_quantile,
+                selection_mode=selection_mode,
+                source_event_count=int(source_event_count),
+                selected_event_count=selected_rows,
+                selection_filters=attempt_filters,
+                validation={
+                    "status": "inconclusive",
+                    "accepted": False,
+                    "reason": "insufficient_profile_events",
+                    "method": policy.validation.method,
+                    "reference": policy.validation.reference,
+                    "block": policy.validation.block,
+                    "selected_event_count": selected_rows,
+                    "minimum_profile_events": min_profile_events,
+                },
+            )
+        return _hour_of_week_manifest_from_weekly_counts(
+            weekly_counts,
+            policy,
+            selection_mode=selection_mode,
             used_filtered_subset=used_filtered_subset,
-            source_event_count=source_event_count,
-            selected_event_count=total_rows,
-            selection_filters=selection_filters,
+            source_event_count=int(source_event_count),
+            selected_event_count=selected_rows,
+            selection_filters=attempt_filters,
         )
 
-    return _empty_hour_of_week_manifest(alpha=alpha, quiet_quantile=quiet_quantile)
+    initial_mode = "filtered" if filters_were_requested else "unfiltered"
+    initial = build_attempt(
+        filtered_where_parts,
+        selection_mode=initial_mode,
+        used_filtered_subset=filters_were_requested,
+        attempt_filters=selection_filters,
+    )
+    if initial.get("profile"):
+        return initial
+    validation_attempts.append({
+        "selection_mode": initial_mode,
+        **dict(initial.get("validation", {})),
+    })
+
+    if (
+        filters_were_requested
+        and policy.insufficient_filtered_events == "full_dataset"
+    ):
+        fallback = build_attempt(
+            [],
+            selection_mode="fallback_full_dataset",
+            used_filtered_subset=False,
+            attempt_filters=["fallback:filtered_profile_not_validated"],
+        )
+        fallback["validation_attempts"] = validation_attempts
+        return fallback
+
+    initial["validation_attempts"] = validation_attempts
+    return initial
 
 
 
@@ -24282,8 +24789,13 @@ def build_global_referenced_file_hit_manifest(
 
 def _serialise_profile_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(manifest or {})
-    if "profile" in out and isinstance(out["profile"], dict):
-        out["profile"] = {str(k): float(v) for k, v in out["profile"].items()}
+    for field_name in (
+        "profile", "probabilities", "upper_probability_bounds", "amplifiers"
+    ):
+        if field_name in out and isinstance(out[field_name], dict):
+            out[field_name] = {
+                str(k): float(v) for k, v in out[field_name].items()
+            }
     if "quiet_hours" in out:
         out["quiet_hours"] = [int(x) for x in (out.get("quiet_hours") or [])]
     return out
@@ -24291,8 +24803,13 @@ def _serialise_profile_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
 
 def _deserialise_profile_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(manifest or {})
-    if "profile" in out and isinstance(out["profile"], dict):
-        out["profile"] = {int(k): float(v) for k, v in out["profile"].items()}
+    for field_name in (
+        "profile", "probabilities", "upper_probability_bounds", "amplifiers"
+    ):
+        if field_name in out and isinstance(out[field_name], dict):
+            out[field_name] = {
+                int(k): float(v) for k, v in out[field_name].items()
+            }
     if "quiet_hours" in out:
         out["quiet_hours"] = [int(x) for x in (out.get("quiet_hours") or [])]
     return out

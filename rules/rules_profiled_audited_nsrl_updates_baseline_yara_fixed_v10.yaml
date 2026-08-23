@@ -40,44 +40,29 @@ profiling:
       confidence: low
       evidence_type: profiling
       evidence: [hour_of_week, quiet_quantile]
-    multiplier_explanation:
-      description: Profile multiplier applied (m = 1 + k * hour_rarity)
-      confidence: medium
-      evidence_type: profiling
-      evidence: [hour_rarity, k, multiplier, signals, targets]
-profile_multipliers:
-- id: QUIET_TIME_PRIV
-  applies_to_signals:
-  - privileged_login
-  k: 0.5
-- id: QUIET_TIME_BOUNDARY
-  applies_to_signals:
-  - boundary_crossing
-  - new_country
-  - new_asn
-  - new_city
-  k: 0.5
-- id: QUIET_TIME_PERSIST
-  applies_to_signals:
-  - persistence_service
-  - persistence_scheduled_task
-  - persistence_runkey
-  - account_or_group_change
-  k: 0.75
-- id: QUIET_TIME_LOLBIN
-  applies_to_signals:
-  - lolbin_linux
-  - lolbin_windows
-  - lolbin_suspicious_args
-  k: 0.75
-- id: QUIET_TIME_EXFIL
-  applies_to_signals:
-  - large_archive_created
-  - staging_then_transfer
-  - sensitive_data_staged
-  - cross_border_transfer
-  - archive_after_sensitive_access
-  k: 0.75
+    validation:
+      method: leave_one_calendar_week_out_log_score
+      reference: uniform_hour_of_week
+      block: complete_calendar_week
+      minimum_complete_weeks: 3
+      confidence_level: 0.95
+      bootstrap_resamples: 2000
+      random_seed: 0
+      acceptance: bootstrap_lower_bound_above_zero
+      uncertainty_band: simultaneous_bootstrap_upper_probability
+    score_amplifier:
+      enabled: true
+      method: one_plus_conservative_relative_activity_deficit
+      scope: post_trust_event_score
+      on_invalid_profile: neutral
+      explanation:
+        rule_id: OUT_OF_HOURS_AMPLIFIER
+        description: Validated out-of-hours activity deficit amplified the event score
+        confidence: medium
+        evidence_type: profiling
+        evidence: [hour_of_week, activity_probability, upper_probability_bound,
+          reference_probability, activity_deficit, multiplier,
+          validation_lower_bound, complete_week_count]
 geoip_enrichment:
   outputs:
     city_geoname_id: geo_city_geoname_id
@@ -5312,10 +5297,13 @@ detector_policy:
         execution_timestamp:
           resolver: target_timestamp
 engine_notes:
-  temporal_profiling: 'ChronoSift derives dataset-wide hour-of-week rarity from host-resident events (excluding web access
-    telemetry). The shipped policy uses that dense profile only for configured multipliers. Optional hour_rarity (0..1,
-    surprisal with smoothing) and quiet_time_event emissions can be enabled explicitly; when enabled they enter the ordinary
-    signal map before scoring with their configured value, merge, and explanation policies.'
+  temporal_profiling: 'ChronoSift first attempts a host-resident hour-of-week profile, then falls back to the full dataset.
+    The 100-event floor is retained. A profile must predict held-out complete calendar weeks better than a uniform 168-bin
+    reference, with a positive deterministic whole-week-bootstrap lower bound. Accepted profiles use a simultaneous bootstrap
+    upper probability band to derive deficit(h) = max(0, 1 - p_upper(h)/(1/168)) and a single bounded event-score factor
+    1 + deficit(h). The factor runs after trust dampening and before max_event_score. Failed or inconclusive validation is
+    neutral. Optional hour_rarity and quiet_time_event sparse emissions remain disabled and quiet membership does not gate
+    amplification.'
   geoip_metadata: When GeoLite2 City/ASN databases are provided, ChronoSift records input DB paths and file modification times
     in df.attrs['chronosift_metadata']['geoip'] for reproducibility.
   config_hygiene: ChronoSift lowercases signal keys during scoring to avoid case drift. Config validation checks (optional)
@@ -5366,8 +5354,8 @@ engine_notes:
   ip_scope_continuity: When geolocation is unavailable because activity originates from private address space, the engine
     falls back to actor-IP continuity analysis and emits user_changed_private_ip, user_crossed_private_subnet, user_private_to_public_ip,
     and user_public_to_private_ip.
-  profile_multiplier_dedup: Profile multipliers are applied at most once per signal per event, and explanation entries are
-    deduplicated.
+  profile_amplifier_scope: A validated activity-deficit factor is applied once to the complete post-trust event score. It does
+    not mutate or repeatedly amplify individual signal values.
   account_change_linux_scope: ACCOUNT_CHANGE_LINUX is restricted to execution/history contexts (text/syslog_traditional, shell
     history, cron) to reduce benign metadata noise.
 engine_config:

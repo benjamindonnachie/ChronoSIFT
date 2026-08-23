@@ -984,6 +984,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
                 "selection_mode": "test",
                 "source_event_count": 2,
                 "selected_event_count": 2,
+                "validation": {"accepted": True},
             },
         )
         self.assertIn("policy_hour_of_week", profiled.columns)
@@ -1095,7 +1096,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertNotIn("hour_rarity", disabled_signals.get(0, {}))
         self.assertNotIn("quiet_time_event", disabled_signals.get(0, {}))
 
-    def test_default_profile_uses_rarity_for_multipliers_without_dense_emission(self):
+    def test_default_profile_retains_deficit_without_sparse_emission(self):
         engine = self._engine()
         frame = pd.DataFrame(
             {"filename": [f"ordinary-{index}.txt" for index in range(32)]},
@@ -1111,6 +1112,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
                 "selection_mode": "test",
                 "source_event_count": 32,
                 "selected_event_count": 32,
+                "validation": {"accepted": True},
             },
         )
         self.assertTrue((out["hour_rarity"] == 0.75).all())
@@ -1133,6 +1135,30 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         rules = deepcopy(BASE_RULES)
         rules["profiling"]["hour_of_week"]["quiet_threshold"] = 0.8
         cases.append((rules, r"profiling\.hour_of_week.*unknown key.*quiet_threshold"))
+
+        rules = deepcopy(BASE_RULES)
+        del rules["profiling"]["hour_of_week"]["validation"]["method"]
+        cases.append((rules, r"profiling\.hour_of_week\.validation.*method"))
+
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["validation"][
+            "confidence_level"
+        ] = 1.0
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.validation\.confidence_level")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["score_amplifier"][
+            "method"
+        ] = "configured_coefficient"
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.score_amplifier\.method")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        rules["profile_multipliers"] = []
+        cases.append((rules, r"rules configuration.*unknown key.*profile_multipliers"))
 
         rules = deepcopy(BASE_RULES)
         del rules["profiling"]["hour_of_week"]["quiet_explanation"]["rule_id"]
@@ -1256,13 +1282,22 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertTrue(bool(matching.iloc[0]["nsrl_is_os_component"]))
         self.assertFalse(bool(nonmatching.iloc[0]["nsrl_is_os_component"]))
 
-    def test_profile_multiplier_can_adjust_a_temporal_geo_output(self):
+    def test_validated_profile_amplifies_the_post_trust_event_score_once(self):
         engine = self._engine()
         frame = pd.DataFrame(
             {"hour_rarity": [0.5], "hour_of_week": [10]},
             index=pd.DatetimeIndex([pd.Timestamp("2024-06-16T10:00:00Z")]),
         )
-        frame.attrs["_chronosift_quiet_hours_profile"] = frozenset()
+        frame.attrs["_chronosift_profile_manifest"] = {
+            "probabilities": {10: 0.002},
+            "upper_probability_bounds": {10: 0.003},
+            "validation": {
+                "accepted": True,
+                "reference_probability": 1.0 / 168.0,
+                "lower_confidence_bound": 0.2,
+                "complete_week_count": 8,
+            },
+        }
         signal_map = {0: {"boundary_crossing": 1.0}}
         explain_map = {0: []}
         engine._apply_contextual_postprocessing_sparse(
@@ -1271,12 +1306,23 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             explain_map,
             apply_profiling=True,
         )
-        self.assertEqual(signal_map[0]["boundary_crossing"], 1.25)
+        self.assertEqual(signal_map[0]["boundary_crossing"], 1.0)
         self.assertNotIn("hour_rarity", signal_map[0])
         self.assertNotIn("quiet_time_event", signal_map[0])
-        self.assertTrue(
-            any(item["rule_id"] == "QUIET_TIME_BOUNDARY" for item in explain_map[0])
+        self.assertEqual(
+            engine._score_signal_map_sparse(
+                1,
+                signal_map,
+                score_multipliers=engine._profile_score_amplifier_values(frame),
+            ).tolist(),
+            [9.0],
         )
+        amplifier = next(
+            item for item in explain_map[0]
+            if item["rule_id"] == "OUT_OF_HOURS_AMPLIFIER"
+        )
+        self.assertEqual(amplifier["evidence"]["multiplier"], 1.5)
+        self.assertEqual(amplifier["evidence"]["complete_week_count"], 8)
 
         zero_frame = pd.DataFrame(
             {"hour_rarity": [0.0], "hour_of_week": [10]},
@@ -1292,6 +1338,210 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         )
         self.assertEqual(zero_signal_map[0]["boundary_crossing"], 1.0)
         self.assertEqual(zero_explain_map[0], [])
+
+        unvalidated = engine._apply_hour_of_week_profiling(
+            pd.DataFrame(index=frame.index),
+            profile_manifest={"profile": {154: 1.0}},
+        )
+        self.assertEqual(unvalidated.iloc[0]["hour_rarity"], 0.0)
+        self.assertIsNone(engine._profile_score_amplifier_values(unvalidated))
+
+    def test_repeating_weekly_profile_is_predictively_validated(self):
+        engine = self._engine()
+        weeks = pd.date_range("2024-01-01", periods=8, freq="7D")
+        counts = pd.DataFrame(0.0, index=weeks, columns=range(168))
+        business_hours = [
+            day * 24 + hour
+            for day in range(5)
+            for hour in range(9, 17)
+        ]
+        counts.loc[:, business_hours] = 10.0
+
+        first = MODULE._hour_of_week_manifest_from_weekly_counts(
+            counts,
+            engine.profiling_policy,
+            selection_mode="test",
+            used_filtered_subset=True,
+            source_event_count=int(counts.to_numpy().sum()),
+            selected_event_count=int(counts.to_numpy().sum()),
+        )
+        second = MODULE._hour_of_week_manifest_from_weekly_counts(
+            counts,
+            engine.profiling_policy,
+            selection_mode="test",
+            used_filtered_subset=True,
+            source_event_count=int(counts.to_numpy().sum()),
+            selected_event_count=int(counts.to_numpy().sum()),
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first["validation"]["accepted"])
+        self.assertGreater(first["validation"]["lower_confidence_bound"], 0.0)
+        self.assertEqual(first["profile"][9], 0.0)
+        self.assertGreater(first["profile"][2], 0.0)
+        self.assertGreater(first["amplifiers"][2], 1.0)
+        self.assertLessEqual(first["amplifiers"][2], 2.0)
+
+    def test_profile_factor_is_applied_after_trust_dampening(self):
+        rules = deepcopy(BASE_RULES)
+        trust = rules["engine_config"]["trust_dampening"]
+        trust.update({
+            "enabled": True,
+            "signals": ["boundary_crossing"],
+            "trusted_actor_principals": ["alice"],
+        })
+        engine = self._engine(rules)
+        frame = pd.DataFrame(
+            {
+                "actor_principal": ["alice"],
+                "hour_rarity": [0.5],
+                "hour_of_week": [10],
+            },
+            index=pd.DatetimeIndex([pd.Timestamp("2024-06-17T10:00:00Z")]),
+        )
+        frame.attrs["_chronosift_profile_manifest"] = {
+            "validation": {"accepted": True}
+        }
+        signal_map = {0: {"boundary_crossing": 1.0}}
+        explain_map = {0: []}
+
+        engine._apply_contextual_postprocessing_sparse(
+            frame, signal_map, explain_map, apply_profiling=True
+        )
+
+        self.assertEqual(signal_map[0]["boundary_crossing"], 0.5)
+        self.assertEqual(
+            engine._score_signal_map_sparse(
+                1,
+                signal_map,
+                score_multipliers=engine._profile_score_amplifier_values(frame),
+            ).tolist(),
+            [4.5],
+        )
+        self.assertEqual(
+            [item["rule_id"] for item in explain_map[0]],
+            ["TRUST_DAMPENING", "OUT_OF_HOURS_AMPLIFIER"],
+        )
+
+    def test_uniform_or_under_observed_weekly_profile_fails_closed(self):
+        engine = self._engine()
+        weeks = pd.date_range("2024-01-01", periods=8, freq="7D")
+        uniform = pd.DataFrame(1.0, index=weeks, columns=range(168))
+        rejected = MODULE._hour_of_week_manifest_from_weekly_counts(
+            uniform,
+            engine.profiling_policy,
+            selection_mode="test",
+            used_filtered_subset=False,
+            source_event_count=int(uniform.to_numpy().sum()),
+            selected_event_count=int(uniform.to_numpy().sum()),
+        )
+        self.assertFalse(rejected["validation"]["accepted"])
+        self.assertEqual(rejected["profile"], {})
+        self.assertEqual(rejected["amplifiers"], {})
+
+        too_short = uniform.iloc[:2]
+        inconclusive = MODULE._hour_of_week_manifest_from_weekly_counts(
+            too_short,
+            engine.profiling_policy,
+            selection_mode="test",
+            used_filtered_subset=False,
+            source_event_count=int(too_short.to_numpy().sum()),
+            selected_event_count=int(too_short.to_numpy().sum()),
+        )
+        self.assertEqual(
+            inconclusive["validation"]["reason"],
+            "insufficient_complete_weeks",
+        )
+        self.assertEqual(inconclusive["profile"], {})
+
+    def test_global_manifest_validates_complete_weeks_and_round_trips(self):
+        engine = self._engine()
+        timestamps = [
+            pd.Timestamp("2023-12-31T23:00:00Z"),
+            pd.Timestamp("2024-02-19T00:00:00Z"),
+        ]
+        parsers = ["boundary", "boundary"]
+        for week_start in pd.date_range(
+            "2024-01-01T00:00:00Z", periods=7, freq="7D"
+        ):
+            for day in range(5):
+                for hour in range(9, 17):
+                    for minute in range(10):
+                        timestamps.append(
+                            week_start
+                            + pd.Timedelta(days=day, hours=hour, minutes=minute)
+                        )
+                        parsers.append("mft")
+        frame = pd.DataFrame({
+            "date_time": timestamps,
+            "parser": parsers,
+            "filename": ["ordinary.bin"] * len(timestamps),
+            "nsrl_is_os_component": [False] * len(timestamps),
+            "nsrl_application_type": [""] * len(timestamps),
+        })
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            frame.to_parquet(root / "timeline.parquet", index=False)
+            manifest = MODULE.build_global_hour_of_week_manifest(
+                str(root), engine.profiling_policy
+            )
+            manifest_path = root / "profile.json"
+            MODULE.save_profile_manifest(manifest, str(manifest_path))
+            restored = MODULE.load_profile_manifest(str(manifest_path))
+
+        self.assertEqual(restored, manifest)
+        self.assertEqual(manifest["selection_mode"], "filtered")
+        self.assertTrue(manifest["used_filtered_subset"])
+        self.assertEqual(manifest["validation"]["complete_week_count"], 7)
+        self.assertTrue(manifest["validation"]["accepted"])
+        self.assertGreater(manifest["profile"][2], 0.0)
+
+    def test_filtered_profile_below_100_events_retries_full_dataset(self):
+        engine = self._engine()
+        timestamps = [
+            pd.Timestamp("2023-12-31T23:00:00Z"),
+            pd.Timestamp("2024-02-19T00:00:00Z"),
+        ]
+        parsers = ["boundary", "boundary"]
+        for week_start in pd.date_range(
+            "2024-01-01T00:00:00Z", periods=7, freq="7D"
+        ):
+            for day in range(5):
+                for hour in range(9, 17):
+                    for minute in range(3):
+                        timestamps.append(
+                            week_start
+                            + pd.Timedelta(days=day, hours=hour, minutes=minute)
+                        )
+                        parsers.append(
+                            "mft"
+                            if day == 0 and hour == 9 and minute == 0
+                            else "other"
+                        )
+        frame = pd.DataFrame(
+            {
+                "parser": parsers,
+                "filename": ["ordinary.bin"] * len(timestamps),
+            },
+            index=pd.DatetimeIndex(timestamps),
+        )
+
+        profiled = engine._apply_hour_of_week_profiling(frame)
+        metadata = profiled.attrs["_chronosift_profile_metadata"]
+        self.assertEqual(metadata["selection_mode"], "fallback_full_dataset")
+        self.assertFalse(metadata["used_filtered_subset"])
+        self.assertTrue(metadata["validation"]["accepted"])
+        self.assertEqual(
+            metadata["validation_attempts"][0]["reason"],
+            "insufficient_profile_events",
+        )
+        self.assertEqual(
+            metadata["validation_attempts"][0]["selected_event_count"], 7
+        )
+        self.assertGreater(
+            profiled.attrs["_chronosift_profile_manifest"]["profile"][2], 0.0
+        )
 
     def test_trust_inputs_selectors_targets_and_metadata_are_config_authoritative(self):
         rules = deepcopy(BASE_RULES)
@@ -1368,15 +1618,6 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertEqual(any_explain[0][0]["evidence"]["reason"], "trusted_ip")
 
     def test_unknown_adjustment_targets_and_empty_enabled_trust_fail(self):
-        rules = deepcopy(BASE_RULES)
-        rules["profile_multipliers"][0]["applies_to_signals"] = [
-            "missing_profile_target"
-        ]
-        with self.assertRaisesRegex(
-            ValueError, r"profile_multipliers.*missing_profile_target"
-        ):
-            self._engine(rules)
-
         rules = deepcopy(BASE_RULES)
         rules["engine_config"]["trust_dampening"]["signals"] = [
             "missing_trust_target"

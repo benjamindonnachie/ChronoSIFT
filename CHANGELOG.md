@@ -4,6 +4,19 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Replaced family-specific quiet-time coefficients with a single
+  dataset-derived out-of-hours event-score amplifier. Candidate hour-of-week
+  profiles must improve held-out logarithmic score over a uniform 168-hour
+  reference under leave-one-complete-calendar-week-out validation; a
+  deterministic whole-week bootstrap must place the configured one-sided
+  confidence bound above zero. Rejected, inconclusive, and legacy unvalidated
+  profiles are neutral.
+- Accepted profiles use a simultaneous bootstrap upper probability band to
+  derive a conservative activity deficit and multiplier in `[1, 2]`. The
+  factor is applied once to the complete post-trust event score before the
+  ordinary score cap, cannot create score from zero, and is recorded with the
+  profile selection, validation statistics, uncertainty bounds, and fallback
+  attempts in reports, telemetry, explanations, and the profile manifest.
 - Added a mandatory strict top-level `canonicalisation` policy for Windows
   authentication extraction, SSH authentication parsing, pivot-destination
   identity, and structured-first IP recovery. YAML now owns parser/field

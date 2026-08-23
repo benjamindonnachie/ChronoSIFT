@@ -6561,7 +6561,6 @@ class ChronoSiftV231DetectorPolicyTest(unittest.TestCase):
         weights = deepcopy(BASE_WEIGHTS)
         detectors = rules["detector_policy"]["detectors"]
         rules["temporal_rules"] = []
-        rules["profile_multipliers"] = []
         rules["engine_config"]["trust_dampening"]["signals"] = [
             "impossible_travel"
         ]
@@ -7620,7 +7619,6 @@ class ChronoSiftV231DetectorPolicyTest(unittest.TestCase):
     def test_candidate_mask_and_window_follow_only_enabled_configured_temporal_inputs(self):
         rules = deepcopy(BASE_RULES)
         rules["temporal_rules"] = []
-        rules["profile_multipliers"] = []
         rules["engine_config"]["trust_dampening"]["signals"] = [
             "impossible_travel"
         ]

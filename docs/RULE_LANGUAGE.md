@@ -341,30 +341,65 @@ not a temporal-rule input, and a temporal rule that consumes an ineligible
 signal is rejected. The list is config-only.
 
 `profiling.hour_of_week` is a complete typed policy for profile selection,
-smoothing, quiet-hour quantile membership, minimum sample size, insufficient-
-sample behaviour, parser/filename/NSRL filters, derived fields, mandatory
-rarity/quiet signal bindings, optional emission flags, values, merge modes, and explanation
-metadata. Enabled profile emissions enter the ordinary signal map during the
-atomic stage before scoring. The shipped policy leaves both signals unweighted
-and disables their
-emissions to preserve sparse state while retaining the dense rarity column for
-multipliers. Its configured NSRL application-type tokens also govern derivation
-of `nsrl_is_os_component` when the lookup does not already assert that boolean;
-its two configured NSRL field names are the enrichment targets as well as the
-profiling inputs. `nsrl_exclusion_combine` explicitly selects combined
-application-type/component exclusion or component-field precedence, identically
-for in-memory and DuckDB profiles. The DuckDB cache itself is policy-neutral.
-`profile_multipliers` requires a unique explanation ID, non-overlapping
-produced-signal targets, and positive `k` for every entry. Multipliers run after
-temporal policy so geo and composite signals may be adjusted; zero-rarity and
-zero-value no-ops do not emit explanations. Each selected target is multiplied
-by `1 + k * hour_rarity`; quiet-hour membership controls only admission of the
-optional quiet signal and is not an additional multiplier gate.
-The shipped `k` values predate post-temporal application and are therefore a
-baseline hypothesis rather than an empirical calibration for their geo and
-composite targets. Evaluate sensitivity against downstream window/antigen
-separation before treating multiplier-dependent results as findings; the event
-score cap may hide marginal changes on already-high rows.
+smoothing, quiet-hour annotation, the minimum sample floor, predictive
+validation, uncertainty estimation, insufficient-profile behaviour,
+parser/filename/NSRL filters, derived fields, optional sparse emissions, and the
+event-score amplifier. Enabled profile emissions enter the ordinary signal map
+during the atomic stage before scoring. The shipped policy leaves both sparse
+emissions disabled and unweighted; the dense `hour_rarity` column carries the
+validated activity deficit used by final scoring.
+
+The `min_profile_events` floor is evaluated before statistical validation. The
+filtered host-resident set is attempted first. If it has fewer events or its
+profile is not validated, `insufficient_filtered_events: full_dataset` retries
+with all events. The final fallback is an empty profile, which maps every event
+to the neutral multiplier `1`.
+
+`validation.method: leave_one_calendar_week_out_log_score` uses only complete,
+non-boundary calendar weeks. For each held-out week, the other weeks fit a
+Laplace-smoothed 168-bin distribution and calculate the held-out mean log-score
+improvement over `validation.reference: uniform_hour_of_week` (`1/168`). A
+deterministic bootstrap resamples whole weeks. The profile is accepted only
+when its configured one-sided lower confidence bound is greater than zero.
+`minimum_complete_weeks`, `confidence_level`, `bootstrap_resamples`, and
+`random_seed` make this inferential contract reproducible rather than silently
+engine-defined.
+
+The comparison uses logarithmic score because it is a strictly proper
+probabilistic scoring rule (Gneiting and Raftery, 2007,
+[JASA paper](https://sites.stat.washington.edu/people/raftery/Research/PDF/Gneiting2007jasa.pdf)).
+Bootstrap units are whole weeks, rather than individual events, to preserve
+within-week dependence; this follows the block-bootstrap principle for
+dependent observations (Künsch, 1989,
+[DOI](https://doi.org/10.1214/aos/1176347265)).
+
+For an accepted profile,
+`uncertainty_band: simultaneous_bootstrap_upper_probability` provides
+`p_upper(h)`. The configured amplifier method is mechanically fixed as:
+
+```text
+activity_deficit(h) = max(0, 1 - p_upper(h) / (1/168))
+multiplier(h)       = 1 + activity_deficit(h)
+```
+
+The resulting factor is in `[1, 2]`. With
+`scope: post_trust_event_score`, it is applied once to the complete weighted
+event score after trust dampening and before the ordinary `max_event_score`
+cap. It does not mutate signal values, compound across signal families, damp
+in-hours scores, or create score from a zero-score event. An explanation is
+emitted only for a scored event whose factor exceeds one. It records the
+observed and upper-bound probability, uniform reference, deficit, factor, and
+validation statistics. The former `profile_multipliers` list and all
+family-specific `k` coefficients are intentionally unsupported.
+
+Quiet-quantile membership controls only the optional `quiet_time_event`
+annotation and never gates the amplifier. Configured NSRL application-type
+tokens also govern derivation of `nsrl_is_os_component` when the lookup does not
+already assert that boolean; its two configured NSRL field names are the
+enrichment targets as well as the profiling inputs. `nsrl_exclusion_combine`
+selects combined application-type/component exclusion or component-field
+precedence identically for in-memory and DuckDB profiles. The DuckDB cache
+itself is policy-neutral.
 
 `engine_config.trust_dampening` requires its enablement, multiplier, principal/
 IP/ASN fields, signal targets, trusted literal and regex selectors, and
@@ -594,11 +629,11 @@ Read and copy the complete definitions from the
   owns the judgement. `engine_config.schema_aliases` and
   `engine_config.temporal_signal_policy` are read only from configuration;
   Python contributes no default aliases or ineligible-signal set.
-- `profiling.hour_of_week`, `profile_multipliers`,
+- `profiling.hour_of_week` (including `validation` and `score_amplifier`),
   `engine_config.trust_dampening`, `engine_config.config_validation`, and the
   weights document are complete strict schemas. Missing or unknown keys,
-  invalid types, stale targets, duplicate multiplier ownership, and an enabled
-  trust policy without a selector fail startup.
+  invalid types, duplicate explanation IDs, and an enabled trust policy without
+  a selector fail startup.
 - Signal identifiers in rules, policy inputs/outputs, and weights must use
   lowercase `snake_case`. Invalid casing is rejected instead of being silently
   normalised to a runtime name that cannot match.
@@ -1018,8 +1053,9 @@ Contextual gates run after direct detection and the configured phase-29
 canonical projections, but before phase-35 configured signal adjustments.
 Canonical authentication runs once in the atomic classifier stage; adjusted
 authentication values are not restored by a later refresh. Profiling
-multipliers and trust dampening run only after temporal detectors and phase-45
-projections have completed.
+score amplification and trust dampening run only after temporal detectors and
+phase-45 projections have completed; trust changes signal values before the
+single event-score factor is calculated.
 Inputs known to be emitted later are rejected at startup.
 
 `signal_projection` is reusable for additional contextual or temporal detector
@@ -1053,8 +1089,8 @@ correlation at phase 25, web-shell artefact classification at phase 27,
 ordered direct ATT&CK semantics at phase 28, contextual signal projections at
 phase 29, contextual signal gates at phase 30, ordered signal adjustments at
 phase 35, bounded temporal policy executors at phase 40, and post-temporal
-signal projections at phase 45. Profile multipliers and trust dampening then
-operate over the complete row signal set. The required
+signal projections at phase 45. Trust dampening then operates over the complete
+row signal set, followed by the single validated event-score amplifier. The required
 `persistence_configuration`, `repeated_scheduled_execution`,
 `direct_attack_semantics`, and `contextual_signal_adjustments` definitions are
 validated at phases 19, 19, 28, and 35 respectively because those are the
@@ -1183,11 +1219,16 @@ weights:
   fail_then_success_user: 8
 ```
 
-Final event score:
+Base event score:
 
-    score = Σ(signal_value × weight)
+    base_score = Σ(signal_value × weight)
 
-Scores are capped by `max_event_score`.
+When the hour-of-week profile is accepted, final scoring is:
+
+    score = min(max_event_score, base_score × profile_multiplier)
+
+Otherwise `profile_multiplier` is exactly `1`. A positive base score is
+therefore still required. All scores are capped by `max_event_score`.
 
 Both top-level keys are required. `max_event_score` must be a positive finite
 number; `weights` must be a non-empty mapping from lowercase signal names to

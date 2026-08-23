@@ -230,8 +230,9 @@ correlation runs at phase 25, web-shell artefact classification at phase 27,
 direct ATT&CK semantics at phase 28, contextual projections at phase 29,
 contextual gates at phase 30, ordered contextual adjustments at phase 35,
 bounded temporal executors at phase 40, and post-temporal projections at phase
-45. Profiling multipliers and trust dampening then run over the complete signal
-set, including temporal and geo outputs.
+45. Trust dampening then runs over the complete signal set, including temporal
+and geo outputs; the validated hour-of-week factor applies once to the resulting
+event score.
 The required persistence, repeated-schedule, direct-semantics, and adjustment
 definitions are fixed schedule assertions at phases 19, 19, 28, and 35;
 changing those values is rejected rather than rescheduling Python execution.
@@ -266,19 +267,42 @@ clauses for artefact and command activity.
 contain only the entries present in YAML; Python contributes no default aliases
 or ineligible signals.
 
-The top-level `profiling.hour_of_week`, `profile_multipliers`,
-`engine_config.trust_dampening`, and the weights document are strict contracts
-too. Profile selection, quiet-quantile membership, optional rarity/quiet
-emission flags, mandatory signal/value/merge bindings, NSRL exclusion
-composition, trust selector composition/reason order, targets, multipliers,
-explanation metadata, signal weights, and the score cap must be present and
-correctly typed; unknown, colliding, or stale names fail startup. The shipped
-profile keeps its unweighted sparse emissions disabled and uses the dense
-rarity column for post-temporal multipliers.
-The shipped multiplier `k` values predate post-temporal application to their
-geo/composite targets. Treat them as an explicit baseline hypothesis and run a
-downstream window/antigen sensitivity analysis before interpreting affected
-results; the event-score cap can conceal marginal changes on high-scoring rows.
+The top-level `profiling.hour_of_week`, `engine_config.trust_dampening`, and the
+weights document are strict contracts too. Profile selection, predictive
+validation, uncertainty handling, optional rarity/quiet emission flags,
+mandatory signal/value/merge bindings, NSRL exclusion composition, trust
+selector composition/reason order, explanation metadata, signal weights, and
+the score cap must be present and correctly typed; unknown or colliding names
+fail startup.
+
+The shipped hour-of-week policy retains the 100-event safety floor. It first
+tries the filtered host-resident activity set, then the full dataset if the
+filtered set is too small or fails validation. Only non-boundary calendar weeks
+are validation blocks. Each week is held out in turn; the remaining weeks fit a
+Laplace-smoothed 168-bin distribution, and mean held-out log-score improvement
+is measured against the uniform `1/168` reference. A deterministic whole-week
+bootstrap must put the configured one-sided lower confidence bound above zero.
+Too few events, too few complete weeks, or a non-positive bound rejects the
+profile; rejection after fallback is neutral and cannot alter scoring.
+
+For an accepted profile, a simultaneous bootstrap upper probability band makes
+the activity deficit conservative:
+
+`deficit(h) = max(0, 1 - p_upper(h) / (1/168))`
+
+`multiplier(h) = 1 + deficit(h)`
+
+The factor is therefore derived from the dataset and bounded to `[1, 2]`. It is
+applied once to the complete post-trust event score and then subjected to
+`max_event_score`; it neither changes individual signal values nor creates a
+score for an otherwise unscored event. The former family-specific `k`
+coefficients and `profile_multipliers` section have been removed. The shipped
+optional `hour_rarity` and `quiet_time_event` sparse emissions remain disabled;
+quiet-quantile membership is annotation-only and does not gate amplification.
+The dataset manifest records probabilities, simultaneous upper bounds,
+per-hour factors, weekly log-score improvements, bootstrap settings, selection
+and fallback history. Partition reports and JSONL telemetry include a compact
+validation summary; `profile_manifest_path` persists the full manifest.
 
 Partition `overlap` must cover the longest lookback of every enabled temporal
 policy definition.
