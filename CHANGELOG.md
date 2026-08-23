@@ -4,6 +4,12 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Reorganised the public README around detection scope, the conceptual pipeline,
+  reproducible profiling, operation, and limitations. Exhaustive executor and
+  scheduling contracts now remain in the technical references; the README uses
+  concise summaries and contains no internal numeric phase identifiers. The
+  rule-language and shipped-policy guides now define phases as fixed dependency-
+  ordering checkpoints rather than configurable pipeline stages.
 - Labelled disabled hour-of-week profiling explicitly in telemetry and reports
   with `selection_mode: disabled` and `reason: profiling_disabled`. Disabled
   runs now short-circuit profile construction, including when a reusable

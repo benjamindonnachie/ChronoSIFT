@@ -71,6 +71,11 @@ The rules YAML contains a mandatory top-level `detector_policy` with
 `version: 1` and `mode: authoritative`. Its `detectors` mapping must contain
 complete definitions for thirty-five detectors:
 
+In the table below, **stage** names the broad atomic, contextual, or temporal
+processing family. **Phase** is an internal ordering checkpoint used to
+validate producer-before-consumer dependencies. Baseline phase values assert
+the engine's fixed schedule; they are not a user-configurable scheduler.
+
 | Detector ID | Stage | Typed executor |
 |---|---|---|
 | `clamav_classification` | atomic classification (phase 5) | `clamav_classifier` |

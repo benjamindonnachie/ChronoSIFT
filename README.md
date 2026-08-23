@@ -19,117 +19,34 @@ ChronoSIFT combines atomic artefact rules, typed detector policy, temporal relat
 
 Rules and detector policy define what constitutes a signal; weights define how strongly each signal contributes to a capped event score. They are ordinary YAML and are intended to be adjusted for the investigated environment and research question. See [the rule-language reference](docs/RULE_LANGUAGE.md) and the [dead-box ATT&CK matrix](docs/ATTACK_MATRIX.md).
 
-The authoritative typed-policy surface contains thirty-five required detectors:
-the ClamAV, YARA, web-request, canonical-authentication, and execution-context
-classifiers; file lifecycle and MFT timestomping; persistence, repeated
-scheduled execution, isolated systemd persistence, and direct ATT&CK
-semantics; referenced-file and web-shell artefact classification; geographic,
-impossible-travel, and IP-scope continuity (including config-owned travel
-reference advancement, IP state updates, window bounds, branch modes, and
-threshold comparisons); ordered contextual signal
-adjustments; three canonical projections; reusable execution and contextual
-gates; and the bounded temporal composites and sequences. The shipped YAML is
-the complete policy for these definitions. Missing or partial definitions fail
-at startup rather than reactivating Python defaults.
-Duplicate YAML mapping keys are rejected at every depth in both rules and
-weights, so an accidental repeated declaration cannot silently override an
-earlier value.
+### Configuration model
 
-The mandatory top-level `rule_signal_merge` policy also owns collisions between
-ordinary atomic and temporal rule emissions. Each role selects `maximum` or
-`sum`; the shipped policy uses `maximum` for both, and the scalar, vectorised,
-fallback, and temporal evaluators follow the same choice.
-Typed detector definitions do not accept a `merge` key. Their emissions use
-idempotent maximum merge as an executor invariant, so the configuration does
-not advertise a detector-level choice that the runtime cannot honour.
+ChronoSIFT separates research policy from reusable execution mechanics:
 
-At phase 19, `persistence_configuration` declares ordered file, registry,
-event, and message predicates, while `repeated_scheduled_execution` declares
-its source signals, host/command key extraction, bounded window, threshold,
-emission limit, and evidence. Systemd evaluation remains isolated in its
-specialised phase-20 executor. At phase 28, `direct_attack_semantics` declares
-the ordered `authorized_keys`, recovery-inhibition, credential, discovery,
-cleanup, service-stop, SMB/remote-service, authentication, protocol, and
-account-removal branches. YAML owns their input fields, timestamp-kind
-precedence and tokens, literals, regular expressions, event IDs,
-source-signal conditions, emissions, confidence, and evidence. The generic
-`ordered_row_rules`, `ordered_signal_adjustments`, and
-`grouped_signal_window` executors retain only cached normalisation, expression
-evaluation, grouping/window traversal, and sparse merge mechanics. At phase
-35, `contextual_signal_adjustments` owns discovery reclassification and benign
-admin-query/backup dampening, including every predicate, target, zeroing action,
-and explanation field.
-Ordered-row explain output retains every matching branch, including branches
-that share one max-merged signal; `detector_rule_id` identifies the unique YAML
-rule alongside the canonical emission `rule_id`. Explicit SMB share/named-pipe
-evidence takes precedence over type-3 network-logon inference, preventing a
-non-admin share pipe event from being relabelled `smb_admin_share`.
-Those four required policies are asserted at phases 19, 19, 28, and 35 because
-the executor schedule is fixed; changing their YAML phase values is rejected
-rather than pretending to reschedule them.
+- YAML rules and typed detector definitions own enablement, inputs, detection
+  conditions, windows and bounds, emitted signals, confidence, and explanation
+  metadata.
+- The weights YAML defines how emitted signals contribute to the capped event
+  score. Ordinary rule-emission collisions follow the configured merge policy;
+  typed detector emissions use idempotent maximum merge.
+- Python owns validated mechanics such as canonical parsing, normalisation,
+  bounded-window traversal, state handling, and sparse materialisation. It does
+  not restore missing detection policy through hidden defaults.
+- Rules and weights are strict schemas. Missing required definitions, unknown
+  or obsolete keys, duplicate mapping keys, invalid signal dependencies, and
+  enabled emissions without weights fail validation.
+- Execution order is dependency-checked: classification and atomic signals are
+  available before contextual correlation, temporal analysis runs after its
+  prerequisites, and trust adjustment and the validated score amplifier run
+  only after the complete signal set exists.
 
-The other typed definitions likewise own their classification, correlation,
-projection, bounds, outputs, and explanation policy. Python retains reusable
-mechanics such as canonical parsing, path and timestamp normalisation,
-candidate selection, bounded-window lookup, label intersection, numeric
-coercion, and sparse emission. `webshell_artifact` and
-`systemd_service_persistence` now carry their web-root, service-path, and
-extension values directly instead of resolving shared `*_from` registries.
-Canonical authentication and execution context declare per-emission Boolean
-fact decisions, while systemd declares branch predicates, order, and
-first/all-match handling plus command/message/host/path/timestamp evidence
-resolvers. Temporal impact/count/follow-on policies likewise bind row evidence
-fields in YAML. Every best-effort path use supplies an ordered field list; no
-legacy default list remains. Canonical authentication also declares the Boolean
-eligibility gate evaluated before its thirteen emission decisions. It runs once
-in the atomic stage, so later contextual adjustments are not undone. Ordered fallback fields
-are coalesced per row by first meaningful value rather than by whichever
-column happens to exist in the DataFrame; none of this decision topology is
-embedded in executor branches.
-The former `engine_config.path_taxonomy`, `detection_vocabulary`,
-`detection_event_ids`, and `detection_thresholds` sections are rejected;
-rule values live inside their owning detector. `engine_config.schema_aliases`
-and `engine_config.temporal_signal_policy` are config-only too: omitted entries
-receive no hidden Python defaults. Additional detector IDs may use only the
-reusable `signal_gate`, `signal_sequence`, or `signal_projection` executors.
-The ordered-row, ordered-adjustment, and grouped-window implementations are
-bound to required baseline definitions and fixed schedule points; additional
-IDs selecting them are rejected.
-Generic temporal rules declare exact window and state semantics. Mandatory
-`lookback_lower_bound` selects inclusive or exclusive treatment at the exact
-lookback boundary. Mode-specific `emit_on` anchors can place sequence output on
-its start or completion, co-occurrence output on the active window start or
-current input, and change output on its reference or matching observation.
-Condition rules also own empty-value handling, first-observation behavior, and
-rolling/selected reference behavior within the active lookback. When no
-reference survives that window, first-observation behavior applies again. The
-shipped policy states inclusive, completion/current/match, ignored-empty,
-suppressed-first, previous-reference behavior explicitly. Counted windows separately list the current-row
-roles allowed to receive their emission. Both generic temporal rules and
-counted windows declare a mandatory exclusive input-signal threshold.
-
-Hour-of-week profiling and trust dampening are also strict config-owned
-policies. Their selection fields, quiet-hour annotation, exclusion composition,
-minimum-event floor, leave-one-week-out validation, whole-week bootstrap,
-the positive-activity-deficit gate, optional sparse emissions, output names,
-score-amplifier semantics, trust
-selector composition/reason precedence, and explanation metadata have no
-Python fallback. The shipped profile keeps its disabled, unweighted activity-
-deficit and quiet-time signals out of sparse state. Once temporal detectors, post-temporal
-projections, and trust dampening are complete, an accepted profile applies one
-dataset-derived factor to the complete event score. Rejected or inconclusive
-profiles are neutral. Enabling either optional profile emission requires a
-corresponding explicit weight, including when that weight is zero. No
-detector-family multiplier coefficients remain.
-
-GeoIP enrichment has a mandatory six-role output mapping in
-`geoip_enrichment.outputs`. The MaxMind lookup uses the canonical IP-recovery
-field, emits the configured City/ASN column names, and retains renamed fields
-in sidecars. Startup requires the geographic-continuity and impossible-travel
-inputs to match those outputs, preventing a schema rename from silently
-disabling continuity logic. Geographic continuity's carried-state retention,
-novelty baseline, first-observation handling, and boundary comparison are also
-explicit detector policy rather than fixed Python decisions.
+The shipped policy contains complete definitions for thirty-five detectors.
+Additional detector IDs can use the reusable signal-gate, signal-sequence, or
+signal-projection shapes without a new Python branch; a genuinely new detector
+shape still requires an executor implementation. Exact schemas, detector IDs,
+execution ordering, temporal state semantics, and extension limits are in the
+[rule-language reference](docs/RULE_LANGUAGE.md#detector-policy-v1) and
+[shipped-policy guide](rules/README.md#authoritative-detector-policy).
 
 ## Research context
 
@@ -161,21 +78,43 @@ flowchart LR
     I --> J["Review, visualisation and research evaluation"]
 ```
 
-1. **Forensic acquisition and Plaso extraction — upstream.** Disk images are processed with Plaso/log2timeline to create a homogeneous super-timeline from heterogeneous on-disk artefacts. ChronoSIFT is intended for post-breach triage and artefact prioritisation, not prevention or live endpoint monitoring.
+1. **Forensic acquisition and Plaso extraction — upstream.** Plaso/log2timeline
+   turns on-disk artefacts into a super-timeline. ChronoSIFT is for post-breach
+   triage and prioritisation, not prevention or live monitoring.
 
-2. **Parquet preparation — upstream.** The Plaso timeline is exported as JSONL; the supplied converter streams an XZ-compressed export into year/month-partitioned Parquet and assigns a stable `chronosift_row_id`. The base Parquet dataset is preserved so later sidecars can be joined without rebuilding or duplicating the timeline. ChronoSIFT then processes partitions incrementally with DuckDB/Arrow rather than holding the complete super-timeline in memory.
+2. **Parquet preparation — upstream.** The supplied converter streams the Plaso
+   JSONL.XZ export into year/month-partitioned Parquet and assigns a stable
+   `chronosift_row_id`. ChronoSIFT processes those partitions incrementally and
+   leaves the base timeline unchanged.
 
-3. **Canonicalisation, normalisation, and optional enrichment.** Each partition is materialised into stable fields under the mandatory YAML `canonicalisation` and `normalisation` contracts. Windows/SSH authentication extraction, parsed-output merge precedence, destination identity, IP recovery, parser selectors, event classifications, regexes, aliases, source precedence, and output names are configuration-owned; Python retains reusable XML, regex, IP, and coalescing mechanics. The shipped authentication extractors preserve meaningful existing outputs and fill only null, blank, or recognised-placeholder values. Web rows expose typed `chronosift_web_*` features for method, host, decoded query, canonical endpoint, source, status, response size, upload name, content type, attack indicators, file identity, and qualified outcome. Optional YARA Forge metadata, ClamAV results, NSRL known-file data, GeoLite2 City/ASN data, Luhn findings, and hash evidence add context without becoming standalone verdicts.
+3. **Canonicalisation, normalisation, and optional enrichment.** Mandatory YAML
+   contracts produce stable authentication, execution, web, path, and network
+   fields across heterogeneous parsers. Optional YARA, ClamAV, NSRL, GeoLite2,
+   Luhn, and hash inputs add context without becoming standalone verdicts.
 
-4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. Typed detector-policy executors handle configured atomic classification, contextual gates, and stateful semantics that do not fit the ordinary rule language. YAML owns their configured inputs, detection judgement, and emissions; Python owns validation, normalisation, and reusable executor mechanics. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
+4. **Atomic rule evaluation.** Rules evaluate individual events and emit sparse
+   signals with explanations. These preserve the source evidence before later
+   behavioural interpretation.
 
-5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, and applies its conservative out-of-hours factor only when whole-week bootstrap uncertainty identifies at least one confidently low-activity hour. The shipped policy leaves an invalid, inconclusive, or inert filtered profile neutral rather than replacing it with an all-event profile. The stage also applies noise dampening and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
+5. **Whole-partition contextual and dead-box evaluation.** Contextual passes
+   correlate authentication, execution, persistence, file, web, and enrichment
+   evidence across the partition. They also validate the activity profile,
+   apply configured noise controls, and retain scored or specialised lifecycle
+   evidence.
 
-6. **Sparse temporal candidate filtering.** Rows carrying a temporal prerequisite, plus the bounded neighbouring windows needed for correlation, are selected for temporal/stateful passes when the configured rules make reduction safe. Whole-partition non-temporal coverage is therefore preserved while avoiding a full-partition temporal replay where it adds no evidence.
+6. **Sparse temporal candidate filtering.** Temporal prerequisites and their
+   bounded neighbours are selected without reducing whole-partition
+   non-temporal coverage.
 
-7. **Temporal rules and composites.** Stateful bounded windows link behaviour within and across Parquet partitions. Supported modes include ordered sequences, co-occurrence, first-seen values, and changed values. This enables behaviours such as failure followed by success, newly observed users or IPs, new countries/ASNs, impossible travel, download followed by execution, credential access followed by staging or transfer, and ransomware or web-shell composites.
+7. **Temporal rules and composites.** Bounded state links behaviour within and
+   across partitions through sequences, co-occurrence, first-seen values, and
+   changes. Examples include failure followed by success, impossible travel,
+   download followed by execution, and staging followed by transfer.
 
-8. **Scoring and sidecar output.** Configurable weights convert emitted signals into a capped event score. ChronoSIFT writes a sidecar Parquet dataset keyed by `chronosift_row_id`, preserving signals, scores, and explain evidence while leaving the base timeline unchanged. Across every partition, `chronosift_signals` has the stable Arrow type `MAP<string,double>` and `chronosift_explain` is a stable list of canonical JSON evidence entries; the built-in loaders restore the familiar Python dict/list representation. Reports, telemetry, and reusable profile/file-hit manifests can be retained with the rules, weights, and enrichment versions used for the run.
+8. **Scoring and sidecar output.** Configurable weights produce a capped event
+   score. The sidecar preserves stable row keys, sparse signals, and canonical
+   JSON explanations; reports, telemetry, and reusable manifests record the
+   run's provenance.
 
 **Downstream research — outside this repository.** The sidecar can be joined to the base timeline for analyst review, visualisation, ground-truth evaluation, and later experiments. Within the wider research programme, deterministic behavioural signals may also contribute antigen and danger context to dDCA-based analysis; ChronoSIFT itself remains the explainable behavioural-scoring stage rather than the complete research pipeline.
 
@@ -187,19 +126,20 @@ dataset-level 168-bin hour-of-week activity distribution and amplifies scored
 events only where the available evidence supports a recurring, confidently
 low-activity period.
 
-The shipped policy first selects host-resident filesystem activity, excluding
-configured NSRL operating-system material and package/update noise. It requires
-at least 100 selected events. When the filtered selection is too small or fails
-validation, the shipped `insufficient_filtered_events: empty_profile` policy
-fails closed to the neutral multiplier rather than substituting the unfiltered
-timeline. Boundary weeks are discarded. Each remaining complete calendar week
-is held out in turn, and a Laplace-smoothed profile fitted on the other weeks
-must improve mean held-out
-logarithmic score over a uniform `1/168` reference. The shipped inferential
-settings require at least three complete weeks and use a deterministic
-2,000-resample whole-week bootstrap (`confidence_level: 0.95`,
-`random_seed: 0`). Startup also requires confidence in `(0.5, 1)`, at least 100
-resamples, and at least five expected resamples in each confidence tail.
+The shipped policy:
+
+- selects host-resident filesystem activity while excluding configured NSRL
+  operating-system material and package/update noise;
+- requires at least 100 selected events and three complete calendar weeks after
+  discarding boundary weeks;
+- holds out each complete week in turn and requires a Laplace-smoothed profile
+  fitted on the other weeks to improve logarithmic score over a uniform
+  `1/168` reference;
+- uses a deterministic 2,000-resample whole-week bootstrap with
+  `confidence_level: 0.95` and `random_seed: 0`; and
+- fails closed to the neutral multiplier when the filtered profile is too
+  small, invalid, inconclusive, or unable to identify an amplifiable hour. It
+  does not silently substitute the unfiltered timeline.
 
 Predictive non-uniformity alone is not enough. An accepted profile must also
 have at least one hour whose simultaneous upper probability bound is below the
@@ -216,26 +156,30 @@ score cap. It does not change individual signal values, compound by signal
 family, reduce in-hours scores, or create a score on an otherwise unscored
 event. A rejected or inconclusive profile is neutral.
 
-The profile manifest records selection and fallback history, per-hour
-probabilities and simultaneous upper bounds, activity deficits and factors,
-weekly validation results, `amplifiable_hour_count`, and
-`simultaneous_upper_radius`. Preserve it with the rules, weights, and input
-provenance for every run. These factors support within-dataset prioritisation:
-they depend on retained event volume, and UTC hour-of-week bins can split local
-habits across daylight-saving transitions. Here “out of hours” means
-dataset-relative off peak and can cover a broad part of the week; it is not a
-rare-event label. See the [statistical method and rule-language
-contract](docs/RULE_LANGUAGE.md#hour-of-week-profiling-and-trust-dampening) and
-[forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md#hour-of-week-time-basis-and-comparability).
+Preserve the profile manifest with the rules, weights, and input provenance for
+every run. It records:
 
-The alternative `full_dataset` insufficient-profile action remains available
-for an explicitly different experiment. It removes the parser, filename, and
-NSRL selection filters and can therefore model automated timeline production
-rather than the intended host-resident activity. Do not mix those semantics in
-one results series. Any table reporting out-of-hours results should include
-`selection_mode`, source and selected event counts, validation status and
-reason, complete-week count, `amplifiable_hour_count`, and
-`simultaneous_upper_radius`.
+- selection and fallback history;
+- per-hour probabilities, uncertainty bounds, deficits, and factors; and
+- weekly validation results, `amplifiable_hour_count`, and
+  `simultaneous_upper_radius`.
+
+The factors support within-dataset prioritisation, not comparison between
+datasets with different retained event volumes. UTC bins may split local habits
+across daylight-saving transitions, and “out of hours” means dataset-relative
+off peak rather than a rare-event label. See the [statistical method and
+rule-language contract](docs/RULE_LANGUAGE.md#hour-of-week-profiling-and-trust-dampening)
+and [forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md#hour-of-week-time-basis-and-comparability).
+
+The alternative `full_dataset` action remains available only for an explicitly
+different experiment: it removes the parser, filename, and NSRL filters and may
+model automated timeline production rather than host-resident activity. Do not
+mix the two selection semantics in one results series. Report:
+
+- `selection_mode` and source/selected event counts;
+- validation status and reason;
+- complete-week count and `amplifiable_hour_count`; and
+- `simultaneous_upper_radius`.
 
 ## Installation
 
@@ -300,9 +244,7 @@ Partition runs omit the score-neutral generic lifecycle payloads by default to
 control whole-partition memory use. Add
 `--retain-zero-weight-lifecycle-signals` only when an export needs those legacy
 `file_created`, `file_modified`, and `file_deleted` entries despite their zero
-weights. The mandatory lifecycle policy owns each row-emission truth table and
-each window's kinds, grouping, admission clauses, bounds, thresholds, and
-emission limits; Python supplies the generic keyed traversal.
+weights. Scored and specialised lifecycle signals are always retained.
 
 Rules and weights can be replaced at run time:
 
@@ -317,12 +259,17 @@ Use `--help` for output modes, overlap windows, telemetry, manifests, and option
 ### Corpus amplifier telemetry
 
 Each sidecar run writes a `profile_validation` telemetry event and carries the
-same compact record into its reports and `.telemetry.summary.json`. The record
-includes `selection_mode`, `accepted`, `reason`, source and selected event
-counts, `complete_week_count`, `amplifiable_hour_count`,
-`simultaneous_upper_radius`, and the derived `engaged` flag. Engagement means
-that validation was accepted and at least one hour received a factor greater
-than one; it does not mean that every scored event was amplified.
+same compact record into its reports and `.telemetry.summary.json`. It records:
+
+- `selection_mode`, validation status, and reason;
+- source and selected event counts;
+- complete-week and amplifiable-hour counts plus the simultaneous uncertainty
+  radius; and
+- whether the amplifier engaged.
+
+Engagement means that validation was accepted and at least one hour received a
+factor greater than one; it does not mean that every scored event was
+amplified.
 An ablation with `profiling.hour_of_week.enabled: false` instead records
 `selection_mode: disabled` and `reason: profiling_disabled`. It is therefore a
 deliberate known non-engagement, not an unexplained profile rejection.
@@ -335,16 +282,18 @@ uv run python summarize_chronosift_telemetry.py \
   --json-out /path/to/corpus/amplifier-engagement.summary.json
 ```
 
-The resulting `amplifier_engagement` object reports complete and incomplete
-runs, the known corpus denominator, engaged and non-engaged counts, engagement
-rate, selection-mode and validation-reason counts, non-engagement causes,
-complete-week and amplifiable-hour summaries, and an auditable record for every
-input image. Telemetry that lacks a
-completed run, lacks a profile event, or predates `amplifiable_hour_count` is
-reported as unknown and is excluded from the engagement-rate denominator rather
-than being counted as a rejection. Preserve this aggregate with the per-image
-manifests so the reported engagement rate can be traced back to each profile
-decision.
+The resulting `amplifier_engagement` object reports:
+
+- complete, incomplete, known, engaged, and non-engaged run counts;
+- the known-run denominator and engagement rate;
+- selection, validation, and non-engagement reason counts;
+- complete-week and amplifiable-hour summaries; and
+- one auditable record per input image.
+
+Incomplete runs, missing profile events, and legacy records without
+`amplifiable_hour_count` are reported as unknown and excluded from the rate
+denominator. Preserve the aggregate with the per-image manifests so every count
+remains traceable to its profile decision.
 
 Summaries use the portable basenames `telemetry_file` and `dataset_name`; they
 do not archive resolved filesystem paths. Input telemetry basenames must be
@@ -386,84 +335,45 @@ the complete profile manifest, and see the
 [forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md) before making
 cross-dataset comparisons.
 
-Referenced-file manifest schema v7 maps configured web document roots to
-canonical URL paths. The mandatory `web_request_classification` policy owns
-raw web-field bindings, sidecar aliases, parser tokens, bounded decoding,
-attack patterns, upload semantics, status ranges, SQLi inference, and direct
-exploit emissions. The mandatory `referenced_file_correlation` policy owns its
-filesystem source fields, document roots, propagation emissions, ordered web
-identity branches, and ordered web-evidence/ATT&CK mapping outputs and
-branches. Upload query-key admission, filename-extension admission mode,
-multi-value MIME pairing, MIME-mismatch fact branches, indicator-to-attempt
-promotion, classifier outcome ranks, and referenced-file outcome merging are
-explicit strict policy. Registry IDs are
-configuration-local rather than a fixed Python vocabulary, and empty matching
-lists explicitly disable those paths.
-Python retains canonical path/request parsing, exact-hash lookup, and identity
-merge mechanics. This lets configured web requests inherit Luhn, antivirus, or
-sufficiently strong/category-relevant YARA support from the file they access,
-even when the request is much later than the filesystem event.
-The propagated identity preserves AV signatures, families and categories plus
-YARA rule names, categories, scores and quality, rather than reducing evidence
-to an undifferentiated hit flag. Weak, certificate-only, unindexed, or unnamed
-YARA is retained as raw filesystem evidence but cannot enter the web or
-SHA-256 upload indexes under the shipped gate. The manifest records complete
-ClamAV, YARA, and referenced-file-correlation policy digests plus a source
-digest covering dataset membership/file metadata, enrichment inputs,
-referenced-file settings, YARA metadata file bytes, and the effective parsed
-YARA metadata index.
-Qualification is tracked per SHA-256, so
-different versions that reuse a path cannot exchange AV, Luhn, or YARA upload
-tags or identity, and a strong version cannot qualify a weak version's hash.
-Partitioned runs rebuild it when the schema or any expected digest differs.
-Query strings and fragments do not affect identity matching. Successful
-Luhn-positive GET responses are identified separately from failed or
-status-unknown access. Under the shipped policy, explicit POST/PUT/PATCH upload
-filenames can inherit strong malware-file support. Where parsers expose
-structured request metadata, ChronoSIFT recovers multiple multipart names
-(including RFC 5987 `filename*`), part MIME types, content length, and SHA-256
-values using bounded extraction.
-Hash and basename correlation are attempted independently, but a resolved
-SHA-256 takes precedence over weaker upload-name evidence. URL aliases or
-basenames that resolve to more than one hit-bearing filesystem path are omitted
-rather than merging unrelated identities. Ambiguity is evaluated among
-hit-bearing manifest entries; build manifests per evidence image and configure
-document roots narrowly because clean paths are not inventoried for this check.
-For a multipart event, any resolved upload hash makes the event's hash evidence
-authoritative because the available source fields do not reliably pair every
-name with its hash; unmatched basename-only evidence on that event is therefore
-ignored.
-Upload outcomes distinguish accepted, redirected, rejected, and status-unknown
-requests.
+### Referenced-file and web evidence
 
-The dataset portion of `source_digest` uses Parquet membership, size, and
-nanosecond modification time rather than hashing the full corpus. Explicitly
-rebuild the manifest after replacing Parquet bytes while preserving those
-metadata values.
+The referenced-file manifest connects filesystem evidence to later web
+activity without reducing it to an undifferentiated hit:
 
-Requests that merely test whether a parameter can be broken out of quoting —
-scanner probing such as `?id=2'gejf<'">skpv`, carrying no valid injection
-syntax — are recorded as `web_injection_probe` at `low` confidence with a
-weight of `1`. Probing is evidence of an attempt, never of success, so it does
-not raise the scored `exploit_public_facing_app` signal and is suppressed
-entirely when stronger web evidence already exists on the same request.
+- configured document roots map filesystem paths to canonical URL paths, so a
+  later request can inherit qualified Luhn, antivirus, or YARA evidence;
+- AV signatures, families, and categories and qualified YARA names, categories,
+  scores, and quality remain attributable;
+- qualification is tracked per SHA-256, resolved hashes take precedence over
+  upload names, and ambiguous URL aliases or basenames are omitted rather than
+  merged; and
+- schema, policy, enrichment, and source digests determine whether a reusable
+  manifest remains valid.
 
-Web requests are also checked for decoded, high-confidence SQL injection
-syntax. `web_sqli_attempt` records the request evidence. ChronoSIFT emits the
-stronger `web_sqli_probable_success` only when the server returns 2xx and the
-response is substantially larger than successful non-SQLi responses for the
-configured baseline group (host, method, and canonical endpoint in the shipped
-policy). Baseline sample admission, partition/prior scope, optional horizon,
-median/mean statistic, threshold terms, comparison, and attempt/anomaly/success
-fact decisions are all YAML-owned. Response size alone is never interpreted as SQLi
-success, and redirects or errors remain attempts.
+Build a manifest per evidence image and configure document roots narrowly.
+Weak or unindexed YARA remains available as raw filesystem evidence but cannot
+qualify web or upload correlation under the shipped policy. Upload outcomes
+distinguish accepted, redirected, rejected, and status-unknown requests.
 
-Evidence-qualified ATT&CK labels are emitted separately from scored source
-signals: exploitation syntax maps to T1190 without implying success; an
-independently classified web shell that is accessed maps to T1505.003; an
-accepted malicious inbound upload maps to T1105; and probable successful SQLi carrying
-database-enumeration or file-access syntax maps to T1213.006. These mapping
-signals have zero weight to avoid counting the same evidence twice.
+The dataset source digest uses Parquet membership, file size, and nanosecond
+modification time rather than hashing the complete corpus. Rebuild explicitly
+after replacing Parquet bytes while preserving those metadata values. The
+[detector-policy reference](docs/RULE_LANGUAGE.md#detector-policy-v1) documents
+the exact identity, multipart, MIME, outcome, and merge rules.
+
+### Web attack interpretation
+
+- Broken-quote scanner probes without valid injection syntax emit only the
+  low-confidence `web_injection_probe`; they do not imply successful
+  exploitation.
+- `web_sqli_attempt` records high-confidence decoded SQL injection syntax.
+  `web_sqli_probable_success` additionally requires HTTP 2xx and a response
+  anomaly against successful non-SQLi requests in the configured baseline
+  group. Response size alone is never treated as success.
+- Evidence-qualified ATT&CK mappings are score-neutral: exploitation syntax
+  maps to T1190, accessed independently classified web shells to T1505.003,
+  accepted malicious uploads to T1105, and qualifying probable SQLi success to
+  T1213.006.
 
 ## Documentation
 
