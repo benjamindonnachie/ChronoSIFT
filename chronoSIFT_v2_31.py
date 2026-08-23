@@ -22710,7 +22710,15 @@ class ChronoSiftEngine:
             with telemetry.stage("prepare_profile_manifest"):
                 # Profiling manifests are dataset-level state. Persisting them
                 # keeps reruns focused on engine work instead of recomputation.
-                if profile_manifest is None:
+                if not self.profiling_policy.enabled:
+                    # A supplied or reusable manifest cannot make a disabled
+                    # policy operational. Emit an explicit neutral manifest so
+                    # ablation telemetry describes configuration, not whether
+                    # an incidental profile happened to validate.
+                    profile_manifest = _disabled_hour_of_week_manifest(
+                        self.profiling_policy
+                    )
+                elif profile_manifest is None:
                     if profile_manifest_path and Path(profile_manifest_path).exists():
                         profile_manifest = load_profile_manifest(profile_manifest_path)
                     else:
@@ -23640,6 +23648,27 @@ def _empty_hour_of_week_manifest(
     }
 
 
+def _disabled_hour_of_week_manifest(
+    policy: HourOfWeekProfilingPolicy,
+) -> Dict[str, Any]:
+    return _empty_hour_of_week_manifest(
+        alpha=policy.smoothing_alpha,
+        quiet_quantile=policy.quiet_quantile,
+        selection_mode="disabled",
+        validation={
+            "status": "disabled",
+            "accepted": False,
+            "reason": "profiling_disabled",
+            "method": policy.validation.method,
+            "reference": policy.validation.reference,
+            "block": policy.validation.block,
+            "complete_week_count": 0,
+            "amplifiable_hour_count": 0,
+            "simultaneous_upper_radius": None,
+        },
+    )
+
+
 def _hour_of_week_manifest_from_weekly_counts(
     weekly_counts: pd.DataFrame,
     policy: HourOfWeekProfilingPolicy,
@@ -23708,6 +23737,8 @@ def build_global_hour_of_week_manifest(
 ) -> Dict[str, Any]:
     """Build a dataset-wide hour-of-week profiling manifest using reduced columns."""
     policy = profiling_policy
+    if not policy.enabled:
+        return _disabled_hour_of_week_manifest(policy)
     alpha = policy.smoothing_alpha
     quiet_quantile = policy.quiet_quantile
     min_profile_events = policy.min_profile_events

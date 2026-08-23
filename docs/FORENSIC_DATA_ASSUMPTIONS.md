@@ -124,6 +124,16 @@ that the factor failed to engage. Retain the aggregate's per-image records and
 profile manifests so every count remains attributable to its selection and
 validation decision.
 
+Profiling-disabled ablations are retained as explicit known non-engagement with
+`selection_mode: disabled` and `reason: profiling_disabled`; they should not be
+interpreted as a failure of the retained data to support a profile. Summary
+artefacts use portable telemetry and dataset basenames, while the raw JSONL
+retains the original paths as execution provenance. Basenames must be unique
+within an aggregate. Corpus summarisation validates all inputs before writing
+an output and deliberately fails on a malformed, duplicate, or inconsistent
+record. Validate the complete telemetry set before deriving results tables;
+do not remove a failing image merely to obtain a partial engagement rate.
+
 “Out of hours” means dataset-relative off-peak activity below the uniform
 hour-of-week reference. It is not synonymous with the optional tenth-quantile
 quiet annotation or with a rare event; a regular office-hours profile may

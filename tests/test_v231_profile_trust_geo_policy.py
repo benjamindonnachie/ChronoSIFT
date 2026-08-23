@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
@@ -1570,6 +1571,83 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertEqual(manifest["validation"]["complete_week_count"], 7)
         self.assertTrue(manifest["validation"]["accepted"])
         self.assertGreater(manifest["profile"][2], 0.0)
+
+    def test_disabled_global_profile_is_explicit_without_reading_dataset(self):
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["enabled"] = False
+        engine = self._engine(rules)
+
+        manifest = MODULE.build_global_hour_of_week_manifest(
+            "dataset-is-deliberately-unavailable",
+            engine.profiling_policy,
+        )
+
+        self.assertEqual(manifest["selection_mode"], "disabled")
+        self.assertEqual(manifest["profile"], {})
+        self.assertEqual(manifest["validation"]["status"], "disabled")
+        self.assertFalse(manifest["validation"]["accepted"])
+        self.assertEqual(
+            manifest["validation"]["reason"],
+            "profiling_disabled",
+        )
+        self.assertEqual(manifest["validation"]["amplifiable_hour_count"], 0)
+
+    def test_disabled_partition_run_overrides_supplied_profile_in_telemetry(self):
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["enabled"] = False
+        engine = self._engine(rules)
+        supplied_manifest = {
+            "selection_mode": "filtered",
+            "profile": {2: 0.75},
+            "source_event_count": 1000,
+            "selected_event_count": 800,
+            "validation": {
+                "accepted": True,
+                "reason": "accepted",
+                "complete_week_count": 8,
+                "amplifiable_hour_count": 1,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir) / "dataset"
+            partition = root / "year=2024" / "month=06"
+            partition.mkdir(parents=True)
+            pd.DataFrame({
+                "datetime": [pd.Timestamp("2024-06-17T10:00:00Z")],
+                MODULE.CHRONOSIFT_ROW_ID_COLUMN: [1],
+                "parser": ["filestat"],
+                "timestamp_desc": ["Creation Time"],
+                "pathspec": ["/home/user/example.txt"],
+                "message": ["ordinary file"],
+            }).to_parquet(partition / "part.parquet", index=False)
+            output = pathlib.Path(tmpdir) / "sidecar"
+            telemetry_path = pathlib.Path(tmpdir) / "run.telemetry.jsonl"
+
+            reports = engine.process_parquet_dataset_partitioned(
+                str(root),
+                str(output),
+                output_mode="sidecar",
+                profile_manifest=supplied_manifest,
+                telemetry_jsonl_path=str(telemetry_path),
+            )
+            events = [
+                json.loads(line)
+                for line in telemetry_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        profile_event = next(
+            event for event in events if event.get("event") == "profile_validation"
+        )
+        self.assertEqual(profile_event["selection_mode"], "disabled")
+        self.assertEqual(profile_event["reason"], "profiling_disabled")
+        self.assertFalse(profile_event["accepted"])
+        self.assertFalse(profile_event["engaged"])
+        self.assertEqual(profile_event["amplifiable_hour_count"], 0)
+        self.assertEqual(
+            reports[0]["profile_validation"]["reason"],
+            "profiling_disabled",
+        )
 
     def test_explicit_full_dataset_fallback_retries_below_100_events(self):
         rules = deepcopy(BASE_RULES)
