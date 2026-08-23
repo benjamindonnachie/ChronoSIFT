@@ -350,12 +350,19 @@ event-score amplifier. Enabled profile emissions enter the ordinary signal map
 during the atomic stage before scoring. The shipped policy leaves both sparse
 emissions disabled and unweighted; the dense `out_of_hours_activity_deficit` column carries the
 validated activity deficit used by final scoring.
+If either optional emission is enabled, its signal must have an explicit weight
+entry, including when the intended weight is zero. Missing weights fail engine
+construction independently of `engine_config.config_validation.strict`,
+matching the detector-policy emission contract.
 
 The `min_profile_events` floor is evaluated before statistical validation. The
-filtered host-resident set is attempted first. If it has fewer events or its
-profile is not validated, `insufficient_filtered_events: full_dataset` retries
-with all events. The final fallback is an empty profile, which maps every event
-to the neutral multiplier `1`.
+filtered host-resident set is attempted first. The shipped
+`insufficient_filtered_events: empty_profile` action maps every event to the
+neutral multiplier `1` when that selection has too few events or is not
+validated. `full_dataset` is a selectable alternative for a deliberately
+different experiment. It removes all parser, filename, and NSRL selection
+filters, so its profile can describe automated timeline production rather than
+the filtered host-resident activity.
 
 `validation.method: leave_one_calendar_week_out_log_score` uses only complete,
 non-boundary calendar weeks. For each held-out week, the other weeks fit a
@@ -366,9 +373,9 @@ when its configured one-sided lower confidence bound is greater than zero and
 `amplification_gate: require_positive_activity_deficit` is satisfied after
 uncertainty-band construction. The gate requires at least one hour whose upper
 probability bound is below the uniform reference. A predictively non-uniform
-profile that cannot identify any such hour is rejected, allowing the configured
-full-dataset fallback to run rather than retaining an accepted but inert
-amplifier.
+profile that cannot identify any such hour is rejected. Under the shipped
+fail-closed action it remains neutral rather than substituting a profile with a
+different estimand.
 `minimum_complete_weeks`, `confidence_level`, `bootstrap_resamples`, and
 `random_seed` make this inferential contract reproducible rather than silently
 engine-defined. Validation requires `0.5 < confidence_level < 1` so the named
@@ -410,8 +417,9 @@ The persisted profile manifest exposes whether the method was operationally
 active as well as statistically predictive. Its `validation` object includes
 `amplifiable_hour_count` and `simultaneous_upper_radius`; per-hour
 `probabilities`, `upper_probability_bounds`, `activity_deficits`, and
-`amplifiers` describe the accepted profile. `validation_attempts` preserves
-the filtered-selection outcome when validation falls back to the full dataset.
+`amplifiers` describe the accepted profile. The dataset-wide builder's
+`validation_attempts` preserves a rejected filtered-selection outcome before
+the configured insufficient-profile action is resolved.
 
 Here “out of hours” means hours whose conservative dataset-relative activity
 probability lies below the uniform reference. It is an off-peak measure, not a
@@ -423,6 +431,10 @@ different factors: greater evidence permits stronger amplification. Factors
 are suitable for within-dataset prioritisation but are not directly comparable
 measurements across datasets unless event counts, week coverage, validation
 statistics, and the complete profile manifest are considered together.
+Do not combine filtered and `fallback_full_dataset` profiles in one result
+series. Tables reporting the factor must include `selection_mode`, source and
+selected event counts, validation status/reason, complete-week count,
+`amplifiable_hour_count`, and `simultaneous_upper_radius`.
 
 Quiet-quantile membership controls only the optional `quiet_time_event`
 annotation and never gates the amplifier. Configured NSRL application-type

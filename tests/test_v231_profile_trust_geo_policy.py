@@ -1051,6 +1051,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         ].extend(["out_of_hours_activity_deficit", "quiet_time_event"])
         weights = deepcopy(BASE_WEIGHTS)
         weights["weights"]["out_of_hours_activity_deficit"] = 5
+        weights["weights"]["quiet_time_event"] = 0
         engine = self._engine(rules, weights)
         frame = pd.DataFrame(
             {"out_of_hours_activity_deficit": [0.4], "hour_of_week": [10]},
@@ -1570,8 +1571,12 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertTrue(manifest["validation"]["accepted"])
         self.assertGreater(manifest["profile"][2], 0.0)
 
-    def test_filtered_profile_below_100_events_retries_full_dataset(self):
-        engine = self._engine()
+    def test_explicit_full_dataset_fallback_retries_below_100_events(self):
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"][
+            "insufficient_filtered_events"
+        ] = "full_dataset"
+        engine = self._engine(rules)
         timestamps = [
             pd.Timestamp("2023-12-31T23:00:00Z"),
             pd.Timestamp("2024-02-19T00:00:00Z"),
@@ -1614,6 +1619,70 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         )
         self.assertGreater(
             profiled.attrs["_chronosift_profile_manifest"]["profile"][2], 0.0
+        )
+
+    def test_shipped_profile_does_not_replace_inert_filtered_activity_with_automation(self):
+        engine = self._engine()
+        self.assertEqual(
+            engine.profiling_policy.insufficient_filtered_events,
+            "empty_profile",
+        )
+        rng = np.random.default_rng(13)
+        timestamps = [
+            pd.Timestamp("2023-12-31T23:00:00Z"),
+            pd.Timestamp("2024-02-26T00:00:00Z"),
+        ]
+        parsers = ["boundary", "boundary"]
+        office_bins = [
+            day * 24 + hour
+            for day in range(5)
+            for hour in range(9, 17)
+        ]
+        for week_start in pd.date_range(
+            "2024-01-01T00:00:00Z", periods=8, freq="7D"
+        ):
+            for hour_bin in rng.choice(
+                office_bins, size=200, replace=True
+            ):
+                timestamps.append(
+                    week_start
+                    + pd.Timedelta(
+                        hours=int(hour_bin),
+                        minutes=int(rng.integers(0, 60)),
+                    )
+                )
+                parsers.append("mft")
+            for offset in range(2_000):
+                timestamps.append(
+                    week_start + pd.Timedelta(hours=3, seconds=offset)
+                )
+                parsers.append("apt_history")
+
+        frame = pd.DataFrame(
+            {
+                "parser": parsers,
+                "filename": ["ordinary.bin"] * len(timestamps),
+            },
+            index=pd.DatetimeIndex(timestamps),
+        ).sort_index()
+        profiled = engine._apply_hour_of_week_profiling(frame)
+        manifest = profiled.attrs["_chronosift_profile_manifest"]
+
+        self.assertEqual(manifest["selection_mode"], "filtered")
+        self.assertTrue(manifest["used_filtered_subset"])
+        self.assertFalse(manifest["validation"]["accepted"])
+        self.assertEqual(
+            manifest["validation"]["reason"],
+            "no_confidently_low_activity_hours",
+        )
+        self.assertGreater(
+            manifest["validation"]["lower_confidence_bound"], 0.0
+        )
+        self.assertEqual(manifest["profile"], {})
+        self.assertEqual(manifest["amplifiers"], {})
+        self.assertEqual(
+            profiled[engine.profiling_policy.activity_deficit_signal].max(),
+            0.0,
         )
 
     def test_trust_inputs_selectors_targets_and_metadata_are_config_authoritative(self):
@@ -1738,6 +1807,49 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             ValueError, r"weights configuration.*max_event_score"
         ):
             self._engine(weights=weights)
+
+    def test_enabled_profile_emissions_require_explicit_weights(self):
+        cases = (
+            ("emit_activity_deficit_signal", "activity_deficit_signal"),
+            ("emit_quiet_time_signal", "quiet_signal"),
+        )
+        for enabled_key, signal_key in cases:
+            with self.subTest(enabled_key=enabled_key):
+                rules = deepcopy(BASE_RULES)
+                profile = rules["profiling"]["hour_of_week"]
+                profile[enabled_key] = True
+                signal_name = profile[signal_key]
+                rules["engine_config"]["temporal_signal_policy"][
+                    "ineligible_signals"
+                ].append(signal_name)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"profiling\.hour_of_week: enabled emissions missing "
+                    rf"weights: {signal_name}",
+                ):
+                    self._engine(rules)
+
+    def test_enabled_profile_emissions_accept_explicit_zero_weights(self):
+        rules = deepcopy(BASE_RULES)
+        weights = deepcopy(BASE_WEIGHTS)
+        profile = rules["profiling"]["hour_of_week"]
+        profile["emit_activity_deficit_signal"] = True
+        profile["emit_quiet_time_signal"] = True
+        signal_names = (
+            profile["activity_deficit_signal"],
+            profile["quiet_signal"],
+        )
+        rules["engine_config"]["temporal_signal_policy"][
+            "ineligible_signals"
+        ].extend(signal_names)
+        for signal_name in signal_names:
+            weights["weights"][signal_name] = 0
+
+        engine = self._engine(rules, weights)
+        self.assertEqual(
+            {engine.weights[signal_name] for signal_name in signal_names},
+            {0.0},
+        )
 
 
 if __name__ == "__main__":

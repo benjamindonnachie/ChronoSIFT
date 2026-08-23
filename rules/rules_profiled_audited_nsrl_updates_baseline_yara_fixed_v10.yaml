@@ -10,7 +10,7 @@ profiling:
     nsrl_application_type_field: nsrl_application_type
     nsrl_exclusion_combine: any_available
     include_parser_regex: '(?:mft|usnjrnl|filestat)'
-    insufficient_filtered_events: full_dataset
+    insufficient_filtered_events: empty_profile
     exclude_nsrl_application_type_contains:
     - Operating System
     exclude_parser_contains:
