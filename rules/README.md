@@ -269,7 +269,7 @@ or ineligible signals.
 
 The top-level `profiling.hour_of_week`, `engine_config.trust_dampening`, and the
 weights document are strict contracts too. Profile selection, predictive
-validation, uncertainty handling, optional rarity/quiet emission flags,
+validation, uncertainty handling, optional activity-deficit/quiet emission flags,
 mandatory signal/value/merge bindings, NSRL exclusion composition, trust
 selector composition/reason order, explanation metadata, signal weights, and
 the score cap must be present and correctly typed; unknown or colliding names
@@ -290,6 +290,12 @@ neutral and cannot alter scoring. This final gate prevents a statistically
 predictive but operationally inert profile from stopping the configured
 filtered-to-full-dataset fallback.
 
+`confidence_level` must be greater than `0.5` and less than `1`.
+`bootstrap_resamples` must be at least 100 and must provide at least five
+expected resamples in each confidence tail. The shipped `0.95` confidence and
+2,000-resample settings satisfy both guards; experiments that change them must
+record the complete rules file with their results.
+
 For an accepted profile, a simultaneous bootstrap upper probability band makes
 the activity deficit conservative:
 
@@ -302,12 +308,18 @@ applied once to the complete post-trust event score and then subjected to
 `max_event_score`; it neither changes individual signal values nor creates a
 score for an otherwise unscored event. The former family-specific `k`
 coefficients and `profile_multipliers` section have been removed. The shipped
-optional `hour_rarity` and `quiet_time_event` sparse emissions remain disabled;
+optional `out_of_hours_activity_deficit` and `quiet_time_event` sparse
+emissions remain disabled;
 quiet-quantile membership is annotation-only and does not gate amplification.
 The dataset manifest records probabilities, simultaneous upper bounds,
 per-hour factors, weekly log-score improvements, bootstrap settings, selection
 and fallback history. Partition reports and JSONL telemetry include a compact
 validation summary; `profile_manifest_path` persists the full manifest.
+The factor is intentionally conservative and becomes less attenuated as the
+profile's effective event volume increases. It is therefore a within-dataset
+prioritisation factor rather than a directly comparable cross-dataset
+measurement. “Out of hours” denotes dataset-relative off-peak bins and may
+cover much more than the optional tenth-quantile quiet annotation.
 
 Partition `overlap` must cover the longest lookback of every enabled temporal
 policy definition.

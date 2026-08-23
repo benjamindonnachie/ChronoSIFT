@@ -119,7 +119,7 @@ What is intentionally not in this file (future work)
 # - YARA count normalisation
 # - structured-first IP recovery
 # - unique-IP GeoLite2 enrichment
-# - hour-of-week profiling (hour_rarity / quiet_time_event)
+# - hour-of-week profiling (out_of_hours_activity_deficit / quiet_time_event)
 # - impossible travel on configurable actor continuity
 # - config/weight alignment checks
 # - reproducibility metadata in df.attrs
@@ -2147,7 +2147,7 @@ def parse_lookback(s: str) -> timedelta:
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Temporal Activity Profiling (Hour-of-Week) → hour_rarity, quiet_time_event
+# Temporal Activity Profiling (Hour-of-Week) → out_of_hours_activity_deficit, quiet_time_event
 # -----------------------------------------------------------------------------
 # Objective:
 #   Replace hard-coded "out of hours" heuristics with a dataset-derived baseline.
@@ -2158,15 +2158,17 @@ def parse_lookback(s: str) -> timedelta:
 #   - Build a baseline distribution over hour-of-week (0..167) using *host-resident*
 #     events, excluding externally-driven request telemetry such as apache access logs.
 #   - Apply Dirichlet/Laplace smoothing to avoid zero-probability bins.
-#   - Compute surprisal: S(h) = -log(p(h)), then normalise to [0, 1].
-#   - Optionally emit configured per-event rarity and quiet-hour signals. The
-#     shipped policy leaves those sparse emissions disabled and uses the dense
-#     rarity column only for configured post-temporal multipliers.
+#   - Validate recurring structure and derive a conservative activity deficit
+#     from the simultaneous upper probability band against uniform activity.
+#   - Optionally emit configured per-event activity-deficit and quiet-hour
+#     signals. The shipped policy leaves those sparse emissions disabled and
+#     uses the dense deficit column for one post-trust event-score factor.
 #
 # Interaction with other danger signals:
-#   hour_rarity is a context signal; it becomes more meaningful when paired with
-#   events likely to represent attacker action. ChronoSift supports static
-#   multipliers when high-impact signals are present in the same event.
+#   out_of_hours_activity_deficit is a context signal; it becomes more
+#   meaningful when paired with events likely to represent attacker action.
+#   The validated factor amplifies an existing complete event score and never
+#   originates one.
 # -----------------------------------------------------------------------------
 
 def _select_profile_events(
@@ -2586,7 +2588,7 @@ def _collect_profiling_output_signals(rules_cfg: dict) -> set[str]:
 
     outputs: set[str] = set()
     for enabled_key, signal_key in (
-        ("emit_hour_rarity_signal", "rarity_signal"),
+        ("emit_activity_deficit_signal", "activity_deficit_signal"),
         ("emit_quiet_time_signal", "quiet_signal"),
     ):
         name = hour_cfg.get(signal_key)
@@ -6260,7 +6262,7 @@ def _parse_web_request_classifier_policy(
         CHRONOSIFT_ROW_ID_COLUMN,
         "chronosift_score", "chronosift_signals", "chronosift_explain",
         "chronosift_combined_command_text", "chronosift_dt_sort",
-        "chronosift_hour_rarity_score",
+        "chronosift_activity_deficit_score",
         "chronosift_metadata", "chronosift_norm_hash", "chronosift_part_month",
         "chronosift_part_year", "chronosift_profile_metadata",
         "chronosift_quiet_hours_profile", "chronosift_row_id_sort",
@@ -7560,7 +7562,7 @@ def _parse_referenced_file_correlation_policy(
         "chronosift_explain",
         "chronosift_combined_command_text",
         "chronosift_dt_sort",
-        "chronosift_hour_rarity_score",
+        "chronosift_activity_deficit_score",
         "chronosift_metadata",
         "chronosift_norm_hash",
         "chronosift_part_month",
@@ -13050,15 +13052,15 @@ class HourOfWeekProfilingPolicy:
     exclude_parser_contains: Tuple[str, ...]
     exclude_filename_contains: Tuple[str, ...]
     hour_of_week_field: str
-    rarity_signal: str
+    activity_deficit_signal: str
     quiet_signal: str
-    rarity_score_field: str
-    emit_rarity_signal: bool
+    activity_deficit_score_field: str
+    emit_activity_deficit_signal: bool
     emit_quiet_signal: bool
-    rarity_signal_merge: str
+    activity_deficit_signal_merge: str
     quiet_signal_value: float
     quiet_signal_merge: str
-    rarity_explanation: ProfilingExplanationPolicy
+    activity_deficit_explanation: ProfilingExplanationPolicy
     quiet_explanation: ProfilingExplanationPolicy
     validation: HourOfWeekValidationPolicy
     score_amplifier: HourOfWeekAmplifierPolicy
@@ -13081,9 +13083,23 @@ def _parse_hour_of_week_validation_policy(
     confidence_level = _policy_positive_number(
         cfg["confidence_level"], f"{path}.confidence_level"
     )
-    if confidence_level >= 1.0:
+    if confidence_level <= 0.5 or confidence_level >= 1.0:
         raise ValueError(
-            f"{path}.confidence_level: expected a value less than 1"
+            f"{path}.confidence_level: expected a value greater than 0.5 "
+            "and less than 1"
+        )
+    bootstrap_resamples = _policy_positive_int(
+        cfg["bootstrap_resamples"], f"{path}.bootstrap_resamples"
+    )
+    minimum_resamples = max(
+        100,
+        int(math.ceil(5.0 / (1.0 - confidence_level))),
+    )
+    if bootstrap_resamples < minimum_resamples:
+        raise ValueError(
+            f"{path}.bootstrap_resamples: expected at least "
+            f"{minimum_resamples} for confidence_level={confidence_level:g} "
+            "(minimum 100 total and five expected resamples per tail)"
         )
     return HourOfWeekValidationPolicy(
         method=_policy_enum(
@@ -13106,9 +13122,7 @@ def _parse_hour_of_week_validation_policy(
             f"{path}.minimum_complete_weeks",
         ),
         confidence_level=confidence_level,
-        bootstrap_resamples=_policy_positive_int(
-            cfg["bootstrap_resamples"], f"{path}.bootstrap_resamples"
-        ),
+        bootstrap_resamples=bootstrap_resamples,
         random_seed=_policy_nonnegative_int(
             cfg["random_seed"], f"{path}.random_seed"
         ),
@@ -13217,11 +13231,11 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
             "nsrl_exclusion_combine",
             "include_parser_regex", "insufficient_filtered_events",
             "exclude_nsrl_application_type_contains", "exclude_parser_contains",
-            "exclude_filename_contains", "hour_of_week_field", "rarity_signal",
-            "quiet_signal", "rarity_score_field", "emit_hour_rarity_signal",
-            "emit_quiet_time_signal", "rarity_signal_merge",
+            "exclude_filename_contains", "hour_of_week_field", "activity_deficit_signal",
+            "quiet_signal", "activity_deficit_score_field", "emit_activity_deficit_signal",
+            "emit_quiet_time_signal", "activity_deficit_signal_merge",
             "quiet_signal_value", "quiet_signal_merge",
-            "rarity_explanation", "quiet_explanation",
+            "activity_deficit_explanation", "quiet_explanation",
             "validation", "score_amplifier",
         },
     )
@@ -13253,25 +13267,25 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
     hour_of_week_field = _policy_string(
         cfg["hour_of_week_field"], f"{path}.hour_of_week_field"
     )
-    rarity_signal = _policy_signal_name(
-        cfg["rarity_signal"], f"{path}.rarity_signal"
+    activity_deficit_signal = _policy_signal_name(
+        cfg["activity_deficit_signal"], f"{path}.activity_deficit_signal"
     )
     quiet_signal = _policy_signal_name(
         cfg["quiet_signal"], f"{path}.quiet_signal"
     )
-    rarity_score_field = _policy_string(
-        cfg["rarity_score_field"], f"{path}.rarity_score_field"
+    activity_deficit_score_field = _policy_string(
+        cfg["activity_deficit_score_field"], f"{path}.activity_deficit_score_field"
     )
-    if not rarity_score_field.startswith("chronosift_"):
+    if not activity_deficit_score_field.startswith("chronosift_"):
         raise ValueError(
-            f"{path}.rarity_score_field: materialised field must use the "
+            f"{path}.activity_deficit_score_field: materialised field must use the "
             "'chronosift_' sidecar namespace"
         )
     profile_names = {
         "hour_of_week_field": hour_of_week_field,
-        "rarity_signal": rarity_signal,
+        "activity_deficit_signal": activity_deficit_signal,
         "quiet_signal": quiet_signal,
-        "rarity_score_field": rarity_score_field,
+        "activity_deficit_score_field": activity_deficit_score_field,
     }
     duplicate_profile_names = sorted({
         value
@@ -13311,14 +13325,14 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
     canonical_score_misbindings = sorted(
         role
         for role, value in profile_names.items()
-        if value == "chronosift_hour_rarity_score"
-        and role != "rarity_score_field"
+        if value == "chronosift_activity_deficit_score"
+        and role != "activity_deficit_score_field"
     )
     if reserved_collisions or canonical_score_misbindings:
         details = [
             *(f"reserved field {value}" for value in reserved_collisions),
             *(
-                f"canonical rarity-score field bound to {role}"
+                f"canonical activity-deficit score field bound to {role}"
                 for role in canonical_score_misbindings
             ),
         ]
@@ -13405,18 +13419,18 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
             cfg["exclude_filename_contains"], f"{path}.exclude_filename_contains"
         ),
         hour_of_week_field=hour_of_week_field,
-        rarity_signal=rarity_signal,
+        activity_deficit_signal=activity_deficit_signal,
         quiet_signal=quiet_signal,
-        rarity_score_field=rarity_score_field,
-        emit_rarity_signal=_policy_bool(
-            cfg["emit_hour_rarity_signal"], f"{path}.emit_hour_rarity_signal"
+        activity_deficit_score_field=activity_deficit_score_field,
+        emit_activity_deficit_signal=_policy_bool(
+            cfg["emit_activity_deficit_signal"], f"{path}.emit_activity_deficit_signal"
         ),
         emit_quiet_signal=_policy_bool(
             cfg["emit_quiet_time_signal"], f"{path}.emit_quiet_time_signal"
         ),
-        rarity_signal_merge=_policy_enum(
-            cfg["rarity_signal_merge"],
-            f"{path}.rarity_signal_merge",
+        activity_deficit_signal_merge=_policy_enum(
+            cfg["activity_deficit_signal_merge"],
+            f"{path}.activity_deficit_signal_merge",
             {"maximum", "sum"},
         ),
         quiet_signal_value=_policy_positive_number(
@@ -13427,10 +13441,10 @@ def _parse_hour_of_week_profiling_policy(raw: Any) -> HourOfWeekProfilingPolicy:
             f"{path}.quiet_signal_merge",
             {"maximum", "sum"},
         ),
-        rarity_explanation=parse_explanation(
-            "rarity_explanation",
+        activity_deficit_explanation=parse_explanation(
+            "activity_deficit_explanation",
             require_rule_id=True,
-            allowed_evidence={"score_column", "rarity_column"},
+            allowed_evidence={"score_column", "activity_deficit_column"},
         ),
         quiet_explanation=parse_explanation(
             "quiet_explanation",
@@ -13587,20 +13601,20 @@ def _parse_trust_dampening_policy(raw: Any) -> TrustDampeningPolicy:
 _PATH_RE_UNIX = re.compile(r'/(?:[^ \t\r\n"\'<>|]+/)*[^ \t\r\n"\'<>|]+')
 _PATH_RE_WIN = re.compile(r'[A-Za-z]:\\(?:[^ \t\r\n"\'<>|]+\\)*[^ \t\r\n"\'<>|]+')
 _PATH_RE_REL = re.compile(r'(?:(?:\./)|(?:\.\./))[^ \t\r\n"\'<>|]+')
-def _hour_rarity_explain_item(
+def _activity_deficit_explain_item(
     policy: HourOfWeekProfilingPolicy,
 ) -> Dict[str, Any]:
-    explanation = policy.rarity_explanation
+    explanation = policy.activity_deficit_explanation
     evidence_values = {
-        "score_column": policy.rarity_score_field,
-        "rarity_column": policy.rarity_signal,
+        "score_column": policy.activity_deficit_score_field,
+        "activity_deficit_column": policy.activity_deficit_signal,
     }
     return {
         "rule_id": explanation.rule_id,
         "description": explanation.description,
         "confidence": explanation.confidence,
         "evidence_type": explanation.evidence_type,
-        "signals": [policy.rarity_signal],
+        "signals": [policy.activity_deficit_signal],
         "evidence": {
             name: evidence_values[name] for name in explanation.evidence
         },
@@ -14287,9 +14301,9 @@ class ChronoSiftEngine:
         )
         profile_output_names = {
             self.profiling_policy.hour_of_week_field,
-            self.profiling_policy.rarity_signal,
+            self.profiling_policy.activity_deficit_signal,
             self.profiling_policy.quiet_signal,
-            self.profiling_policy.rarity_score_field,
+            self.profiling_policy.activity_deficit_score_field,
         }
         other_configured_outputs = {
             *self.canonicalisation_policy.output_fields,
@@ -14325,7 +14339,7 @@ class ChronoSiftEngine:
             )
 
         profile_rule_ids = [
-            self.profiling_policy.rarity_explanation.rule_id,
+            self.profiling_policy.activity_deficit_explanation.rule_id,
             self.profiling_policy.quiet_explanation.rule_id,
             self.profiling_policy.score_amplifier.explanation.rule_id,
         ]
@@ -16591,7 +16605,7 @@ class ChronoSiftEngine:
 
         if apply_profiling and self.profiling_policy.enabled:
             cols.update({
-                self.profiling_policy.rarity_signal,
+                self.profiling_policy.activity_deficit_signal,
                 self.profiling_policy.hour_of_week_field,
             })
 
@@ -16939,7 +16953,7 @@ class ChronoSiftEngine:
         if rule_id in self.temporal_emit_signals:
             return "temporal"
         if (
-            rule_id == self.profiling_policy.rarity_explanation.rule_id
+            rule_id == self.profiling_policy.activity_deficit_explanation.rule_id
             or rule_id == self.profiling_policy.quiet_explanation.rule_id
             or rule_id == self.profile_amplifier_rule_id
         ):
@@ -16975,8 +16989,8 @@ class ChronoSiftEngine:
             return list(self.rule_emit_signals[rule_id])
         if rule_id in self.temporal_emit_signals:
             return list(self.temporal_emit_signals[rule_id])
-        if rule_id == self.profiling_policy.rarity_explanation.rule_id:
-            return [self.profiling_policy.rarity_signal]
+        if rule_id == self.profiling_policy.activity_deficit_explanation.rule_id:
+            return [self.profiling_policy.activity_deficit_signal]
         if rule_id == self.profiling_policy.quiet_explanation.rule_id:
             return [self.profiling_policy.quiet_signal]
 
@@ -17086,7 +17100,7 @@ class ChronoSiftEngine:
             df.attrs = {}
 
         n = len(df)
-        hour_contrib = self._hour_rarity_contribution_values(n, signal_map)
+        hour_contrib = self._activity_deficit_contribution_values(n, signal_map)
         canonical_actor_values: Optional[np.ndarray] = None
         if "actor_principal" in df.columns:
             actor_series = df["actor_principal"].astype("string").fillna("").str.strip()
@@ -17114,11 +17128,11 @@ class ChronoSiftEngine:
         else:
             _delete_columns_inplace(df, ["chronosift_signals"])
 
-        rarity_score_field = self.profiling_policy.rarity_score_field
+        activity_deficit_score_field = self.profiling_policy.activity_deficit_score_field
         if hour_contrib is not None:
-            df[rarity_score_field] = hour_contrib
+            df[activity_deficit_score_field] = hour_contrib
         else:
-            _delete_columns_inplace(df, [rarity_score_field])
+            _delete_columns_inplace(df, [activity_deficit_score_field])
 
         if materialise_explain_columns:
             if explain_map:
@@ -17144,11 +17158,11 @@ class ChronoSiftEngine:
         else:
             _delete_columns_inplace(df, ["chronosift_explain"])
 
-    def _hour_rarity_values(self, df: Optional[pd.DataFrame]) -> Optional[Any]:
-        rarity_signal = self.profiling_policy.rarity_signal
-        if df is None or rarity_signal not in df.columns:
+    def _activity_deficit_values(self, df: Optional[pd.DataFrame]) -> Optional[Any]:
+        activity_deficit_signal = self.profiling_policy.activity_deficit_signal
+        if df is None or activity_deficit_signal not in df.columns:
             return None
-        hour_series = df[rarity_signal]
+        hour_series = df[activity_deficit_signal]
         if pd.api.types.is_numeric_dtype(hour_series.dtype):
             try:
                 return hour_series.to_numpy(dtype="float64", na_value=0.0, copy=False)
@@ -17176,26 +17190,31 @@ class ChronoSiftEngine:
         validation = manifest.get("validation", {}) or {}
         if not bool(validation.get("accepted", False)):
             return None
-        rarity = self._hour_rarity_values(df)
-        if rarity is None:
+        activity_deficits = self._activity_deficit_values(df)
+        if activity_deficits is None:
             return None
         return 1.0 + np.clip(
-            np.nan_to_num(rarity, nan=0.0, posinf=0.0, neginf=0.0),
+            np.nan_to_num(
+                activity_deficits,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ),
             0.0,
             1.0,
         )
 
-    def _hour_rarity_contribution_values(
+    def _activity_deficit_contribution_values(
         self,
         n_rows: int,
         signal_map: Dict[int, Dict[str, Any]],
     ) -> Optional[Any]:
         policy = self.profiling_policy
-        hour_weight = float(self.weights.get(policy.rarity_signal, 0.0))
+        hour_weight = float(self.weights.get(policy.activity_deficit_signal, 0.0))
         if (
             hour_weight == 0.0
             or not policy.enabled
-            or not policy.emit_rarity_signal
+            or not policy.emit_activity_deficit_signal
         ):
             return None
         contributions = np.zeros(n_rows, dtype=np.float64)
@@ -17203,7 +17222,7 @@ class ChronoSiftEngine:
         for row_i, signals in signal_map.items():
             if not (0 <= row_i < n_rows) or not isinstance(signals, dict):
                 continue
-            raw_value = signals.get(policy.rarity_signal)
+            raw_value = signals.get(policy.activity_deficit_signal)
             if not isinstance(raw_value, (int, float)) or _is_null(raw_value):
                 continue
             contributions[row_i] = float(raw_value) * hour_weight
@@ -20076,12 +20095,12 @@ class ChronoSiftEngine:
         policy = self.profiling_policy
         if (
             not policy.enabled
-            or policy.rarity_signal not in df.columns
+            or policy.activity_deficit_signal not in df.columns
         ):
             return
 
-        rarity_values = self._hour_rarity_values(df)
-        if rarity_values is None:
+        activity_deficit_values = self._activity_deficit_values(df)
+        if activity_deficit_values is None:
             return
         hour_bins = (
             df[policy.hour_of_week_field].to_numpy(copy=False)
@@ -20102,7 +20121,7 @@ class ChronoSiftEngine:
             )
 
         for row_i in range(len(df)):
-            rarity = float(rarity_values[row_i])
+            activity_deficit = float(activity_deficit_values[row_i])
             hour_bin = hour_bins[row_i]
             quiet_hit = bool(
                 policy.emit_quiet_signal
@@ -20110,19 +20129,21 @@ class ChronoSiftEngine:
                 and pd.notna(hour_bin)
                 and int(hour_bin) in quiet_hours
             )
-            rarity_hit = policy.emit_rarity_signal and rarity > 0.0
-            if not rarity_hit and not quiet_hit:
+            activity_deficit_hit = (
+                policy.emit_activity_deficit_signal and activity_deficit > 0.0
+            )
+            if not activity_deficit_hit and not quiet_hit:
                 continue
             signals = self._sparse_signal_dict(signal_map, row_i)
-            if rarity_hit:
+            if activity_deficit_hit:
                 merge_signal(
                     signals,
-                    policy.rarity_signal,
-                    rarity,
-                    policy.rarity_signal_merge,
+                    policy.activity_deficit_signal,
+                    activity_deficit,
+                    policy.activity_deficit_signal_merge,
                 )
                 self._sparse_explain_list(explain_map, row_i).append(
-                    _hour_rarity_explain_item(policy)
+                    _activity_deficit_explain_item(policy)
                 )
             if quiet_hit:
                 merge_signal(
@@ -20144,12 +20165,12 @@ class ChronoSiftEngine:
         amplifier_policy = policy.score_amplifier
         if (
             not amplifier_policy.enabled
-            or policy.rarity_signal not in df.columns
+            or policy.activity_deficit_signal not in df.columns
         ):
             return
 
-        rarity_values = self._hour_rarity_values(df)
-        if rarity_values is None:
+        activity_deficit_values = self._activity_deficit_values(df)
+        if activity_deficit_values is None:
             return
         hour_values = (
             df[policy.hour_of_week_field].to_numpy(copy=False)
@@ -20187,7 +20208,9 @@ class ChronoSiftEngine:
             sig = signal_map.get(i)
             if not isinstance(sig, dict):
                 continue
-            activity_deficit = float(np.clip(rarity_values[i], 0.0, 1.0))
+            activity_deficit = float(
+                np.clip(activity_deficit_values[i], 0.0, 1.0)
+            )
             if activity_deficit <= 0.0 or self._score_signals(sig) <= 0.0:
                 continue
             hour_value = hour_values[i]
@@ -21591,7 +21614,7 @@ class ChronoSiftEngine:
         return out
 
     # -------------------------------------------------------------------------
-    # Profiling: dataset-wide hour-of-week rarity
+    # Profiling: dataset-wide hour-of-week activity deficit
     # -------------------------------------------------------------------------
 
     def _apply_hour_of_week_profiling(self, df: pd.DataFrame, profile_manifest: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
@@ -21714,7 +21737,7 @@ class ChronoSiftEngine:
         _valid = how_all.notna()
         _idx = how_all.to_numpy(dtype=np.float64, na_value=0.0).astype(np.intp)
         np.clip(_idx, 0, 167, out=_idx)
-        out[policy.rarity_signal] = np.where(
+        out[policy.activity_deficit_signal] = np.where(
             _valid.to_numpy(), _profile_arr[_idx], 0.0
         )
         out.attrs["_chronosift_quiet_hours_profile"] = frozenset(quiet_hours)
@@ -22561,9 +22584,9 @@ class ChronoSiftEngine:
         """Return config-named derived columns that do not require a prefix."""
         return tuple(dict.fromkeys((
             self.profiling_policy.hour_of_week_field,
-            self.profiling_policy.rarity_signal,
+            self.profiling_policy.activity_deficit_signal,
             self.profiling_policy.quiet_signal,
-            self.profiling_policy.rarity_score_field,
+            self.profiling_policy.activity_deficit_score_field,
             self.profiling_policy.nsrl_application_type_field,
             self.profiling_policy.nsrl_is_os_component_field,
             *self.geoip_enrichment_policy.output_columns,

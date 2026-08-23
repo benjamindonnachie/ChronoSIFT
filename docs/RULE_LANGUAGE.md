@@ -346,7 +346,7 @@ validation, uncertainty estimation, insufficient-profile behaviour,
 parser/filename/NSRL filters, derived fields, optional sparse emissions, and the
 event-score amplifier. Enabled profile emissions enter the ordinary signal map
 during the atomic stage before scoring. The shipped policy leaves both sparse
-emissions disabled and unweighted; the dense `hour_rarity` column carries the
+emissions disabled and unweighted; the dense `out_of_hours_activity_deficit` column carries the
 validated activity deficit used by final scoring.
 
 The `min_profile_events` floor is evaluated before statistical validation. The
@@ -369,7 +369,13 @@ full-dataset fallback to run rather than retaining an accepted but inert
 amplifier.
 `minimum_complete_weeks`, `confidence_level`, `bootstrap_resamples`, and
 `random_seed` make this inferential contract reproducible rather than silently
-engine-defined.
+engine-defined. Validation requires `0.5 < confidence_level < 1` so the named
+lower confidence bound is drawn from the lower half of the bootstrap
+distribution. It also requires at least 100 bootstrap resamples and at least
+five expected resamples in each confidence tail:
+`bootstrap_resamples >= ceil(5 / (1 - confidence_level))`. These are numerical
+sanity guards, not evidence that the shipped 2,000-resample setting is optimal;
+record and justify any changed setting in experimental provenance.
 
 The comparison uses logarithmic score because it is a strictly proper
 probabilistic scoring rule (Gneiting and Raftery, 2007,
@@ -397,6 +403,17 @@ emitted only for a scored event whose factor exceeds one. It records the
 observed and upper-bound probability, uniform reference, deficit, factor, and
 validation statistics. The former `profile_multipliers` list and all
 family-specific `k` coefficients are intentionally unsupported.
+
+Here “out of hours” means hours whose conservative dataset-relative activity
+probability lies below the uniform reference. It is an off-peak measure, not a
+rare-event label, and a strongly patterned office-hours system may classify a
+large part of the week as off peak. The simultaneous band narrows as retained
+event volume and the number of informative complete weeks increase. Two
+datasets with the same underlying hourly proportions can therefore receive
+different factors: greater evidence permits stronger amplification. Factors
+are suitable for within-dataset prioritisation but are not directly comparable
+measurements across datasets unless event counts, week coverage, validation
+statistics, and the complete profile manifest are considered together.
 
 Quiet-quantile membership controls only the optional `quiet_time_event`
 annotation and never gates the amplifier. Configured NSRL application-type

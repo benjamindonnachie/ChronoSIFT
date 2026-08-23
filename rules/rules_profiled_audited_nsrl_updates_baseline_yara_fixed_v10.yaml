@@ -20,20 +20,20 @@ profiling:
     - WinSxS
     - SoftwareDistribution
     hour_of_week_field: hour_of_week
-    rarity_signal: hour_rarity
+    activity_deficit_signal: out_of_hours_activity_deficit
     quiet_signal: quiet_time_event
-    rarity_score_field: chronosift_hour_rarity_score
-    emit_hour_rarity_signal: false
+    activity_deficit_score_field: chronosift_activity_deficit_score
+    emit_activity_deficit_signal: false
     emit_quiet_time_signal: false
-    rarity_signal_merge: maximum
+    activity_deficit_signal_merge: maximum
     quiet_signal_value: 1
     quiet_signal_merge: maximum
-    rarity_explanation:
-      rule_id: HOUR_RARITY
-      description: Dataset activity profile rarity contributed to score
+    activity_deficit_explanation:
+      rule_id: OUT_OF_HOURS_ACTIVITY_DEFICIT
+      description: Dataset-relative out-of-hours activity deficit contributed to score
       confidence: low
       evidence_type: profiling
-      evidence: [score_column, rarity_column]
+      evidence: [score_column, activity_deficit_column]
     quiet_explanation:
       rule_id: QUIET_TIME_EVENT
       description: Event occurred during a configured quiet profile hour
@@ -5300,22 +5300,24 @@ detector_policy:
 engine_notes:
   temporal_profiling: 'ChronoSift first attempts a host-resident hour-of-week profile, then falls back to the full dataset.
     The 100-event floor is retained. A profile must predict held-out complete calendar weeks better than a uniform 168-bin
-    reference, with a positive deterministic whole-week-bootstrap lower bound. Accepted profiles use a simultaneous bootstrap
-    upper probability band to derive deficit(h) = max(0, 1 - p_upper(h)/(1/168)) and a single bounded event-score factor
+    reference, with a positive deterministic whole-week-bootstrap lower bound. At least one simultaneous upper probability
+    bound must also lie below the reference; otherwise full-dataset fallback continues. Accepted profiles derive
+    deficit(h) = max(0, 1 - p_upper(h)/(1/168)) and a single bounded event-score factor
     1 + deficit(h). The factor runs after trust dampening and before max_event_score. Failed or inconclusive validation is
-    neutral. Optional hour_rarity and quiet_time_event sparse emissions remain disabled and quiet membership does not gate
-    amplification.'
+    neutral. Optional out_of_hours_activity_deficit and quiet_time_event sparse emissions remain disabled and quiet membership
+    does not gate amplification. Profiling uses UTC bins; the factor is evidence-volume-sensitive and intended for within-dataset
+    prioritisation rather than direct cross-dataset comparison.'
   geoip_metadata: When GeoLite2 City/ASN databases are provided, ChronoSift records input DB paths and file modification times
     in df.attrs['chronosift_metadata']['geoip'] for reproducibility.
   config_hygiene: ChronoSift lowercases signal keys during scoring to avoid case drift. Config validation checks (optional)
     help ensure weights and emitted signals remain aligned.
   profiling_nsrl_exclusion: For filesystem activity baselining, events whose nsrl_application_type contains 'Operating System'
     should be excluded from the hour-of-week baseline. This reduces routine operating-system churn in the profiling set and
-    prevents OS artefacts from flattening temporal rarity.
+    prevents OS artefacts from flattening the hour-of-week activity profile.
   profiling_package_exclusion: For filesystem activity baselining, package management and update-related activity should be
     excluded from the hour-of-week baseline. Specifically, parser names containing 'apt_history' or 'dpkg', and filenames
     containing 'WinSxS' or 'SoftwareDistribution', are excluded. This reduces routine maintenance bursts from flattening temporal
-    rarity.
+    activity contrast.
   yara_empty_list_handling: The YARA_HIT rule must key off yara_match_count > 0 rather than yara_match exists. This prevents
     empty list values ([]) from being treated as hits while preserving the raw yara_match field for analyst-facing evidence.
   message_context_hardening: Rules keyed on privileged-account names or transfer-tool names are restricted to structured actor

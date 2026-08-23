@@ -940,17 +940,17 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
                 "nsrl_application_type_field": "policy_nsrl_type",
                 "include_parser_regex": "profile",
                 "hour_of_week_field": "policy_hour_of_week",
-                "rarity_signal": "policy_hour_rarity",
+                "activity_deficit_signal": "policy_activity_deficit",
                 "quiet_signal": "policy_quiet_time",
-                "rarity_score_field": "chronosift_policy_hour_score",
+                "activity_deficit_score_field": "chronosift_policy_hour_score",
                 "quiet_signal_value": 2.5,
-                "emit_hour_rarity_signal": True,
+                "emit_activity_deficit_signal": True,
                 "emit_quiet_time_signal": True,
             }
         )
-        profile["rarity_explanation"].update(
+        profile["activity_deficit_explanation"].update(
             {
-                "rule_id": "POLICY_HOUR_RARITY",
+                "rule_id": "POLICY_OUT_OF_HOURS_ACTIVITY_DEFICIT",
                 "description": "Configured profile explanation",
                 "confidence": "high",
             }
@@ -965,8 +965,8 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         ineligible = rules["engine_config"]["temporal_signal_policy"][
             "ineligible_signals"
         ]
-        ineligible.extend(["policy_hour_rarity", "policy_quiet_time"])
-        weights["weights"]["policy_hour_rarity"] = 4
+        ineligible.extend(["policy_activity_deficit", "policy_quiet_time"])
+        weights["weights"]["policy_activity_deficit"] = 4
         weights["weights"]["policy_quiet_time"] = 3
         engine = self._engine(rules, weights)
 
@@ -989,7 +989,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             },
         )
         self.assertIn("policy_hour_of_week", profiled.columns)
-        self.assertIn("policy_hour_rarity", profiled.columns)
+        self.assertIn("policy_activity_deficit", profiled.columns)
         signal_map = {}
         explain_map = {}
         engine._inject_profile_base_signals_sparse(
@@ -999,24 +999,24 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             signal_map,
             {
                 0: {
-                    "policy_hour_rarity": 0.5,
+                    "policy_activity_deficit": 0.5,
                     "policy_quiet_time": 2.5,
                 },
-                1: {"policy_hour_rarity": 0.25},
+                1: {"policy_activity_deficit": 0.25},
             },
         )
         self.assertEqual(
             engine._score_signal_map_sparse(2, signal_map).tolist(),
             [9.5, 1.0],
         )
-        explanation = MODULE._hour_rarity_explain_item(engine.profiling_policy)
-        self.assertEqual(explanation["rule_id"], "POLICY_HOUR_RARITY")
+        explanation = MODULE._activity_deficit_explain_item(engine.profiling_policy)
+        self.assertEqual(explanation["rule_id"], "POLICY_OUT_OF_HOURS_ACTIVITY_DEFICIT")
         self.assertEqual(explanation["description"], "Configured profile explanation")
         self.assertEqual(explanation["confidence"], "high")
-        self.assertEqual(explanation["signals"], ["policy_hour_rarity"])
+        self.assertEqual(explanation["signals"], ["policy_activity_deficit"])
         self.assertEqual(
             [item["rule_id"] for item in explain_map[0]],
-            ["POLICY_HOUR_RARITY", "POLICY_QUIET_TIME"],
+            ["POLICY_OUT_OF_HOURS_ACTIVITY_DEFICIT", "POLICY_QUIET_TIME"],
         )
 
         engine._materialise_sparse_event_columns(
@@ -1028,7 +1028,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         )
         self.assertEqual(
             sum(
-                item["rule_id"] == "POLICY_HOUR_RARITY"
+                item["rule_id"] == "POLICY_OUT_OF_HOURS_ACTIVITY_DEFICIT"
                 for item in profiled.iloc[0]["chronosift_explain"]
             ),
             1,
@@ -1039,36 +1039,36 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         profile = rules["profiling"]["hour_of_week"]
         profile.update(
             {
-                "rarity_signal_merge": "sum",
+                "activity_deficit_signal_merge": "sum",
                 "quiet_signal_value": 2,
                 "quiet_signal_merge": "sum",
-                "emit_hour_rarity_signal": True,
+                "emit_activity_deficit_signal": True,
                 "emit_quiet_time_signal": True,
             }
         )
         rules["engine_config"]["temporal_signal_policy"][
             "ineligible_signals"
-        ].extend(["hour_rarity", "quiet_time_event"])
+        ].extend(["out_of_hours_activity_deficit", "quiet_time_event"])
         weights = deepcopy(BASE_WEIGHTS)
-        weights["weights"]["hour_rarity"] = 5
+        weights["weights"]["out_of_hours_activity_deficit"] = 5
         engine = self._engine(rules, weights)
         frame = pd.DataFrame(
-            {"hour_rarity": [0.4], "hour_of_week": [10]},
+            {"out_of_hours_activity_deficit": [0.4], "hour_of_week": [10]},
             index=pd.DatetimeIndex([pd.Timestamp("2024-06-17T10:00:00Z")]),
         )
         frame.attrs["_chronosift_quiet_hours_profile"] = frozenset({10})
         signal_map = {
-            0: {"hour_rarity": 0.6, "quiet_time_event": 0.5}
+            0: {"out_of_hours_activity_deficit": 0.6, "quiet_time_event": 0.5}
         }
         explain_map = {0: []}
         engine._inject_profile_base_signals_sparse(
             frame, signal_map, explain_map
         )
-        self.assertEqual(signal_map[0]["hour_rarity"], 1.0)
+        self.assertEqual(signal_map[0]["out_of_hours_activity_deficit"], 1.0)
         self.assertEqual(signal_map[0]["quiet_time_event"], 2.5)
         self.assertEqual(
             [item["rule_id"] for item in explain_map[0]],
-            ["HOUR_RARITY", "QUIET_TIME_EVENT"],
+            ["OUT_OF_HOURS_ACTIVITY_DEFICIT", "QUIET_TIME_EVENT"],
         )
 
         fresh_signal_map = {}
@@ -1076,17 +1076,17 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         engine._inject_profile_base_signals_sparse(
             frame, fresh_signal_map, fresh_explain_map
         )
-        self.assertEqual(fresh_signal_map[0]["hour_rarity"], 0.4)
+        self.assertEqual(fresh_signal_map[0]["out_of_hours_activity_deficit"], 0.4)
         self.assertEqual(fresh_signal_map[0]["quiet_time_event"], 2.0)
         self.assertEqual(len(fresh_explain_map[0]), 2)
 
         engine._materialise_sparse_event_columns(
             frame, signal_map, explain_map
         )
-        self.assertEqual(frame.iloc[0]["chronosift_hour_rarity_score"], 5.0)
+        self.assertEqual(frame.iloc[0]["chronosift_activity_deficit_score"], 5.0)
 
         disabled_frame = pd.DataFrame(
-            {"hour_rarity": [0.9], "hour_of_week": [10]},
+            {"out_of_hours_activity_deficit": [0.9], "hour_of_week": [10]},
             index=frame.index,
         )
         _, disabled_signals, _ = engine._run_atomic_sparse(
@@ -1094,7 +1094,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             apply_profiling=False,
             enforce_required_fields=False,
         )
-        self.assertNotIn("hour_rarity", disabled_signals.get(0, {}))
+        self.assertNotIn("out_of_hours_activity_deficit", disabled_signals.get(0, {}))
         self.assertNotIn("quiet_time_event", disabled_signals.get(0, {}))
 
     def test_default_profile_retains_deficit_without_sparse_emission(self):
@@ -1116,9 +1116,9 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
                 "validation": {"accepted": True},
             },
         )
-        self.assertTrue((out["hour_rarity"] == 0.75).all())
+        self.assertTrue((out["out_of_hours_activity_deficit"] == 0.75).all())
         self.assertFalse(any(
-            "hour_rarity" in signals or "quiet_time_event" in signals
+            "out_of_hours_activity_deficit" in signals or "quiet_time_event" in signals
             for signals in signal_map.values()
         ))
 
@@ -1126,8 +1126,8 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         cases = []
 
         rules = deepcopy(BASE_RULES)
-        del rules["profiling"]["hour_of_week"]["rarity_signal_merge"]
-        cases.append((rules, r"profiling\.hour_of_week.*rarity_signal_merge"))
+        del rules["profiling"]["hour_of_week"]["activity_deficit_signal_merge"]
+        cases.append((rules, r"profiling\.hour_of_week.*activity_deficit_signal_merge"))
 
         rules = deepcopy(BASE_RULES)
         rules["profiling"]["hour_of_week"]["quiet_signal_merge"] = "replace"
@@ -1147,6 +1147,30 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         ] = 1.0
         cases.append(
             (rules, r"profiling\.hour_of_week\.validation\.confidence_level")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["validation"][
+            "confidence_level"
+        ] = 0.01
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.validation\.confidence_level")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["validation"][
+            "bootstrap_resamples"
+        ] = 1
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.validation\.bootstrap_resamples")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        validation = rules["profiling"]["hour_of_week"]["validation"]
+        validation["confidence_level"] = 0.99
+        validation["bootstrap_resamples"] = 100
+        cases.append(
+            (rules, r"bootstrap_resamples.*at least 500")
         )
 
         rules = deepcopy(BASE_RULES)
@@ -1184,13 +1208,13 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         )
 
         rules = deepcopy(BASE_RULES)
-        rules["profiling"]["hour_of_week"]["rarity_score_field"] = (
+        rules["profiling"]["hour_of_week"]["activity_deficit_score_field"] = (
             "chronosift_score"
         )
         cases.append((rules, r"profiling\.hour_of_week.*reserved field chronosift_score"))
 
         rules = deepcopy(BASE_RULES)
-        rules["profiling"]["hour_of_week"]["quiet_signal"] = "hour_rarity"
+        rules["profiling"]["hour_of_week"]["quiet_signal"] = "out_of_hours_activity_deficit"
         cases.append((rules, r"profile field and signal names must be distinct"))
 
         rules = deepcopy(BASE_RULES)
@@ -1201,7 +1225,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
 
         rules = deepcopy(BASE_RULES)
         rules["profiling"]["hour_of_week"]["quiet_explanation"]["rule_id"] = (
-            "HOUR_RARITY"
+            "OUT_OF_HOURS_ACTIVITY_DEFICIT"
         )
         cases.append((rules, r"explanation rule_id.*must be unique"))
 
@@ -1302,7 +1326,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
     def test_validated_profile_amplifies_the_post_trust_event_score_once(self):
         engine = self._engine()
         frame = pd.DataFrame(
-            {"hour_rarity": [0.5], "hour_of_week": [10]},
+            {"out_of_hours_activity_deficit": [0.5], "hour_of_week": [10]},
             index=pd.DatetimeIndex([pd.Timestamp("2024-06-16T10:00:00Z")]),
         )
         frame.attrs["_chronosift_profile_manifest"] = {
@@ -1324,7 +1348,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             apply_profiling=True,
         )
         self.assertEqual(signal_map[0]["boundary_crossing"], 1.0)
-        self.assertNotIn("hour_rarity", signal_map[0])
+        self.assertNotIn("out_of_hours_activity_deficit", signal_map[0])
         self.assertNotIn("quiet_time_event", signal_map[0])
         self.assertEqual(
             engine._score_signal_map_sparse(
@@ -1342,7 +1366,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         self.assertEqual(amplifier["evidence"]["complete_week_count"], 8)
 
         zero_frame = pd.DataFrame(
-            {"hour_rarity": [0.0], "hour_of_week": [10]},
+            {"out_of_hours_activity_deficit": [0.0], "hour_of_week": [10]},
             index=frame.index,
         )
         zero_signal_map = {0: {"boundary_crossing": 1.0}}
@@ -1360,7 +1384,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             pd.DataFrame(index=frame.index),
             profile_manifest={"profile": {154: 1.0}},
         )
-        self.assertEqual(unvalidated.iloc[0]["hour_rarity"], 0.0)
+        self.assertEqual(unvalidated.iloc[0]["out_of_hours_activity_deficit"], 0.0)
         self.assertIsNone(engine._profile_score_amplifier_values(unvalidated))
 
     def test_repeating_weekly_profile_is_predictively_validated(self):
@@ -1411,7 +1435,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         frame = pd.DataFrame(
             {
                 "actor_principal": ["alice"],
-                "hour_rarity": [0.5],
+                "out_of_hours_activity_deficit": [0.5],
                 "hour_of_week": [10],
             },
             index=pd.DatetimeIndex([pd.Timestamp("2024-06-17T10:00:00Z")]),
