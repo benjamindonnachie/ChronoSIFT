@@ -17,6 +17,11 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
   ordinary score cap, cannot create score from zero, and is recorded with the
   profile selection, validation statistics, uncertainty bounds, and fallback
   attempts in reports, telemetry, explanations, and the profile manifest.
+- Added a required profile amplifiability gate. A predictively non-uniform
+  profile is rejected when its simultaneous upper band identifies no hour
+  below the uniform reference; this avoids reporting an accepted but inert
+  amplifier and allows the configured filtered-to-full-dataset fallback to
+  continue.
 - Added a mandatory strict top-level `canonicalisation` policy for Windows
   authentication extraction, SSH authentication parsing, pivot-destination
   identity, and structured-first IP recovery. YAML now owns parser/field

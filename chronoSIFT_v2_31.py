@@ -2311,6 +2311,7 @@ def _validate_weekly_hour_profile(
     confidence_level: float,
     bootstrap_resamples: int,
     random_seed: int,
+    amplification_gate: str,
 ) -> Dict[str, Any]:
     """Validate repeated hour-of-week structure against a uniform reference."""
     counts = np.asarray(weekly_counts, dtype=np.float64)
@@ -2330,6 +2331,7 @@ def _validate_weekly_hour_profile(
         "random_seed": int(random_seed),
         "acceptance": "bootstrap_lower_bound_above_zero",
         "uncertainty_band": "simultaneous_bootstrap_upper_probability",
+        "amplification_gate": str(amplification_gate),
     }
     if week_count < int(minimum_complete_weeks):
         result["reason"] = "insufficient_complete_weeks"
@@ -2400,10 +2402,21 @@ def _validate_weekly_hour_profile(
         0.0,
         1.0 - (upper_probability / reference_probability),
     )
+    amplifiable_hour_count = int(np.count_nonzero(activity_deficit > 0.0))
+    if amplifiable_hour_count == 0:
+        result.update({
+            "status": "rejected",
+            "accepted": False,
+            "reason": "no_confidently_low_activity_hours",
+            "amplifiable_hour_count": 0,
+            "simultaneous_upper_radius": simultaneous_radius,
+        })
+        return result
     result.update({
         "probabilities": probabilities,
         "upper_probability_bounds": upper_probability,
         "activity_deficits": activity_deficit,
+        "amplifiable_hour_count": amplifiable_hour_count,
         "simultaneous_upper_radius": simultaneous_radius,
     })
     return result
@@ -13007,6 +13020,7 @@ class HourOfWeekValidationPolicy:
     random_seed: int
     acceptance: str
     uncertainty_band: str
+    amplification_gate: str
 
 
 @dataclass(frozen=True)
@@ -13061,7 +13075,7 @@ def _parse_hour_of_week_validation_policy(
         required={
             "method", "reference", "block", "minimum_complete_weeks",
             "confidence_level", "bootstrap_resamples", "random_seed",
-            "acceptance", "uncertainty_band",
+            "acceptance", "uncertainty_band", "amplification_gate",
         },
     )
     confidence_level = _policy_positive_number(
@@ -13107,6 +13121,11 @@ def _parse_hour_of_week_validation_policy(
             cfg["uncertainty_band"],
             f"{path}.uncertainty_band",
             {"simultaneous_bootstrap_upper_probability"},
+        ),
+        amplification_gate=_policy_enum(
+            cfg["amplification_gate"],
+            f"{path}.amplification_gate",
+            {"require_positive_activity_deficit"},
         ),
     )
 
@@ -23578,6 +23597,7 @@ def _hour_of_week_manifest_from_weekly_counts(
         confidence_level=policy.validation.confidence_level,
         bootstrap_resamples=policy.validation.bootstrap_resamples,
         random_seed=policy.validation.random_seed,
+        amplification_gate=policy.validation.amplification_gate,
     )
     manifest = _empty_hour_of_week_manifest(
         alpha=policy.smoothing_alpha,

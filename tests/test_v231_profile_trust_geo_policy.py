@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -1149,6 +1150,22 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
         )
 
         rules = deepcopy(BASE_RULES)
+        del rules["profiling"]["hour_of_week"]["validation"][
+            "amplification_gate"
+        ]
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.validation.*amplification_gate")
+        )
+
+        rules = deepcopy(BASE_RULES)
+        rules["profiling"]["hour_of_week"]["validation"][
+            "amplification_gate"
+        ] = "allow_inert_profile"
+        cases.append(
+            (rules, r"profiling\.hour_of_week\.validation\.amplification_gate")
+        )
+
+        rules = deepcopy(BASE_RULES)
         rules["profiling"]["hour_of_week"]["score_amplifier"][
             "method"
         ] = "configured_coefficient"
@@ -1422,6 +1439,38 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             [item["rule_id"] for item in explain_map[0]],
             ["TRUST_DAMPENING", "OUT_OF_HOURS_AMPLIFIER"],
         )
+
+    def test_predictively_valid_but_inert_profile_is_rejected(self):
+        engine = self._engine()
+        rng = np.random.default_rng(13)
+        counts = rng.poisson(2, size=(3, 168)).astype(float)
+        counts[:, :40] += 2.0
+        weekly_counts = pd.DataFrame(
+            counts,
+            index=pd.date_range("2024-01-01", periods=3, freq="7D"),
+            columns=range(168),
+        )
+
+        manifest = MODULE._hour_of_week_manifest_from_weekly_counts(
+            weekly_counts,
+            engine.profiling_policy,
+            selection_mode="test",
+            used_filtered_subset=True,
+            source_event_count=int(counts.sum()),
+            selected_event_count=int(counts.sum()),
+        )
+
+        self.assertFalse(manifest["validation"]["accepted"])
+        self.assertGreater(
+            manifest["validation"]["lower_confidence_bound"], 0.0
+        )
+        self.assertEqual(
+            manifest["validation"]["reason"],
+            "no_confidently_low_activity_hours",
+        )
+        self.assertEqual(manifest["validation"]["amplifiable_hour_count"], 0)
+        self.assertEqual(manifest["profile"], {})
+        self.assertEqual(manifest["amplifiers"], {})
 
     def test_uniform_or_under_observed_weekly_profile_fails_closed(self):
         engine = self._engine()

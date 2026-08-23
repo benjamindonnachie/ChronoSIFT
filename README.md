@@ -111,7 +111,8 @@ counted windows declare a mandatory exclusive input-signal threshold.
 Hour-of-week profiling and trust dampening are also strict config-owned
 policies. Their selection fields, quiet-hour annotation, exclusion composition,
 minimum-event floor, leave-one-week-out validation, whole-week bootstrap,
-optional sparse emissions, output names, score-amplifier semantics, trust
+the positive-activity-deficit gate, optional sparse emissions, output names,
+score-amplifier semantics, trust
 selector composition/reason precedence, and explanation metadata have no
 Python fallback. The shipped profile keeps its disabled, unweighted rarity and
 quiet signals out of sparse state. Once temporal detectors, post-temporal
@@ -166,7 +167,7 @@ flowchart LR
 
 4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. Typed detector-policy executors handle configured atomic classification, contextual gates, and stateful semantics that do not fit the ordinary rule language. YAML owns their configured inputs, detection judgement, and emissions; Python owns validation, normalisation, and reusable executor mechanics. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
 
-5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, applies its conservative out-of-hours factor only when supported by whole-week bootstrap uncertainty, applies noise dampening, and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
+5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, and applies its conservative out-of-hours factor only when whole-week bootstrap uncertainty identifies at least one confidently low-activity hour. Predictively non-uniform but inert profiles retry the configured fallback and otherwise remain neutral. The stage also applies noise dampening and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
 
 6. **Sparse temporal candidate filtering.** Rows carrying a temporal prerequisite, plus the bounded neighbouring windows needed for correlation, are selected for temporal/stateful passes when the configured rules make reduction safe. Whole-partition non-temporal coverage is therefore preserved while avoiding a full-partition temporal replay where it adds no evidence.
 
