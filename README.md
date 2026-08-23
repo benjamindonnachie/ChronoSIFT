@@ -118,7 +118,9 @@ Python fallback. The shipped profile keeps its disabled, unweighted activity-
 deficit and quiet-time signals out of sparse state. Once temporal detectors, post-temporal
 projections, and trust dampening are complete, an accepted profile applies one
 dataset-derived factor to the complete event score. Rejected or inconclusive
-profiles are neutral. No detector-family multiplier coefficients remain.
+profiles are neutral. Enabling either optional profile emission requires a
+corresponding explicit weight, including when that weight is zero. No
+detector-family multiplier coefficients remain.
 
 GeoIP enrichment has a mandatory six-role output mapping in
 `geoip_enrichment.outputs`. The MaxMind lookup uses the canonical IP-recovery
@@ -167,7 +169,7 @@ flowchart LR
 
 4. **Atomic rule evaluation.** YAML-configured rules evaluate individual events and emit sparse source/evidence signals with explanations. Typed detector-policy executors handle configured atomic classification, contextual gates, and stateful semantics that do not fit the ordinary rule language. YAML owns their configured inputs, detection judgement, and emissions; Python owns validation, normalisation, and reusable executor mechanics. These signals preserve provenance—for example authentication, execution, persistence, file lifecycle, transfer, YARA, or AV evidence—before broader behavioural interpretation.
 
-5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, and applies its conservative out-of-hours factor only when whole-week bootstrap uncertainty identifies at least one confidently low-activity hour. Predictively non-uniform but inert profiles retry the configured fallback and otherwise remain neutral. The stage also applies noise dampening and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
+5. **Whole-partition contextual and dead-box evaluation.** ChronoSIFT builds canonical authentication and execution semantics, propagates referenced-file hits, validates recurring hour-of-week activity against a uniform reference, and applies its conservative out-of-hours factor only when whole-week bootstrap uncertainty identifies at least one confidently low-activity hour. The shipped policy leaves an invalid, inconclusive, or inert filtered profile neutral rather than replacing it with an all-event profile. The stage also applies noise dampening and detects artefact patterns that can be supported from disk without volatile memory or live session telemetry. A per-partition working cache reuses normalised arrays between passes without copying the DataFrame, while conservative vector masks keep direct detectors from repeatedly interpreting rows that cannot match. Generic `file_created`, `file_modified`, and `file_deleted` entries are omitted in partition mode when their configured weight is zero; scored and specialised lifecycle detections are always retained.
 
 6. **Sparse temporal candidate filtering.** Rows carrying a temporal prerequisite, plus the bounded neighbouring windows needed for correlation, are selected for temporal/stateful passes when the configured rules make reduction safe. Whole-partition non-temporal coverage is therefore preserved while avoiding a full-partition temporal replay where it adds no evidence.
 
@@ -187,10 +189,12 @@ low-activity period.
 
 The shipped policy first selects host-resident filesystem activity, excluding
 configured NSRL operating-system material and package/update noise. It requires
-at least 100 selected events and falls back to the full dataset when the
-filtered selection is too small or fails validation. Boundary weeks are
-discarded. Each remaining complete calendar week is held out in turn, and a
-Laplace-smoothed profile fitted on the other weeks must improve mean held-out
+at least 100 selected events. When the filtered selection is too small or fails
+validation, the shipped `insufficient_filtered_events: empty_profile` policy
+fails closed to the neutral multiplier rather than substituting the unfiltered
+timeline. Boundary weeks are discarded. Each remaining complete calendar week
+is held out in turn, and a Laplace-smoothed profile fitted on the other weeks
+must improve mean held-out
 logarithmic score over a uniform `1/168` reference. The shipped inferential
 settings require at least three complete weeks and use a deterministic
 2,000-resample whole-week bootstrap (`confidence_level: 0.95`,
@@ -224,6 +228,15 @@ rare-event label. See the [statistical method and rule-language
 contract](docs/RULE_LANGUAGE.md#hour-of-week-profiling-and-trust-dampening) and
 [forensic data assumptions](docs/FORENSIC_DATA_ASSUMPTIONS.md#hour-of-week-time-basis-and-comparability).
 
+The alternative `full_dataset` insufficient-profile action remains available
+for an explicitly different experiment. It removes the parser, filename, and
+NSRL selection filters and can therefore model automated timeline production
+rather than the intended host-resident activity. Do not mix those semantics in
+one results series. Any table reporting out-of-hours results should include
+`selection_mode`, source and selected event counts, validation status and
+reason, complete-week count, `amplifiable_hour_count`, and
+`simultaneous_upper_radius`.
+
 ## Installation
 
 ChronoSIFT requires Python 3.11 or newer.
@@ -247,7 +260,7 @@ uv run python -m unittest discover -s tests -p 'test_v231_*.py' -v
 ```
 
 Tests that require the complete external YARA Forge bundle are skipped when it is not present.
-The current unreleased baseline passes 404 tests, with 8 expected skips when
+The current unreleased baseline passes 407 tests, with 8 expected skips when
 that external corpus is unavailable.
 
 ## Usage

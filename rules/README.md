@@ -273,22 +273,25 @@ validation, uncertainty handling, optional activity-deficit/quiet emission flags
 mandatory signal/value/merge bindings, NSRL exclusion composition, trust
 selector composition/reason order, explanation metadata, signal weights, and
 the score cap must be present and correctly typed; unknown or colliding names
-fail startup.
+fail startup. Enabling either optional profiling emission requires its signal
+to have an explicit weight entry, even when the intended weight is zero; this
+guard is unconditional and does not depend on `config_validation.strict`.
 
 The shipped hour-of-week policy retains the 100-event safety floor. It first
-tries the filtered host-resident activity set, then the full dataset if the
-filtered set is too small or fails validation. Only non-boundary calendar weeks
-are validation blocks. Each week is held out in turn; the remaining weeks fit a
+tries the filtered host-resident activity set. If that selection is too small
+or fails validation, the shipped `insufficient_filtered_events: empty_profile`
+action remains neutral. Only non-boundary calendar weeks are validation blocks.
+Each week is held out in turn; the remaining weeks fit a
 Laplace-smoothed 168-bin distribution, and mean held-out log-score improvement
 is measured against the uniform `1/168` reference. A deterministic whole-week
 bootstrap must put the configured one-sided lower confidence bound above zero.
 The required `amplification_gate` then requires at least one hour whose
 simultaneous upper probability bound lies below the uniform reference. Too few
 events, too few complete weeks, a non-positive log-score bound, or no
-confidently low-activity hour rejects the profile; rejection after fallback is
-neutral and cannot alter scoring. This final gate prevents a statistically
-predictive but operationally inert profile from stopping the configured
-filtered-to-full-dataset fallback.
+confidently low-activity hour rejects the profile and cannot alter scoring. The
+alternative `full_dataset` action is available only for an explicitly different
+experiment: it removes all selection exclusions and can model automated
+timeline production rather than filtered host-resident activity.
 
 `confidence_level` must be greater than `0.5` and less than `1`.
 `bootstrap_resamples` must be at least 100 and must provide at least five
@@ -313,7 +316,7 @@ emissions remain disabled;
 quiet-quantile membership is annotation-only and does not gate amplification.
 The dataset manifest records probabilities, simultaneous upper bounds,
 per-hour factors, weekly log-score improvements, bootstrap settings, selection
-and fallback history. Its `validation` object explicitly reports
+and configured fallback history. Its `validation` object explicitly reports
 `amplifiable_hour_count` and `simultaneous_upper_radius`, while
 `validation_attempts` retains rejected filtered-selection attempts. Partition
 reports and JSONL telemetry include a compact validation summary;
@@ -323,6 +326,9 @@ profile's effective event volume increases. It is therefore a within-dataset
 prioritisation factor rather than a directly comparable cross-dataset
 measurement. “Out of hours” denotes dataset-relative off-peak bins and may
 cover much more than the optional tenth-quantile quiet annotation.
+Results tables must report the selection mode, source and selected event counts,
+validation status/reason, complete-week count, amplifiable-hour count, and
+simultaneous radius whenever the factor contributes to reported scores.
 
 Partition `overlap` must cover the longest lookback of every enabled temporal
 policy definition.

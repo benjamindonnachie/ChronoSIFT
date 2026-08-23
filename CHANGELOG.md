@@ -4,10 +4,26 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Changed the shipped insufficient-profile action from `full_dataset` to
+  `empty_profile`. A filtered host-resident profile that is too small, invalid,
+  inconclusive, or predictively valid but operationally inert now remains
+  neutral instead of discarding its parser, filename, and NSRL exclusions and
+  allowing automated timeline production to define the amplifier. The
+  explicit `full_dataset` action remains available for separately reported
+  experiments with different selection semantics.
+- Made enabled profiling emissions require an explicit weight entry
+  unconditionally, including when the declared weight is zero. Direct engine
+  construction and YAML/CLI construction now enforce the same missing-weight
+  contract as detector-policy emissions regardless of
+  `config_validation.strict`.
+- Added exact regressions for package-churn-dominated fallback avoidance,
+  explicit full-dataset fallback selection, missing weights for both profiling
+  emissions, and explicit zero-weight acceptance. Documentation now specifies
+  the required profile-selection and validation fields for results tables.
 - Refreshed the public README with a standalone account of the data-derived
   out-of-hours method, exact shipped validation settings, score ordering,
   manifest provenance, interpretation limits, a documentation index, and the
-  current 404-pass/8-expected-skip verification baseline. The rule-language
+  current 407-pass/8-expected-skip verification baseline. The rule-language
   references now name the manifest fields that distinguish predictive and
   operationally active profiles.
 - Replaced family-specific quiet-time coefficients with a single
@@ -26,8 +42,7 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 - Added a required profile amplifiability gate. A predictively non-uniform
   profile is rejected when its simultaneous upper band identifies no hour
   below the uniform reference; this avoids reporting an accepted but inert
-  amplifier and allows the configured filtered-to-full-dataset fallback to
-  continue.
+  amplifier and hands control to the configured insufficient-profile action.
 - Renamed the optional profiling surface from hour “rarity” to the quantity it
   now carries: `out_of_hours_activity_deficit`. The strict YAML keys,
   materialised contribution field, explanation rule and evidence binding use

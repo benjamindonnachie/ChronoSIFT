@@ -14299,6 +14299,22 @@ class ChronoSiftEngine:
         self.profiling_policy = _parse_hour_of_week_profiling_policy(
             profiling_root["hour_of_week"]
         )
+        enabled_profile_emissions: Set[str] = set()
+        if self.profiling_policy.enabled:
+            if self.profiling_policy.emit_activity_deficit_signal:
+                enabled_profile_emissions.add(
+                    self.profiling_policy.activity_deficit_signal
+                )
+            if self.profiling_policy.emit_quiet_signal:
+                enabled_profile_emissions.add(self.profiling_policy.quiet_signal)
+        missing_profile_weights = sorted(
+            enabled_profile_emissions - self.weights.keys()
+        )
+        if missing_profile_weights:
+            raise ValueError(
+                "profiling.hour_of_week: enabled emissions missing weights: "
+                + ", ".join(missing_profile_weights)
+            )
         profile_output_names = {
             self.profiling_policy.hour_of_week_field,
             self.profiling_policy.activity_deficit_signal,

@@ -103,6 +103,17 @@ different retention or event volumes. Preserve the profile manifest, selected
 event count, complete-week count, validation result, simultaneous radius, and
 amplifiable-hour count with every reported result.
 
+The shipped profile fails closed when its filtered host-resident selection is
+too small, invalid, inconclusive, or operationally inert. It does not replace
+that selection with the full timeline because removing the parser, filename,
+and NSRL exclusions changes the quantity being estimated and may allow package
+management or update scheduling to shape the amplifier. The configurable
+`full_dataset` action is suitable only for a separately identified experiment.
+Do not combine its results with filtered-profile results. Report
+`selection_mode`, source and selected event counts, validation status/reason,
+complete-week count, amplifiable-hour count, and simultaneous radius in every
+results table that uses the factor.
+
 “Out of hours” means dataset-relative off-peak activity below the uniform
 hour-of-week reference. It is not synonymous with the optional tenth-quantile
 quiet annotation or with a rare event; a regular office-hours profile may
