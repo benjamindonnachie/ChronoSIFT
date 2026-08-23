@@ -14967,6 +14967,23 @@ class ChronoSiftEngine:
         out = df
         if hash_col not in out.columns:
             return out
+        if CHRONOSIFT_ROW_ID_COLUMN not in out.columns:
+            raise ValueError(
+                f"Timeline is missing persistent enrichment alignment key "
+                f"{CHRONOSIFT_ROW_ID_COLUMN!r}"
+            )
+
+        row_ids = out[CHRONOSIFT_ROW_ID_COLUMN]
+        if bool(row_ids.isna().any()):
+            raise ValueError(
+                f"Persistent enrichment alignment key {CHRONOSIFT_ROW_ID_COLUMN!r} "
+                "must not contain null values"
+            )
+        if bool(row_ids.duplicated().any()):
+            raise ValueError(
+                f"Persistent enrichment alignment key {CHRONOSIFT_ROW_ID_COLUMN!r} "
+                "must be unique per row"
+            )
 
         enrich = _load_hash_enrichment_frame(csv_path, csv_hash_col=csv_hash_col)
         if len(enrich) == 0:
@@ -14974,12 +14991,22 @@ class ChronoSiftEngine:
 
         lookup_hash = _normalise_hash_series(out[hash_col])
         matched = _reindex_lookup_frame_for_hashes(lookup_hash, enrich)
+        row_id_index = pd.Index(
+            row_ids.to_numpy(copy=False),
+            name=CHRONOSIFT_ROW_ID_COLUMN,
+        )
+        matched.index = row_id_index
         for col in matched.columns:
             matched_col = matched[col]
             if col in out.columns:
-                out[col] = matched_col.combine_first(out[col])
+                existing_col = pd.Series(
+                    out[col].array,
+                    index=row_id_index,
+                    name=col,
+                )
+                out[col] = matched_col.combine_first(existing_col).array
             else:
-                out[col] = matched_col
+                out[col] = matched_col.array
         return out
 
     def _atomic_required_columns(self) -> List[str]:

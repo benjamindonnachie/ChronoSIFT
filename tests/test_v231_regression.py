@@ -2021,6 +2021,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         sha_a = "A" * 64
         sha_b = "B" * 64
         source = pd.DataFrame({
+            "chronosift_row_id": [10, 11, 12],
             "sha256_hash": [f" {sha_a.lower()} ", sha_b.lower(), None],
             "enriched_flag": [pd.NA, "existing", "keep"],
         })
@@ -2040,6 +2041,64 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         self.assertTrue(pd.isna(out.iloc[1]["extra_note"]))
         self.assertEqual(out.iloc[2]["enriched_flag"], "keep")
         self.assertTrue(pd.isna(out.iloc[2]["extra_note"]))
+
+    def test_hash_enrichment_csv_aligns_duplicate_timestamps_by_persistent_row_id(self):
+        sha_a = "A" * 64
+        sha_b = "B" * 64
+        duplicate_timestamp = pd.Timestamp("2024-06-16T18:00:00Z")
+        source = pd.DataFrame(
+            {
+                "chronosift_row_id": [42, 41, 40],
+                "sha256_hash": [sha_b.lower(), None, sha_a.lower()],
+                "enriched_flag": [pd.NA, "existing", pd.NA],
+            },
+            index=pd.DatetimeIndex(
+                [duplicate_timestamp, duplicate_timestamp, duplicate_timestamp]
+            ),
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as tmp:
+            tmp.write("sha256,enriched_flag,extra_note\n")
+            tmp.write(f"{sha_a},alpha,from_a\n")
+            tmp.write(f"{sha_b},bravo,from_b\n")
+            csv_path = tmp.name
+        try:
+            out = self.engine._apply_hash_enrichment_csv(source.copy(), csv_path)
+        finally:
+            pathlib.Path(csv_path).unlink(missing_ok=True)
+
+        self.assertEqual(out.index.tolist(), source.index.tolist())
+        self.assertEqual(out["chronosift_row_id"].tolist(), [42, 41, 40])
+        self.assertEqual(out["enriched_flag"].tolist(), ["bravo", "existing", "alpha"])
+        self.assertEqual(out["extra_note"].tolist()[0], "from_b")
+        self.assertTrue(pd.isna(out["extra_note"].tolist()[1]))
+        self.assertEqual(out["extra_note"].tolist()[2], "from_a")
+
+    def test_hash_enrichment_csv_rejects_invalid_persistent_row_ids(self):
+        sha_a = "A" * 64
+        duplicate_timestamp = pd.Timestamp("2024-06-16T18:00:00Z")
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as tmp:
+            tmp.write("sha256,enriched_flag\n")
+            tmp.write(f"{sha_a},yes\n")
+            csv_path = tmp.name
+        try:
+            base = pd.DataFrame(
+                {"sha256_hash": [sha_a.lower(), None]},
+                index=pd.DatetimeIndex([duplicate_timestamp, duplicate_timestamp]),
+            )
+            with self.assertRaisesRegex(ValueError, "missing persistent enrichment alignment key"):
+                self.engine._apply_hash_enrichment_csv(base.copy(), csv_path)
+
+            null_ids = base.copy()
+            null_ids["chronosift_row_id"] = [1, pd.NA]
+            with self.assertRaisesRegex(ValueError, "must not contain null values"):
+                self.engine._apply_hash_enrichment_csv(null_ids, csv_path)
+
+            duplicate_ids = base.copy()
+            duplicate_ids["chronosift_row_id"] = [1, 1]
+            with self.assertRaisesRegex(ValueError, "must be unique per row"):
+                self.engine._apply_hash_enrichment_csv(duplicate_ids, csv_path)
+        finally:
+            pathlib.Path(csv_path).unlink(missing_ok=True)
 
     def test_load_hash_hit_set_from_csv_handles_index_backed_string_filtering(self):
         sha_a = "A" * 64
