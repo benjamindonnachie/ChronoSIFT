@@ -32,6 +32,14 @@ Rules and weights are loaded with duplicate-key rejection at every mapping
 depth. Repeating a key is an error rather than silently replacing its earlier
 value; both documents must also have a mapping at their top level.
 
+This reference distinguishes a **stage** from a **phase**. A stage is a broad
+processing family such as atomic, contextual, or temporal evaluation. A phase
+is an internal ordinal checkpoint within that processing order: it lets the
+validator prove that a producing detector runs before a consuming detector.
+Baseline phase values are fixed schedule assertions, not a general-purpose
+scheduler; changing a specialised detector's configured phase does not move its
+Python execution point and is rejected.
+
 ------------------------------------------------------------------------
 
 ## Rule types
