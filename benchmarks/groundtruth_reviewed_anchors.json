@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "scope": "Evaluation-only reviewed anchor overlay. Original ledgers and their anchors are preserved. These IDs are never detection inputs; primary means evidence for the specifically stated observation, not proof of the entire narrative or an independent hold-out.",
+  "windows": {
+    "GT-WS22-06": {
+      "primary_ids": [11243208],
+      "excluded_original_ids": [11242414,11242415,11242416,11242417,11242422,11242423],
+      "observation": "4624 remote type-3 logon to built-in Administrator from the stated external source.",
+      "rationale": "Original anchors are local type-2 UMFD-3/DWM-3 logons, not the claimed successful remote Administrator logon. Preserve them in the audit as misassigned background references.",
+      "checks": [
+        {"id":11243208,"parser":"winevtx","contains":["[4624 /", "Administrator", "36.133.110.87"],"xml_data_equals":{"LogonType":"3","TargetUserName":"Administrator","IpAddress":"36.133.110.87"}},
+        {"id":11242414,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"UMFD-3"}},
+        {"id":11242415,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"UMFD-3"}},
+        {"id":11242416,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"UMFD-3"}},
+        {"id":11242417,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"UMFD-3"}},
+        {"id":11242422,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"DWM-3"}},
+        {"id":11242423,"parser":"winevtx","xml_data_equals":{"LogonType":"2","TargetUserName":"DWM-3"}}
+      ]
+    },
+    "GT-WS22-13": {
+      "primary_ids": [12155531,12158631,12158648,12165416],
+      "excluded_original_ids": [],
+      "observation": "Payload archive/executable file presence and ransom-note creation; not execution or proof of file contents from names alone.",
+      "rationale": "The original file timestamps remain supporting anchors. Add the observed payload files and the explicit USN note-create record; AV/YARA evidence is examined separately in the score explanation.",
+      "checks": [
+        {"id":12155531,"parser":"filestat","contains":["important.zip"]},
+        {"id":12158631,"parser":"filestat","contains":["dir.exe"]},
+        {"id":12158648,"parser":"filestat","contains":["rename.exe"]},
+        {"id":12165416,"parser":"usnjrnl","contains":["RyukReadMe[1].txt","USN_REASON_FILE_CREATE"]}
+      ]
+    },
+    "GT-WS22-14": {
+      "primary_ids": [12177944,12177945],
+      "excluded_original_ids": [],
+      "observation": "Defender DisableAntiSpyware policy value observed as 1; registry timestamps do not prove the actor or successful downstream impairment.",
+      "rationale": "Original GPT.INI and policy-file timestamps support policy activity but do not alone show the disabling setting. Keep these separately from the explicit registry value.",
+      "checks": [
+        {"id":12177944,"parser":"winreg/winreg_default","contains":["Windows Defender", "DisableAntiSpyware: [REG_DWORD_LE] 1"]},
+        {"id":12177945,"parser":"winreg/winreg_default","contains":["Windows Defender", "DisableAntiSpyware: [REG_DWORD_LE] 1"]}
+      ]
+    },
+    "GT-WS22-15": {
+      "primary_ids": [13565563,13565564],
+      "additional_supporting_ids": [12199528],
+      "excluded_original_ids": [],
+      "observation": "TaskScheduler 201 records the PsExec task action returning 2147943726 (0x8007052E), not successful remote payload execution.",
+      "rationale": "Original TaskCache/file anchors describe task persistence. The later task-action result directly supports the attempt/failure; positive-count UserAssist independently supports local PsExec use, not the precise remote session.",
+      "checks": [
+        {"id":13565563,"parser":"winevtx","contains":["[201 /", "Microsoft-Windows-TaskScheduler", "PsExec.exe", "2147943726"]},
+        {"id":13565564,"parser":"winevtx","contains":["[201 /", "Microsoft-Windows-TaskScheduler", "PsExec.exe", "2147943726"]},
+        {"id":12199528,"parser":"winreg/userassist","contains":["PsExec.exe", "Count: 1"]}
+      ]
+    }
+  },
+  "ubuntu": {
+    "GT-ECOMM-10": {
+      "primary_ids": [23563703],
+      "excluded_original_ids": [],
+      "observation": "HTTP 200 response to GET /includes/sqldump.sql from the stated client; 14,888,671 response bytes.",
+      "rationale": "Retain original file/staging anchors as supporting evidence and add the actual download request. Luhn qualification belongs to the linked-file evidence; no score is used to select this anchor.",
+      "checks": [{"id":23563703,"parser":"text/apache_access","contains":["/includes/sqldump.sql", "123.7.220.100"],"fields_equal":{"http_response_code":200,"http_response_bytes":14888671}}]
+    }
+  }
+}

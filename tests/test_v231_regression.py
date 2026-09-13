@@ -1178,7 +1178,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         }
         target_rows = [{
             "parser": "text/apache_access",
-            "http_request": "POST /upload.php HTTP/1.1 filename=Shell.php",
+            "http_request": "POST /upload.php HTTP/1.1 filename=shell.php",
             "http_response_code": 201,
         }]
         signal_map, _ = self._run_referenced_hit_propagation([], target_rows, manifest)
@@ -1236,10 +1236,10 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
                 {
                     "parser": "text/apache_access",
                     "http_request": (
-                        "POST /download/clean.bin HTTP/1.1 filename=Shell.php"
+                        "POST /download/clean.bin HTTP/1.1 filename=shell.php"
                     ),
                     "http_headers": "Content-Type: multipart/form-data; boundary=x",
-                    "http_content_disposition": 'form-data; filename="Shell.php"',
+                    "http_content_disposition": 'form-data; filename="shell.php"',
                     "http_response_code": 201,
                 },
                 {
@@ -1312,7 +1312,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
         out = self.engine.apply_atomic(df)
         row = out.iloc[0]
         self.assertEqual(row["chronosift_web_upload_name"], "cmd.php")
-        self.assertEqual(set(row["chronosift_web_upload_names"].split("|")), {"cmd.php", "report final.pdf"})
+        self.assertEqual(set(row["chronosift_web_upload_names"].split("|")), {"cmd.php", "Report final.pdf"})
         self.assertEqual(row["chronosift_web_upload_count"], 2)
         self.assertEqual(row["chronosift_web_request_body_bytes"], 12345)
         self.assertEqual(row["chronosift_web_upload_outcome"], "accepted")
@@ -1777,7 +1777,7 @@ class ChronoSiftV231RegressionTest(unittest.TestCase):
             },
             {
                 "parser": "text/apache_access",
-                "http_request": "POST /upload.php HTTP/1.1 filename=Shell.php",
+                "http_request": "POST /upload.php HTTP/1.1 filename=shell.php",
                 "http_headers": "Host: shop.example; Content-Type: multipart/form-data; boundary=x",
                 "http_response_code": 201,
                 "http_response_bytes": 20,

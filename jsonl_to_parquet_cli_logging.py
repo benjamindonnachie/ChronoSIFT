@@ -34,7 +34,17 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import pandas as pd
+
+# Keep this standalone ingest entry point aligned with the engine and metadata.
+if np.lib.NumpyVersion(pd.__version__) < "3.0.3":
+    raise ImportError(
+        f"ChronoSIFT requires pandas>=3.0.3; found {pd.__version__}. "
+        "Older pandas can silently drop forensic timestamps. "
+        "Install this checkout's dependencies with: uv pip install -e ."
+    )
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 

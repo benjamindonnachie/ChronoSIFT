@@ -1,0 +1,372 @@
+bringing up nodes...
+bringing up nodes...
+
+.....uuuuuuuuuuuuuuuuuuuuuu..uuuuu..............uuuuuuuu...........uu.u. [  4%]
+..u..uu........F.......u.uuu..u.........uuuuuuuuuuuuu.uuuuuuuuuuuuuuu... [  9%]
+..uuuu.uuuuu....uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu.......u.u.uu [ 11%]
+uuuuuuuuuu..u.uuuuuuuuuu....u...u...........uuu.uuuuuuuu.uuu............ [ 15%]
+...........uuuuuuuuuuuuuuu.uuu....................u.u.uu..u..uu.uuuuuuu. [ 21%]
+u.u............u.u.u..................uuuuu........................uuuuu [ 28%]
+...........uuu........................uuuuuuuu........uuu............... [ 36%]
+........................................................................ [ 45%]
+..................u.uu.......u.uu..u...uu.............su....sss......sss [ 54%]
+...................uuuuu................uuu.....uuuu...u.u...uuuuuu..uuu [ 60%]
+uu.uuuuu.uuuuuu.uuuu...uuuu..uuuuu.u.uuu.uu.uu.u.uu.u.uuu.....uuu....uu. [ 63%]
+....uuu.uu.u.u.........uuuuuuuu.........uuuuuu.uuuuuuuuuuuuuuuuuuuuuuuuu [ 67%]
+uuu..uuu...uu.uuuuuuuuuuuuuu.uu...u..u...u..u...u..u...u...u..u.uuuuuuu. [ 71%]
+uu..uu.......uu.uu......uu..u.u..u.u....uu.uuuuuuuuuuuu..uuu............ [ 77%]
+.uuuuuuuuuuuuuuuuu......uuu....uuuu......uu..................uu......... [ 82%]
+......F.......................................uuu...........uuuuuuuuu... [ 90%]
+...........uu........uuuu..uuu.....uu.............u.u..uu.u..u.......... [ 98%]
+.s....uu..u.......                                                       [100%]
+=================================== FAILURES ===================================
+_ JsonlToParquetNormalisationTest.test_preserves_timestamp_with_year_beyond_int16 _
+[gw0] darwin -- Python 3.12.13 /private/tmp/claude-501/-Volumes-EXTERNAL-PhD-codex/3a0e3989-2148-4d59-b403-d50d22eea031/scratchpad/venv/bin/python
+
+self = <test_jsonl_to_parquet_cli_logging.JsonlToParquetNormalisationTest testMethod=test_preserves_timestamp_with_year_beyond_int16>
+
+    def test_preserves_timestamp_with_year_beyond_int16(self):
+        source = pd.DataFrame({
+            "timestamp": [
+                1718562120000000,
+                1344260469241068412,
+            ],
+            "parser": ["filestat", "utmp"],
+        })
+    
+        normalised = MODULE.normalise_chunk(source)
+    
+>       self.assertEqual(len(normalised), 2)
+E       AssertionError: 1 != 2
+
+tests/test_jsonl_to_parquet_cli_logging.py:35: AssertionError
+_ ChronoSiftV231RegressionTest.test_normalise_for_parquet_preserves_timestamp_with_wide_year _
+[gw0] darwin -- Python 3.12.13 /private/tmp/claude-501/-Volumes-EXTERNAL-PhD-codex/3a0e3989-2148-4d59-b403-d50d22eea031/scratchpad/venv/bin/python
+
+self = <test_v231_regression.ChronoSiftV231RegressionTest testMethod=test_normalise_for_parquet_preserves_timestamp_with_wide_year>
+
+    def test_normalise_for_parquet_preserves_timestamp_with_wide_year(self):
+        source = pd.DataFrame({
+            "timestamp": [1718562120000000, 1344260469241068412],
+            "parser": ["filestat", "utmp"],
+        })
+    
+        normalised, _ = MODULE.normalise_for_parquet(
+            source, verbose=False
+        )
+    
+>       self.assertEqual(len(normalised), 2)
+E       AssertionError: 1 != 2
+
+tests/test_v231_regression.py:2016: AssertionError
+=============================== warnings summary ===============================
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_ransomware_extension_burst_drives_impact_without_mass_modification
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_canonical_auth_or_context.py:213: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    ts = pd.to_datetime([pd.Timestamp("2024-06-16T14:00:00Z") + pd.Timedelta(minutes=i) for i in range(len(rows))], utc=True)
+
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_small_ransom_extension_count_stays_below_burst_threshold
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_small_ransom_extension_count_stays_below_burst_threshold
+tests/test_v231_canonical_auth_or_context.py::ChronoSiftV231ContextTest::test_small_ransom_extension_count_stays_below_burst_threshold
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_canonical_auth_or_context.py:237: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    ts = pd.to_datetime([pd.Timestamp("2024-06-16T15:00:00Z") + pd.Timedelta(minutes=i) for i in range(len(rows))], utc=True)
+
+tests/test_final_dataset_validation.py::FinalDatasetValidationTest::test_final_policy_automatic_overlap_writes_both_months
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_final_dataset_validation.py:99: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(engine.minimum_partition_overlap(),pd.Timedelta('199h'))
+
+tests/test_final_dataset_validation.py: 8 warnings
+tests/test_v231_account_removal.py: 149 warnings
+tests/test_v231_evidence_linkage.py: 128 warnings
+tests/test_v231_av_behaviour_native.py: 30 warnings
+tests/test_v231_context_provenance.py: 104 warnings
+tests/test_v231_identity_roles.py: 97 warnings
+tests/test_v231_av_behaviour.py: 11 warnings
+tests/test_v231_deferred_sidecar.py: 16 warnings
+tests/test_v231_av_weighting.py: 6 warnings
+tests/test_v231_behaviour_policy.py: 248 warnings
+tests/test_v231_linux_account_context.py: 230 warnings
+tests/test_v231_linux_tool_execution.py: 144 warnings
+tests/test_v231_native_path_case.py: 20 warnings
+tests/test_v231_partition_execution.py: 52 warnings
+tests/test_v231_ranking_policy.py: 216 warnings
+tests/test_v231_windows_scoring.py: 200 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:22776: UserWarning: This pattern is interpreted as a regular expression, and has match groups. To actually get the groups, use str.extract.
+    eligible &= out[spec.selector_field].astype("string").fillna("").str.contains(
+
+tests/test_v231_canonical_auth_or_context.py: 39 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_canonical_auth_or_context.py:135: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    ts = pd.to_datetime([base_ts + pd.Timedelta(seconds=10 * i) for i in range(len(rows))], utc=True)
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_disabling_download_to_execution_removes_both_outputs
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_download_hostname_scope_uses_configured_host_field
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_download_hostname_scope_uses_configured_host_field
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_download_lookback_mutation_changes_a_seven_minute_pair
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_download_lookback_mutation_changes_a_seven_minute_pair
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_download_source_and_target_mutation_replaces_the_old_signal_pair
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_explanations_use_exact_configured_rule_metadata
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_temporal_signal_minimums_are_yaml_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:1704: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index = pd.DatetimeIndex([start, start + pd.Timedelta(gap)])
+
+tests/test_v231_detector_policy.py: 10 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:4622: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start + pd.Timedelta(minutes=offset) for offset in offsets]
+
+tests/test_v231_detector_policy.py: 14 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:4876: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start + pd.Timedelta(seconds=offset) for *_, offset in specs]
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_mft_timestomping_configuration_and_branches_control_runtime
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:4932: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta(seconds=5)]),
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_web_upload_chain_window_context_signals_and_metadata_are_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:5934: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta("7m")]),
+
+tests/test_v231_evidence_linkage.py::EvidenceLinkageTest::test_recent_dump_identity_boundary_and_supporting_integer_ids
+tests/test_v231_evidence_linkage.py::EvidenceLinkageTest::test_recent_dump_identity_boundary_and_supporting_integer_ids
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_evidence_linkage.py:178: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([pd.Timestamp('2024-06-30T23:55:00Z'),pd.Timestamp('2024-06-30T23:55:00Z')+pd.Timedelta(seconds=seconds)]))
+
+tests/test_v231_context_provenance.py: 69 warnings
+tests/test_v231_partition_execution.py: 9 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_context_provenance.py:48: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([START+pd.Timedelta(t) for t, _ in records], name='datetime'))
+
+tests/test_v231_context_provenance.py::ContextProvenanceTest::test_builder_and_yaml_horizon
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_context_provenance.py:91: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(self.engine.minimum_partition_overlap(), pd.Timedelta('199h'))
+
+tests/test_v231_context_provenance.py: 12 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_context_provenance.py:161: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    auth_pos = sorted(range(len(records)),key=lambda i:pd.Timedelta(records[i][0])).index(0)
+
+tests/test_v231_identity_roles.py::IdentityRolesTest::test_builder_and_unchanged_weights_horizon
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_identity_roles.py:64: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(self.engine.minimum_partition_overlap(),pd.Timedelta('199h'))
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_webshell_policy_disablement_does_not_disable_web_upload_chain
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:5915: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta("20m")]),
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_webshell_sequence_uses_configured_window_global_scope_and_metadata
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:5853: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta("7m")]),
+
+tests/test_v231_detector_policy.py::ChronoSiftV231DetectorPolicyTest::test_additional_generic_detectors_need_no_engine_wiring
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_detector_policy.py:6615: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta("10m")]),
+
+tests/test_v231_integration.py: 20 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_integration.py:207: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    ts = pd.to_datetime([base_ts + pd.Timedelta(minutes=i) for i in range(len(rows))], utc=True)
+
+tests/test_v231_av_behaviour_native.py: 2 warnings
+tests/test_v231_linux_account_context.py: 2 warnings
+tests/test_v231_behaviour_policy.py: 2 warnings
+tests/test_v231_linux_tool_execution.py: 2 warnings
+tests/test_v231_native_path_case.py: 2 warnings
+tests/test_v231_partition_execution.py: 5 warnings
+tests/test_v231_ranking_policy.py: 2 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:24114: SettingWithCopyWarning: 
+  A value is trying to be set on a copy of a slice from a DataFrame.
+  Try using .loc[row_indexer,col_indexer] = value instead
+  
+  See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+    batch["chronosift_signals"] = [signals.get(i) for i in range(lower, upper)]
+
+tests/test_v231_av_behaviour_native.py: 2 warnings
+tests/test_v231_linux_account_context.py: 2 warnings
+tests/test_v231_behaviour_policy.py: 2 warnings
+tests/test_v231_linux_tool_execution.py: 2 warnings
+tests/test_v231_native_path_case.py: 2 warnings
+tests/test_v231_partition_execution.py: 5 warnings
+tests/test_v231_ranking_policy.py: 2 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:24115: SettingWithCopyWarning: 
+  A value is trying to be set on a copy of a slice from a DataFrame.
+  Try using .loc[row_indexer,col_indexer] = value instead
+  
+  See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+    batch["chronosift_explain"] = [explanations.get(i) for i in range(lower, upper)]
+
+tests/test_v231_behaviour_policy.py: 84 warnings
+tests/test_v231_linux_account_context.py: 104 warnings
+tests/test_v231_native_path_case.py: 48 warnings
+tests/test_v231_ranking_policy.py: 116 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_linux_account_context.py:37: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([pd.Timestamp('2024-01-31T23:00:00Z')+pd.Timedelta(t) for t,_ in records],name='datetime'))
+
+tests/test_v231_linux_account_context.py::LinuxAccountContextTest::test_horizon_remains_199_hours
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_linux_account_context.py:191: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(self.engine.minimum_partition_overlap(),pd.Timedelta('199h'))
+
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_integration.py:1394: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    "_test_ts": base_ts + pd.Timedelta(seconds=i),
+
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+tests/test_v231_integration.py::ChronoSiftV231ATTCKExpansionTest::test_timestomping_bulk_extraction_dampened_to_low_confidence
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_integration.py:1400: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    "_test_ts": base_ts + pd.Timedelta(seconds=i + 10),
+
+tests/test_v231_behaviour_policy.py::BehaviourPolicyTest::test_native_compact_eager_account_sudo_parity
+tests/test_v231_behaviour_policy.py::BehaviourPolicyTest::test_native_compact_eager_account_sudo_parity
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_behaviour_policy.py:203: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(engine.minimum_partition_overlap(),pd.Timedelta('199h'))
+
+tests/test_v231_partition_execution.py::PartitionExecutionTests::test_linux_omits_windows_execution_dependencies_regardless_of_rule_name
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_partition_execution.py:137: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertEqual(self.engine.minimum_partition_overlap(), pd.Timedelta('199h'))
+
+tests/test_v231_partition_execution.py::PartitionExecutionTests::test_longer_feature_window_is_not_silently_truncated
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_partition_execution.py:167: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    policy = {**self.engine.partition_execution_policy, 'feature_overlap': pd.Timedelta('240h'), 'applicability_groups': []}
+
+tests/test_v231_linux_tool_execution.py::LinuxToolTests::test_conflicting_hashes_and_late_marker_are_rejected
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_linux_tool_execution.py:253: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    times[0] = times[-1] + pd.Timedelta('1min')
+
+tests/test_v231_performance.py::LargeWindowPerformanceTest::test_row_dependent_baselines_keep_exact_sample_semantics
+tests/test_v231_performance.py::LargeWindowPerformanceTest::test_row_dependent_baselines_keep_exact_sample_semantics
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_performance.py:522: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    for lookback in (None, pd.Timedelta(seconds=1)):
+
+tests/test_v231_profile_trust_geo_policy.py: 840 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_profile_trust_geo_policy.py:1671: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    + pd.Timedelta(days=day, hours=hour, minutes=minute)
+
+tests/test_v231_profile_trust_geo_policy.py::ChronoSiftV231ProfileTrustGeoPolicyTest::test_canonical_geo_policies_are_typed_and_complete
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_profile_trust_geo_policy.py:121: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    ip_scope.lookback, pd.Timedelta("24h").to_pytimedelta()
+
+tests/test_v231_profile_trust_geo_policy.py: 2800 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_profile_trust_geo_policy.py:1547: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    + pd.Timedelta(days=day, hours=hour, minutes=minute)
+
+tests/test_v231_profile_trust_geo_policy.py: 1600 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_profile_trust_geo_policy.py:1727: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    + pd.Timedelta(
+
+tests/test_v231_profile_trust_geo_policy.py: 16000 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_profile_trust_geo_policy.py:1735: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    week_start + pd.Timedelta(hours=3, seconds=offset)
+
+tests/test_v231_ranking_policy.py::RankingPolicyTest::test_native_compact_eager_qualified_cron_parity
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_ranking_policy.py:171: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    data.index=data.index+pd.Timedelta('58m')
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_credential_labelled_and_unlabelled_follow_on_ordering
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:711: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_credential_labelled_and_unlabelled_follow_on_ordering
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:728: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_credential_labelled_and_unlabelled_follow_on_ordering
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:741: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_credential_labelled_and_unlabelled_follow_on_ordering
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:754: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_lookback_lower_bound_is_strict_and_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:228: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta(hours=6)]),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_lookback_lower_bound_is_strict_and_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:260: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    start + pd.Timedelta(minutes=1),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_lookback_lower_bound_is_strict_and_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:261: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    start + pd.Timedelta(minutes=2),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_lookback_lower_bound_is_strict_and_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:262: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    start + pd.Timedelta(hours=6),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_lookback_lower_bound_is_strict_and_authoritative
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:294: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    index=pd.DatetimeIndex([start, start + pd.Timedelta(hours=6)]),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_rules_emit_only_on_declared_anchor_rows
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:84: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    start + pd.Timedelta(minutes=1),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_generic_temporal_rules_emit_only_on_declared_anchor_rows
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:85: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    start + pd.Timedelta(minutes=2),
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_ransomware_future_note_boundary_and_prior_support_precedence
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:526: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + window + pd.Timedelta(microseconds=1)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_ransomware_future_note_boundary_and_prior_support_precedence
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:535: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    support_ts = start - pd.Timedelta(minutes=5)
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_ransomware_future_note_boundary_and_prior_support_precedence
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:537: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [support_ts, start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_ransomware_prior_support_window_is_closed
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:496: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + window + pd.Timedelta(microseconds=1)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_password_store_rejects_unrelated_label_and_accepts_copy_stage
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:774: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_temporal_detector_policy.py::ChronoSiftV231TemporalDetectorPolicyTest::test_password_store_rejects_unrelated_label_and_accepts_copy_stage
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_temporal_detector_policy.py:791: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    [start, start + pd.Timedelta(minutes=5)],
+
+tests/test_v231_web_client_context.py: 2058 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_web_client_context.py:25: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    return {'time': START + pd.Timedelta(offset), 'chronosift_web_source_ip': ip,
+
+tests/test_v231_windows_scoring.py: 107 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_windows_scoring.py:29: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    times.append(START+pd.Timedelta(offset))
+
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_regression.py:2189: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    left = df.index.searchsorted(ts_val - pd.Timedelta("30s"), side="left")
+
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_candidate_window_mask_matches_reference_with_duplicate_hit_timestamps
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_regression.py:2190: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    right = df.index.searchsorted(ts_val + pd.Timedelta("30s"), side="right")
+
+tests/test_v231_windows_scoring.py::WindowsScoringTest::test_partition_overlap_covers_nested_account_window
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_windows_scoring.py:296: DeprecationWarning: The 'generic' unit for NumPy timedelta is deprecated, and will raise an error in the future. This includes implicit conversion of bare integers (e.g. `+ 1`). Please use a specific unit instead.
+    self.assertGreaterEqual(self.engine.minimum_partition_overlap(),pd.Timedelta('7d1h'))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_jsonl_to_parquet_cli_logging.py::JsonlToParquetNormalisationTest::test_preserves_timestamp_with_year_beyond_int16
+FAILED tests/test_v231_regression.py::ChronoSiftV231RegressionTest::test_normalise_for_parquet_preserves_timestamp_with_wide_year
+2 failed, 748 passed, 8 skipped, 25697 warnings, 484 subtests passed in 148.38s (0:02:28)
+$SP/venv/bin/python -m pytest tests/ -q -p no:cacheprovider -n 4  554.25s user 8.86s system 377% cpu 2:29.00 total
+EXIT=1

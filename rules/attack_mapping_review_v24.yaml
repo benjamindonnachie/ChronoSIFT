@@ -1,0 +1,329 @@
+# Reviewed attribution only. This is build input; v24 is the runtime authority.
+# No automatic extraction of technique IDs from descriptions or signal names.
+schema_version: 1
+reviewed_base_sha256: b84a45100dd374b696bdd44d8b2babe1e0763bdbf4e7ceb3c9878cb05c10fb2e
+catalogue: enterprise-attack-19.2.json
+unmapped_default_note: Generic context, supporting evidence or a broad behaviour family does not identify one ATT&CK technique; use the qualified source explanation where available.
+groups:
+- attack_ids: [T1190]
+  attack_basis: attempted_behaviour
+  attack_note: Exploit-shaped requests support an attempted public-facing application exploit; completion remains in the existing outcome evidence.
+  producers: [WEB_SQLI_ATTEMPT, MITRE_T1190]
+- attack_ids: [T1190]
+  attack_basis: contextual_inference
+  attack_note: Exploit syntax and response/file context support a candidate exploit, not proof of its intended effect.
+  producers: [WEB_SQLI_RESPONSE_ANOMALY, WEB_SQLI_PROBABLE_SUCCESS, EXPLOIT_PUBLIC_FACING_APP]
+- attack_ids: [T1213.006]
+  attack_basis: contextual_inference
+  attack_note: Qualified SQLi and database-access syntax support database collection; enumeration and file-read outcomes remain bounded by source evidence.
+  producers: [MITRE_T1213_006]
+- attack_ids: [T1505.003]
+  attack_basis: artefact_capability
+  attack_note: A web-shell-classified artefact supports capability or presence, not local execution or successful command effects.
+  producers: [AV_WEBSHELL, YARA_WEBSHELL, MITRE_T1505_003, WEBSHELL_ARTIFACT]
+- attack_ids: [T1505.003]
+  attack_basis: contextual_inference
+  attack_note: File-qualified web request or subsequent execution context supports a web-shell candidate; request success is not command-execution proof.
+  producers: [WEB_CONFIRMED_WEBSHELL_ACCESS, WEBSHELL_ACTIVITY, WEB_UPLOAD_EXECUTION_CHAIN]
+- attack_ids: [T1505.003]
+  attack_basis: attempted_behaviour
+  attack_note: Administrative web-code edit attempt may deploy a web shell; rejected attempts remain concerning without asserting saved content.
+  producers: [WEB_ADMIN_CODE_EDIT_ATTEMPT]
+- attack_ids: [T1105]
+  attack_basis: observed_behaviour
+  attack_note: Accepted inbound transfer names an independently qualified malicious file; payload execution remains separate.
+  producers: [MITRE_T1105]
+- attack_ids: [T1105]
+  attack_basis: attempted_behaviour
+  attack_note: An inbound request names a qualified malicious file; acceptance and completion remain separate.
+  producers: [WEB_MALICIOUS_FILE_UPLOAD]
+- attack_ids: [T1105]
+  attack_basis: contextual_inference
+  attack_note: Download-to-use linkage supports tool transfer, but does not prove that a human triggered execution (T1204 is deliberately not asserted).
+  producers: [INGRESS_TOOL_TRANSFER, USER_EXECUTION_AFTER_DOWNLOAD]
+- attack_ids: [T1070.006]
+  attack_basis: contextual_inference
+  attack_note: MFT timestamp inconsistency supports a timestomping candidate; benign clock and filesystem explanations remain possible.
+  producers: [TIMESTOMPING]
+- attack_ids: [T1486]
+  attack_basis: artefact_capability
+  attack_note: Ransomware-specific content classification supports an encryption-related capability; generic malware/exploit categories do not receive this mapping.
+  producers: [AV_RANSOMWARE, YARA_RANSOMWARE, WINDOWS_RANSOMWARE_PRESENCE]
+- attack_ids: [T1486]
+  attack_basis: contextual_inference
+  attack_note: Ransomware-specific indicators with bounded corroboration support an encryption/impact candidate; no claim of confirmed encrypted content or payload effects.
+  producers: [RANSOMWARE_EXTENSION_BURST, RANSOMWARE_IMPACT, WINDOWS_RANSOM_NOTE_CONTEXT, WINDOWS_RANSOM_NOTE_HOST_CONTEXT]
+- attack_ids: [T1053.003]
+  attack_basis: observed_behaviour
+  attack_note: Cron configuration or invocation was observed; authorisation, intent and successful payload effects remain separate.
+  producers: [CRON_PERSISTENCE, CRON_EXEC_LINUX]
+- attack_ids: [T1053]
+  attack_basis: contextual_inference
+  attack_note: Scheduling evidence spans more than one mechanism; the parent technique avoids inventing cron versus Windows-task specificity.
+  producers: [REPEATED_SCHEDULED_EXEC, EXECUTION_SCHEDULED, EXECUTION_PRIVILEGED_SCHEDULED, PERSISTENCE_SCHEDULED, PRIVILEGED_SCHEDULED_EXEC]
+- attack_ids: [T1053.003]
+  attack_basis: contextual_inference
+  attack_note: A scheduled command is linked to an earlier qualified Linux file or repository; exact-file versus repository attribution and unproved effects remain in source evidence.
+  producers: [LINUX_QUALIFIED_FILE_INVOCATION, LINUX_QUALIFIED_REPOSITORY_INVOCATION, LINUX_QUALIFIED_FILE_SCHEDULE_CONTEXT, LINUX_QUALIFIED_FILE_SCHEDULE_PRIVILEGE, LINUX_QUALIFIED_FILE_SCHEDULE_REPETITION, LINUX_QUALIFIED_REPOSITORY_SCHEDULE_CONTEXT, LINUX_QUALIFIED_REPOSITORY_SCHEDULE_PRIVILEGE, LINUX_QUALIFIED_REPOSITORY_SCHEDULE_REPETITION]
+- attack_ids: [T1053.005]
+  attack_basis: observed_behaviour
+  attack_note: Windows task registration is observed; this does not establish execution or success of its action.
+  producers: [WINDOWS_TASK_REGISTERED]
+- attack_ids: [T1053.005]
+  attack_basis: attempted_behaviour
+  attack_note: Scheduled action was attempted/reported; event completion alone is not proof of successful remote service execution.
+  producers: [WINDOWS_TASK_ACTION_ATTEMPT]
+- attack_ids: [T1053.005]
+  attack_basis: artefact_capability
+  attack_note: A Windows task artefact supports configured scheduling, not a successful action.
+  producers: [PERSIST_TASK]
+- attack_ids: [T1543.002]
+  attack_basis: contextual_inference
+  attack_note: Systemd service configuration/activity is a persistence candidate; routine service changes remain possible.
+  producers: [SYSTEMD_SERVICE_PERSISTENCE]
+- attack_ids: [T1543.003]
+  attack_basis: artefact_capability
+  attack_note: A Windows service artefact supports a service persistence candidate, not observed start or malicious intent.
+  producers: [PERSIST_SERVICE]
+- attack_ids: [T1543]
+  attack_basis: contextual_inference
+  attack_note: Service configuration supports a service-persistence candidate; parent mapping avoids an unsupported platform-specific subtype.
+  producers: [SERVICE_CONFIGURATION_CHANGED, PERSISTENCE_SERVICE_INSTALL]
+- attack_ids: [T1547.001]
+  attack_basis: artefact_capability
+  attack_note: Run/RunOnce artefact supports an autorun capability, not execution.
+  producers: [PERSIST_RUNKEY]
+- attack_ids: [T1547.004]
+  attack_basis: contextual_inference
+  attack_note: Qualified Winlogon helper value modification supports a persistence candidate; payload execution remains separate.
+  producers: [WINLOGON_HELPER_PERSISTENCE]
+- attack_ids: [T1546.015]
+  attack_basis: contextual_inference
+  attack_note: Qualified COM registration modification supports hijacking/persistence context, not successful execution.
+  producers: [COM_HIJACK_PERSISTENCE]
+- attack_ids: [T1098.004]
+  attack_basis: contextual_inference
+  attack_note: SSH authorized_keys modification supports additional-key persistence; attribution and malicious intent are not inferred.
+  producers: [AUTHORIZED_KEYS_ROOT_PERSISTENCE, AUTHORIZED_KEYS_PERSISTENCE]
+- attack_ids: [T1686]
+  attack_basis: contextual_inference
+  attack_note: Host firewall change supports an impairment candidate. Reviewed current successor of historical T1562.004; detector logic is unchanged.
+  producers: [FIREWALL_MODIFIED]
+- attack_ids: [T1685]
+  attack_basis: observed_behaviour
+  attack_note: Recorded tool/Defender disablement supports security-tool impairment. Reviewed current successor of T1562.001; actor intent remains separate.
+  producers: [DEFENDER_DISABLED]
+- attack_ids: [T1685.005]
+  attack_basis: observed_behaviour
+  attack_note: Windows log-clearing event is recorded. Reviewed current successor of T1070.001; authorization and actor attribution remain separate.
+  producers: [WINDOWS_LOG_CLEARED]
+- attack_ids: [T1484.001]
+  attack_basis: contextual_inference
+  attack_note: Group-policy artefact or directory change supports a policy-modification candidate; the particular malicious setting is not assumed.
+  producers: [GROUP_POLICY_MODIFIED, EVIDENCE_GPO_DIRECTORY_CHANGE]
+- attack_ids: [T1484.001]
+  attack_basis: attempted_behaviour
+  attack_note: GPO write/create/delete-capable operation supports a change attempt, not proof of a successfully altered setting.
+  producers: [EVIDENCE_GPO_CHANGE_OPERATION]
+- attack_ids: [T1136]
+  attack_basis: observed_behaviour
+  attack_note: Account creation is recorded, but available event/SID data does not universally prove local versus domain creation; deliberately use the parent technique.
+  producers: [ACCOUNT_CREATED, WINDOWS_ACCOUNT_CREATION_TARGET]
+- attack_ids: [T1136.001]
+  attack_basis: observed_behaviour
+  attack_note: Structured Linux local-account creation is observed; UID-0 status is additional context, not a second creation event.
+  producers: [LINUX_ACCOUNT_CREATED, LINUX_UID0_ACCOUNT_CREATED, LINUX_UID0_ALIAS_CREATED]
+- attack_ids: [T1098.007]
+  attack_basis: contextual_inference
+  attack_note: Privileged group-membership context supports account manipulation; creation, assignment and subsequent use remain distinct observations.
+  producers: [PRIVILEGED_ACCOUNT_CREATED, WINDOWS_CREATED_THEN_PRIVILEGED, WINDOWS_RISKY_CREATOR_TRAVEL_PRIVILEGED_ACCOUNT, WINDOWS_RISKY_CREATOR_AUTHENTICATION_PRIVILEGED_ACCOUNT]
+- attack_ids: [T1136]
+  attack_basis: contextual_inference
+  attack_note: Account creation is correlated with risky creator authentication; same live session/operator and local/domain account subtype remain unproved.
+  producers: [WINDOWS_CREATED_BY_RISKY_TRAVEL_ACCOUNT, WINDOWS_CREATED_BY_RISKY_AUTHENTICATION_ACCOUNT]
+- attack_ids: [T1136.001]
+  attack_basis: contextual_inference
+  attack_note: Linux account creation follows privileged SSH on the same host; this weak chronology does not identify a creator or session.
+  producers: [LINUX_CREATED_AFTER_PRIVILEGED_ACCESS]
+- attack_ids: [T1078]
+  attack_basis: contextual_inference
+  attack_note: Successful account use has bounded novelty/creator/privilege context; possible valid-account misuse is not a compromised-account verdict or operator attribution.
+  producers: [WINDOWS_RECENT_NEW_SOURCE_ACTION, WINDOWS_RECENT_PRIVILEGED_ACTION, WINDOWS_RISKY_CREATOR_TRAVEL_ACTION, WINDOWS_RISKY_CREATOR_AUTHENTICATION_ACTION]
+- attack_ids: [T1078.003]
+  attack_basis: contextual_inference
+  attack_note: Successful use of a recently created local account or UID-0 alias supports a valid-account misuse candidate; intent and creator/session attribution remain separate.
+  producers: [LINUX_RECENT_ACCOUNT_USE, LINUX_RECENT_UID0_ALIAS_LOGIN, LINUX_RECENT_PRIVILEGED_CREATION_USE]
+- attack_ids: [T1021.004]
+  attack_basis: observed_behaviour
+  attack_note: Successful SSH authentication/access is observed; this describes the remote-service behaviour, not proof of adversarial account use.
+  producers: [SSH_SUCCESS_LINUX, LINUX_ACCOUNT_REMOTE_SUCCESS, LINUX_PRIVILEGED_REMOTE_SUCCESS]
+- attack_ids: [T1021.001]
+  attack_basis: observed_behaviour
+  attack_note: RDP session establishment or reconnection is observed; legitimate administration remains possible.
+  producers: [RDP_SUCCESS_WINDOWS_4624, RDP_RECONNECT_WINDOWS_4778]
+- attack_ids: [T1021.001]
+  attack_basis: attempted_behaviour
+  attack_note: RDP authentication attempt/pre-session authentication is observed; a completed session is not asserted.
+  producers: [RDP_FAIL_WINDOWS_4625, RDP_PRE_AUTH_WINDOWS_1149]
+- attack_ids: [T1110]
+  attack_basis: contextual_inference
+  attack_note: Bounded failure-to-success pattern supports a password-guessing candidate; NAT, unrelated operators and legitimate mistakes remain possible.
+  producers: [FAIL_THEN_SUCCESS_USER, FAIL_THEN_SUCCESS_IP, LOCAL_FAIL_THEN_SUCCESS_USER]
+- attack_ids: [T1059]
+  attack_basis: observed_behaviour
+  attack_note: Interpreter/shell invocation is observed; retain parent technique unless the emitting rule uniquely identifies an interpreter subtype.
+  producers: [EXEC_SHELL_SPAWN, EXECUTION_INTERPRETER, INTERPRETER_EXEC_LINUX]
+- attack_ids: [T1036]
+  attack_basis: contextual_inference
+  attack_note: System/trusted binary name in an unexpected path supports masquerading; mere writable-path execution does not receive this mapping.
+  producers: [EXEC_SYSTEM_BINARY_IN_USER_PATH, MASQUERADING]
+- attack_ids: [T1548.001]
+  attack_basis: artefact_capability
+  attack_note: Root-owned SUID executable in staging supports privilege-capable presence; no execution or successful escalation is asserted.
+  producers: [LINUX_ROOT_SUID_STAGING_FILE]
+- attack_ids: [T1548.001]
+  attack_basis: contextual_inference
+  attack_note: SUID/privilege-related command context supports an escalation candidate, not a successfully obtained privileged context.
+  producers: [EXEC_NEW_SUID_BINARY, EXEC_PRIVILEGE_ESCALATION_SEQUENCE]
+- attack_ids: [T1548.003]
+  attack_basis: attempted_behaviour
+  attack_note: Sudo allowed or explicitly denied a privileged command; payload success remains separate and denied attempts retain their priority.
+  producers: [LINUX_SUDO_ALLOWED, LINUX_SUDO_DENIED, LINUX_SUDO_PRIVILEGED_WRITABLE, LINUX_SUDO_PRIVILEGED_COMMAND]
+- attack_ids: [T1548.003, T1078.003]
+  attack_basis: contextual_inference
+  attack_note: Allowed sudo by a recently created local account links escalation context with valid-account use; this is not proof of one malicious operator.
+  producers: [LINUX_RECENT_ACCOUNT_SUDO]
+- attack_ids: [T1574.006]
+  attack_basis: contextual_inference
+  attack_note: System-wide preload-control change supports dynamic-linker hijacking context; actual contents and malicious loading remain unproved.
+  producers: [LINUX_PRELOAD_CONTROL_CHANGE]
+- attack_ids: [T1569.002]
+  attack_basis: contextual_inference
+  attack_note: PsExec use supports a service-execution candidate; remote SMB execution is not asserted without target/service evidence.
+  producers: [WINDOWS_PSEXEC_EXECUTION]
+- attack_ids: [T1560]
+  attack_basis: contextual_inference
+  attack_note: Archive creation/tooling supports an archive-collected-data candidate; content, collection intent and authorisation remain separate.
+  producers: [ARCHIVE_CREATED, WINDOWS_ARCHIVE_CREATED, EXEC_ARCHIVE_TOOL, LARGE_ARCHIVE_CREATED, STAGING_ARCHIVE, LUHN_THEN_LARGE_ARCHIVE, LUHN_THEN_LARGE_ARCHIVE_IP, ARCHIVE_AFTER_SENSITIVE_ACCESS]
+- attack_ids: [T1074.001]
+  attack_basis: contextual_inference
+  attack_note: A newly created sensitive file was later downloaded; creation supplies a local-staging dimension without proving malicious staging or a particular exfiltration channel.
+  producers: [RECENT_CREATED_SENSITIVE_WEB_DOWNLOAD]
+- attack_ids: [T1048.003]
+  attack_basis: attempted_behaviour
+  attack_note: Explicit outbound FTP upload/transfer attempt supports possible unencrypted exfiltration; incomplete or failed attempts remain concerning and authorisation is not assumed.
+  producers: [WINDOWS_FTP_UPLOAD_ATTEMPT, FTP_OUTGOING_ARCHIVE]
+- attack_ids: [T1048.003]
+  attack_basis: contextual_inference
+  attack_note: Archive/sensitive-file context is linked to FTP activity; specific file transfer, actor attribution and completion remain unproved where not recorded.
+  producers: [WINDOWS_ARCHIVE_FTP, WINDOWS_ARCHIVE_FTP_HOST, WINDOWS_SENSITIVE_FTP, WINDOWS_ARCHIVE_FTP_EVIDENCE]
+- attack_ids: [T1048]
+  attack_basis: contextual_inference
+  attack_note: File-linked sensitive outbound transfer was recorded; retain parent channel technique and do not infer authorisation or an established command-and-control channel.
+  producers: [WINDOWS_OBSERVED_SENSITIVE_UPLOAD]
+- attack_ids: [T1020]
+  attack_basis: contextual_inference
+  attack_note: Repeated transfer plus bounded sensitive/staging context supports automated-exfiltration suspicion, not proof of transferred payload content.
+  producers: [AUTOMATED_EXFILTRATION]
+- attack_ids: [T1119]
+  attack_basis: contextual_inference
+  attack_note: Sensitive access with archiving or repeated scheduling supports automated-collection suspicion; successful collection remains separate.
+  producers: [AUTOMATED_COLLECTION]
+- attack_ids: [T1003]
+  attack_basis: attempted_behaviour
+  attack_note: Credential-dumping command semantics support an attempt; successful extraction is not inferred from command presence alone.
+  producers: [CREDENTIAL_DUMPING]
+- attack_ids: [T1555]
+  attack_basis: contextual_inference
+  attack_note: Password-store access semantics support credential-access context; actual secret extraction remains separate.
+  producers: [PASSWORD_STORE_ACCESS, PASSWORD_STORE_EXFIL_CHAIN]
+- attack_ids: [T1490]
+  attack_basis: attempted_behaviour
+  attack_note: Recovery-inhibition command semantics support an attempt; successful removal of recovery capability remains separate.
+  producers: [INHIBIT_SYSTEM_RECOVERY]
+- attack_ids: [T1489]
+  attack_basis: observed_behaviour
+  attack_note: Service-stop semantics are observed; routine administration remains possible and intent is not inferred.
+  producers: [SERVICE_STOP]
+- attack_ids: [T1083]
+  attack_basis: attempted_behaviour
+  attack_note: File/directory discovery command semantics support discovery activity; results and adversarial intent are not asserted.
+  producers: [FILE_AND_DIRECTORY_DISCOVERY]
+- attack_ids: [T1018]
+  attack_basis: attempted_behaviour
+  attack_note: Remote-system discovery command semantics support discovery activity; target reachability and intent remain separate.
+  producers: [REMOTE_SYSTEM_DISCOVERY]
+- attack_ids: [T1033]
+  attack_basis: attempted_behaviour
+  attack_note: Owner/user discovery command semantics support discovery activity, not a compromise verdict.
+  producers: [SYSTEM_OWNER_USER_DISCOVERY]
+- attack_ids: [T1070]
+  attack_basis: contextual_inference
+  attack_note: Indicator-removal semantics span multiple mechanisms; parent mapping avoids unsupported subtype attribution.
+  producers: [INDICATOR_REMOVAL_ON_HOST]
+- attack_ids: [T1021.002]
+  attack_basis: contextual_inference
+  attack_note: Administrative-share semantics support SMB remote-service context; access and remote execution are not treated as equivalent.
+  producers: [SMB_ADMIN_SHARE]
+- attack_ids: [T1133]
+  attack_basis: contextual_inference
+  attack_note: External remote-service semantics support a remote-access candidate; successful adversarial entry is not assumed.
+  producers: [EXTERNAL_REMOTE_SERVICE]
+- attack_ids: [T1550]
+  attack_basis: contextual_inference
+  attack_note: Alternate authentication-material semantics support use of alternate material; specific token/hash subtype remains unproved.
+  producers: [ALTERNATE_AUTH_MATERIAL]
+- attack_ids: [T1531]
+  attack_basis: contextual_inference
+  attack_note: Account/access removal, including an additive privileged-group loss, supports access-removal context; authorised administration remains possible.
+  producers: [ACCOUNT_ACCESS_REMOVAL, ACCOUNT_REMOVAL_EVENT_EVIDENCE, ACCOUNT_REMOVAL_OTHER_EVIDENCE, PRIVILEGED_GROUP_ACCESS_REMOVAL]
+- attack_ids: [T1485]
+  attack_basis: attempted_behaviour
+  attack_note: Explicit database-destructive command was attempted; success and intended scope remain separate.
+  producers: [EVIDENCE_DATABASE_DESTRUCTIVE_COMMAND]
+- attack_ids: [T1485]
+  attack_basis: contextual_inference
+  attack_note: Database storage deletion is a destruction candidate; maintenance versus destructive intent remains unresolved.
+  producers: [EVIDENCE_DATABASE_DELETE]
+- attack_ids: [T1491]
+  attack_basis: contextual_inference
+  attack_note: Web content change follows a qualified shell-like request; possible defacement, not proof of content, authorship or public/internal scope.
+  producers: [WEB_CONTENT_CHANGE_AFTER_SHELL]
+- attack_ids: []
+  attack_basis: artefact_capability
+  attack_source: matched_external
+  attack_note: Export only IDs from this hash's matched external findings; never union every possible technique in the capability category. Unknown/retired reported IDs stay in evidence with diagnostics.
+  producers: [AV_BEHAVIOUR_CREDENTIAL_ACCESS, AV_BEHAVIOUR_PERSISTENCE, AV_BEHAVIOUR_EVASION, AV_BEHAVIOUR_DESTRUCTIVE, AV_BEHAVIOUR_EXFILTRATION, AV_BEHAVIOUR_WEBSHELL]
+unmapped_notes:
+  LUHN_SENSITIVE_DATA_HIT: 'Potential plaintext payment-card data merits investigation as exposure or possible dumping. PCI DSS v4.0.1 requirement 3.5.1 concerns stored PAN protection (https://www.pcisecuritystandards.org/faqs/1222/). A Luhn checksum alone does not establish genuine PAN, storage noncompliance or attacker access; no standalone ATT&CK credential-theft claim. Existing score is unchanged.'
+  REFERENCED_FILE_LUHN_HIT: 'References potential plaintext payment-card content; investigate exposure and access context. Separately relevant: PCI DSS v4.0.1 requirement 3.5.1 (https://www.pcisecuritystandards.org/faqs/1222/). A checksum-supported reference alone proves neither genuine PAN nor exfiltration. Existing score is unchanged.'
+  WINDOWS_NOTE_CREATED: A note-like basename without ransom content or qualified context does not establish encryption capability; T1486 prose is not automatically promoted.
+  WINDOWS_UNATTRIBUTED_NOTE_CREATED: Unattributed note-like file alone does not establish a ransomware technique.
+  WEBSHELL_NAME_HINT: A suggestive basename is a review hint, not sufficient technique-specific evidence for structured web-shell attribution.
+  WEBSHELL_LEGACY_ARTIFACT: Legacy name-or-support union has ambiguous qualification; use the separately category-qualified web-shell producer.
+  WEB_SCRIPT_ARTIFACT_CANDIDATE: Generic web-root script presence is not web-shell deployment.
+  WEB_EXECUTABLE_FILE_CREATED: Generic executable web content may be legitimate; no web-shell technique is forced.
+  DEFACEMENT_CANDIDATE: A web-root modification alone does not establish defacement; qualified follow-on has its own mapping.
+  MASS_FILE_MODIFICATION: Modification bursts are not encryption evidence.
+  WINDOWS_MALWARE_EXECUTION: Generic malware use does not identify encryption or another specific ATT&CK execution mechanism; per-hash capability metadata remains separate.
+  WINDOWS_MALWARE_EXECUTION_CANDIDATE: AV-positive path/use context does not establish a ransomware family, capability or specific execution mechanism.
+  WINDOWS_MALWARE_USE_PRIORITY: Priority aggregation spans malware categories; map qualified constituent findings rather than all category capabilities.
+  QUALIFIED_MALWARE_PATH_USE: Generic qualified malware-to-use linkage does not identify a specific technique or prove file version at execution.
+  QUALIFIED_MALWARE_EXACT_HASH_USE: Exact malware hash/use linkage is strong identity evidence, not by itself a specific payload technique.
+  WINDOWS_SENSITIVE_CONTENT_ACCESS: 'Luhn-supported potential plaintext payment-card data is a meaningful exposure or possible dumping indicator, not necessarily a credential/secret (T1552.001). Separately relevant: PCI DSS v4.0.1 requirement 3.5.1 protects stored PAN (https://www.pcisecuritystandards.org/faqs/1222/). A checksum hit alone does not establish genuine PAN, noncompliance, access or exfiltration. Existing investigative score is retained.'
+  WINDOWS_FTP_ACTIVITY: FTP cache/navigation lacks upload direction; do not turn navigation into exfiltration attribution.
+  FTP_TRANSFER_OBSERVED: This producer includes incoming and outgoing transfers; direction-specific attribution belongs to the outbound producer.
+  FTP_ARCHIVE_TRANSFER: Incoming archive transfer is not necessarily local staging or exfiltration; direction-qualified source explanation is authoritative.
+  FTP_COMPLETED_ARCHIVE: Completion does not establish outbound direction or malicious intent.
+  WEB_EXTERNAL_SENSITIVE_TRANSFER: Public sensitive download is concerning but does not alone identify an ATT&CK exfiltration channel.
+  HOSTILE_CLIENT_SENSITIVE_WEB_DOWNLOAD: Prior hostile-client evidence is context, not proof that the current download executes an exploit or a particular exfiltration channel.
+  CREDENTIAL_DUMP_COLLECTION: Source may be a generic offensive tool, so do not project credential dumping onto every branch.
+  APPLICATION_LAYER_PROTOCOL: Application protocol presence is not proof of a command-and-control channel.
+  WINDOWS_FIRST_OBSERVED_DUAL_USE_EXECUTION: Novelty spans multiple configured dual-use tools; do not project PsExec service-execution metadata onto every tool.
+  WINDOWS_RECENT_PRIVILEGED_HOST_ACTION: This union includes security, archive and task actions; mapping all three techniques would misattribute whichever branches did not fire.
+  LOLBIN_WINDOWS_EXEC: Dual-use binary vocabulary is broader than system-binary proxy execution; a tool name alone does not establish T1218.
+  LOLBIN_WINDOWS_SUSPICIOUS_ARGS: Mixed encoded/download/proxy patterns need branch-qualified technique attribution, not a blanket T1218 label.
+  LOLBIN_LINUX_EXEC: A dual-use executable name does not uniquely identify a technique.
+  LOLBIN_LINUX_SUSPICIOUS_ARGS: Mixed shell and transfer patterns do not identify one technique in this aggregate producer.
+  EXECUTION_LOLBIN: Aggregated dual-use-tool signal does not uniquely identify system-binary proxy execution.
+  EXECUTION_LOLBIN_SUSPICIOUS_ARGS: Use the qualified source evidence; this aggregate does not distinguish proxy execution from download/encoding patterns.

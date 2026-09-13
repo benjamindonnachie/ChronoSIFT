@@ -1,0 +1,7 @@
+Name                                Stmts   Miss  Cover
+-------------------------------------------------------
+av_behaviour.py                       322     48    85%
+chronoSIFT_v2_31.py                 12564   1167    91%
+summarize_chronosift_telemetry.py     184     31    83%
+-------------------------------------------------------
+TOTAL                               13070   1246    90%

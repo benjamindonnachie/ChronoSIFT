@@ -1,0 +1,140 @@
+bringing up nodes...
+bringing up nodes...
+
+..uu......uuuuu......u........uuuuuuuuu....uuuuuuuuuuuuuuuuuuu.uuuuuuuuu [  3%]
+uuuuuuu.uuuuuuuuuuuu....uuuuuuuuuuuuuuuuuuuuuuu.uuuuuuuuuuuuuuuuuuuuuuuu [  4%]
+uuuuuuuuuuu.uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu.u..u.uuuu....uuu....... [  6%]
+...............uuu.....uuuu.uuuu.....uu..uuuuuu..uu.uuuuuu.....uuuuuuuuu [ 10%]
+uuuuuuuuuuuuu.u..uuuuu...........u..uuuuuuuu......u......uuuuuu....uuuu. [ 14%]
+....u.........u...uuuuuuuuuuuuuuuuuu..............uuuuu................u [ 20%]
+.u..u.u.........uuu...........................................uuuuuuuu.. [ 26%]
+.........uu..u.u.u..uuuuu..uu..u...u.u....uuuuu....................uuu.. [ 33%]
+.u..uuuuuuuuuu......................................u.u.u............... [ 39%]
+....................s.sss......sss...................................... [ 48%]
+..........................................uu.uuuuu.uuuuuuuuuuuuuuuuuuuuu [ 54%]
+.......uuu..uuuuu...u.uuuuuuuuuuuuuuuuuuuuuuuuuuu.uuuuuuuuuuuuuuu...u... [ 56%]
+...uuuuu.uuuuuuuu......uuuuuuuuuu..........u..u.uuuuu.uuuuu.uuu..u...... [ 60%]
+..............u.....u...u.uuu....u.u.....uuu.uu.u.u....u..uuuuu.uuuuuu.u [ 66%]
+uuu...uuuu..uuuuu.u......uuuuuuuu...uuuuu.............uu.uuuuuuuuuuuuuuu [ 69%]
+uuuuuuuuuuuuuuuuu...uu...........uu...uuu..uuuu......uuu.....uuuuuu....u [ 73%]
+u.uuuu........u...uuuuu.uuuu.u.u.u...uu.u.u.uuu..uu.uuuu.uu..u......uuu. [ 77%]
+...uuuuuuuuuuuu..uuuu........uu.........uuuuuu.uuuuuuuuuuuuuuuuuuuuuuuuu [ 80%]
+uuu...uuuuuuuuuuuu..u.uuuuuu..........................uu................ [ 86%]
+...................................uuuuuu..uuu.......uuu................ [ 93%]
+..uu.....uuu.s...uuuu...uu...........u.u.uu.u.u..............u.uu....... [100%]
+=============================== warnings summary ===============================
+tests/test_arrow_text_storage.py::ArrowTextStorageTest::test_regex_and_unicode_operations_match_existing_string_casts
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_arrow_text_storage.py:111: UserWarning: This pattern is interpreted as a regular expression, and has match groups. To actually get the groups, use str.extract.
+    pd.testing.assert_series_equal(expected.str.contains(pattern,na=False),data.text.str.contains(pattern,na=False))
+
+tests/test_v231_av_behaviour.py: 8 warnings
+tests/test_v231_behaviour_policy.py: 248 warnings
+tests/test_final_dataset_validation.py: 6 warnings
+tests/test_v231_detector_policy.py: 445 warnings
+tests/test_public_apply.py: 56 warnings
+tests/test_v231_av_behaviour_native.py: 24 warnings
+tests/test_v231_canonical_auth_or_context.py: 12 warnings
+tests/test_v231_canonicalisation_policy.py: 56 warnings
+tests/test_v231_evidence_calibration.py: 6 warnings
+tests/test_v231_account_removal.py: 125 warnings
+tests/test_v231_evidence_linkage.py: 81 warnings
+tests/test_v231_context_provenance.py: 118 warnings
+tests/test_v231_av_weighting.py: 3 warnings
+tests/test_v231_deferred_sidecar.py: 24 warnings
+tests/test_v231_integration.py: 150 warnings
+tests/test_v231_identity_roles.py: 49 warnings
+tests/test_v231_attack_metadata.py: 24 warnings
+tests/test_v231_linux_account_context.py: 236 warnings
+tests/test_v231_linux_tool_execution.py: 108 warnings
+tests/test_v231_native_path_case.py: 20 warnings
+tests/test_v231_memory.py: 16 warnings
+tests/test_v231_profile_trust_geo_policy.py: 113 warnings
+tests/test_v231_partition_execution.py: 54 warnings
+tests/test_v231_ranking_policy.py: 216 warnings
+tests/test_v231_performance.py: 38 warnings
+tests/test_v231_regression.py: 51 warnings
+tests/test_v231_web_client_context.py: 578 warnings
+tests/test_v231_windows_scoring.py: 349 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:2109: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    out = pd.concat([df, additions], axis=1, copy=False)
+
+tests/test_v231_av_behaviour.py: 11 warnings
+tests/test_v231_behaviour_policy.py: 248 warnings
+tests/test_final_dataset_validation.py: 8 warnings
+tests/test_public_apply.py: 56 warnings
+tests/test_v231_av_behaviour_native.py: 30 warnings
+tests/test_v231_account_removal.py: 149 warnings
+tests/test_v231_evidence_linkage.py: 128 warnings
+tests/test_v231_context_provenance.py: 104 warnings
+tests/test_v231_av_weighting.py: 6 warnings
+tests/test_v231_deferred_sidecar.py: 16 warnings
+tests/test_v231_identity_roles.py: 97 warnings
+tests/test_v231_attack_metadata.py: 30 warnings
+tests/test_v231_linux_account_context.py: 230 warnings
+tests/test_v231_linux_tool_execution.py: 144 warnings
+tests/test_v231_native_path_case.py: 20 warnings
+tests/test_v231_partition_execution.py: 52 warnings
+tests/test_v231_ranking_policy.py: 216 warnings
+tests/test_v231_windows_scoring.py: 200 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:22862: UserWarning: This pattern is interpreted as a regular expression, and has match groups. To actually get the groups, use str.extract.
+    eligible &= out[spec.selector_field].astype("string").fillna("").str.contains(
+
+tests/test_v231_av_behaviour.py: 4 warnings
+tests/test_v231_behaviour_policy.py: 704 warnings
+tests/test_final_dataset_validation.py: 22 warnings
+tests/test_v231_detector_policy.py: 40 warnings
+tests/test_public_apply.py: 323 warnings
+tests/test_v231_av_behaviour_native.py: 28 warnings
+tests/test_v231_canonical_auth_or_context.py: 35 warnings
+tests/test_v231_evidence_calibration.py: 13 warnings
+tests/test_v231_canonicalisation_policy.py: 1 warning
+tests/test_v231_account_removal.py: 206 warnings
+tests/test_v231_evidence_linkage.py: 188 warnings
+tests/test_v231_context_provenance.py: 484 warnings
+tests/test_v231_av_weighting.py: 2 warnings
+tests/test_v231_deferred_sidecar.py: 20 warnings
+tests/test_v231_integration.py: 173 warnings
+tests/test_v231_identity_roles.py: 266 warnings
+tests/test_v231_attack_metadata.py: 162 warnings
+tests/test_v231_linux_account_context.py: 586 warnings
+tests/test_v231_linux_tool_execution.py: 431 warnings
+tests/test_v231_native_path_case.py: 50 warnings
+tests/test_v231_profile_trust_geo_policy.py: 8 warnings
+tests/test_v231_ranking_policy.py: 758 warnings
+tests/test_v231_partition_execution.py: 312 warnings
+tests/test_v231_performance.py: 2 warnings
+tests/test_v231_regression.py: 32 warnings
+tests/test_v231_residual_config_authority.py: 2 warnings
+tests/test_v231_web_client_context.py: 50 warnings
+tests/test_v231_windows_scoring.py: 495 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/chronoSIFT_v2_31.py:1936: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    obj = values.astype(object, copy=False)
+
+tests/test_public_apply.py: 2 warnings
+tests/test_v231_windows_scoring.py: 12 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_windows_scoring.py:29: Pandas4Warning: 'd' is deprecated and will be removed in a future version. Please use 'D' instead of 'd'.
+    times.append(START+pd.Timedelta(offset))
+
+tests/test_v231_context_provenance.py: 21 warnings
+tests/test_v231_partition_execution.py: 3 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_context_provenance.py:48: Pandas4Warning: 'd' is deprecated and will be removed in a future version. Please use 'D' instead of 'd'.
+    index=pd.DatetimeIndex([START+pd.Timedelta(t) for t, _ in records], name='datetime'))
+
+tests/test_v231_context_provenance.py::ContextProvenanceTest::test_expiry_and_reverse_order
+tests/test_v231_context_provenance.py::ContextProvenanceTest::test_expiry_and_reverse_order
+tests/test_v231_context_provenance.py::ContextProvenanceTest::test_expiry_and_reverse_order
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_context_provenance.py:161: Pandas4Warning: 'd' is deprecated and will be removed in a future version. Please use 'D' instead of 'd'.
+    auth_pos = sorted(range(len(records)),key=lambda i:pd.Timedelta(records[i][0])).index(0)
+
+tests/test_v231_behaviour_policy.py: 8 warnings
+tests/test_v231_linux_account_context.py: 15 warnings
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_linux_account_context.py:37: Pandas4Warning: 'd' is deprecated and will be removed in a future version. Please use 'D' instead of 'd'.
+    index=pd.DatetimeIndex([pd.Timestamp('2024-01-31T23:00:00Z')+pd.Timedelta(t) for t,_ in records],name='datetime'))
+
+tests/test_v231_windows_scoring.py::WindowsScoringTest::test_partition_overlap_covers_nested_account_window
+  /Volumes/EXTERNAL/PhD/202607-snake-make-driven/working/ChronoSIFT-performance-20260905/tests/test_v231_windows_scoring.py:296: Pandas4Warning: 'd' is deprecated and will be removed in a future version. Please use 'D' instead of 'd'.
+    self.assertGreaterEqual(self.engine.minimum_partition_overlap(),pd.Timedelta('7d1h'))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+815 passed, 8 skipped, 10422 warnings, 689 subtests passed in 183.47s (0:03:03)
+$SP/venv3/bin/python -m pytest tests/ -q -p no:cacheprovider -n 4  688.24s user 11.95s system 379% cpu 3:04.32 total

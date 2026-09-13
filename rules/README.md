@@ -1,6 +1,52 @@
 # Rules, weights, and enrichment inputs
 
-The two YAML files in this directory are the versioned ChronoSIFT v2.31 baseline:
+V24 is scoring-identical to v23 and adds [structured ATT&CK attribution](../docs/ATTACK_METADATA.md).
+`attack_mapping_review_v24.yaml` is the version-bound review source; the builder
+generates both runtime v24 and the current mapping inventory. PCI DSS references
+for potential plaintext PAN stay separate from ATT&CK IDs.
+
+See [behavioural scoring](../docs/BEHAVIOURAL_SCORING.md) for v21/v19 sudo,
+FTP, loader-control and web-edit policy, direct category-supported shell use,
+database-export classification and explicit document-root configuration.
+All preceding policies remain available for reproducible comparisons.
+
+The v10/v8 YAML pair in this directory preserves the ChronoSIFT v2.31 baseline.
+The isolated candidate runner defaults to `rules_evidence_calibrated_v24.yaml`
+and `weights_evidence_calibrated_v21.yaml`; supply the extraction corpus with
+`--yara-metadata-path`. Its strict resource preflight, signal-name migration,
+weight rationale and validation limits are described in
+[`EVIDENCE_CALIBRATION.md`](../docs/EVIDENCE_CALIBRATION.md).
+The preceding calibrated rules v11 through v23 and weights v9 through v20 are retained for
+reproducible comparisons. Web-client and optional country/ASN context are
+configured in YAML, not hard-coded into the Python engine.
+
+See [Windows scoring policy](../docs/WINDOWS_SCORING_DESIGN.md) for implemented
+account/task/execution and attempted/inferred FTP-transfer scoring, MITRE ATT&CK
+references, optional corroboration contracts and attribution limits. Default
+overlap follows the policy requirement (199h for v16/v17; dataset-applicable in
+v18). Explicit insufficient history fails. V18 separates 24h raw-feature overlap
+from compact long temporal history for sidecars, and documents frame-local
+baseline differences in [partition execution](../docs/PARTITION_EXECUTION.md).
+No completed outputs or main pipeline configurations are changed.
+See [remaining dataset improvements](../docs/DATASET_IMPROVEMENTS.md) for
+strict individual-rule metadata, domain identity, GPO and web-file linkage.
+See [additive account-removal scoring](../docs/ACCOUNT_REMOVAL_SCORING.md) for
+the two-point base, six-point affected-group increment and single-owner
+explanation accounting. Its v15/v14 policy changes were YAML-only.
+See [context provenance](../docs/CONTEXT_PROVENANCE.md) for v16/v15 scoped
+continuity, creator risk, execution-qualified novelty and container exclusions.
+Thresholds, admission criteria and weights remain YAML-owned.
+See [Linux tool scoring](../docs/LINUX_TOOL_SCORING.md) for v19/v16 bounded
+qualified repository/component invocation, failed-only SSH prioritisation,
+evidence limitations and ATT&CK rationale. V18/v15 remains reproducible.
+See [antivirus scoring](../docs/AV_SCORING.md) for the v17 weights-only increase
+for classified malicious AV findings; generic hits, PUA and dual-use tools remain
+unchanged. The v19/v16 combination used by earlier frozen runs is retained.
+See [Linux account scoring](../docs/LINUX_ACCOUNT_SCORING.md) for v20/v18 SUID
+staging artefacts, UID-0 severity, creation-anchored successful use, lifecycle
+resets and explicitly weak same-host association. AV weighting remains unchanged.
+See [event-role identities](../docs/IDENTITY_ROLES.md) for v17 reporting,
+authenticated, acting and affected identities; weights v15 remain unchanged.
 
 Both files use a strict duplicate-rejecting YAML loader. Repeating a mapping
 key at any depth fails engine construction instead of silently retaining the
@@ -31,13 +77,17 @@ groups, field-ID references, duplicate outputs, unknown keys, empty source
 registries, and dangling references fail engine construction.
 
 `normalisation` is a strict ordered list. Each entry must use exactly one of
-`coalesce`, `regex_first`, `ipv4_first`, or `file_extension` with the
+`coalesce`, `regex_first`, `identity_lookup`, `ipv4_first`, `file_extension`,
+`join_fields`, `bitmask_any`, `path_separators`, `casefold`, or `canonical_web_path` with the
 method-specific required keys. Output names are unique and regular expressions
 are compiled and capture-group checked at startup. Python supplies XML, regex,
 IP, coalescing, and path-extension mechanics only; it does not insert aliases,
 fallback patterns, event classifications, or unknown-method placeholder
 columns. Configured canonical and normalised outputs are retained in sidecar
 mode even when they do not use a `chronosift_` prefix.
+Optional regex selectors, ambiguity-rejecting frame-local identity aliases and
+explicit derived-field recomputation are described in
+[the rule language](../docs/RULE_LANGUAGE.md#canonicalisation-and-normalisation-policy).
 
 ## GeoIP enrichment
 
@@ -53,6 +103,17 @@ The `geographic_continuity` country, ASN, and city inputs and the
 outputs exactly. Engine construction rejects a mismatch even when the relevant
 detector is disabled. Python retains MaxMind lookup and unique-IP join
 mechanics only; renamed outputs are also retained explicitly in sidecar mode.
+
+With both GeoIP database paths supplied, an address absent from either database
+leaves only that database's outputs missing; the other lookup can still succeed.
+Private/non-global and invalid addresses are not queried. Unexpected errors
+(corrupt/truncated files, wrong database types, I/O or malformed reader responses)
+propagate instead of becoming silent misses. Readers are closed when processing
+ends or fails. This deliberately fails the affected call/run rather than allowing
+geographic continuity and impossible-travel inputs to degrade silently; previously
+completed sidecars are not removed. GeoIP remains optional, and this does not change
+the existing requirement to supply both City and ASN paths to enable enrichment.
+
 Geographic continuity also declares its history retention (`lifetime` or a
 positive duration), novelty reference (`all_seen` or the previous
 observation), first-observation output/emission choices, and country-boundary

@@ -196,7 +196,7 @@ class ChronoSiftV231ResidualConfigAuthorityTest(unittest.TestCase):
         unknown["detector_policy"]["detectors"]["file_lifecycle"][
             "classification"
         ]["derived_predicates"]["database_dump"]["any"] = ["hidden_fact"]
-        with self.assertRaisesRegex(ValueError, r"unknown base fact"):
+        with self.assertRaisesRegex(ValueError, r"unknown base or prior derived fact 'hidden_fact'"):
             self._engine(unknown)
 
     def test_artifact_follow_on_qualification_is_yaml_authoritative(self):

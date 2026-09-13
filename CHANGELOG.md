@@ -4,6 +4,180 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Audit hardening (unchanged rules v24 / weights v21): require pandas >=3.0.3
+  for wide forensic timestamps; publish the detector-policy interface; prepare
+  genuine text once in Arrow storage with bounded memory measurements; distinguish
+  GeoIP address misses from reader failures; test the public whole-frame API and
+  guard documentation against CLI-default drift. See `docs/PANDAS_REQUIREMENT.md`,
+  `docs/DETECTOR_POLICY_CONTRACT.md`, `docs/PERFORMANCE.md` and `docs/PUBLIC_API.md`.
+
+- Rules v24 / unchanged weights v21 address audit F-02 with YAML-owned,
+  producer-qualified ATT&CK explanations, a SHA-pinned offline Enterprise19.2
+  catalogue, run-level provenance and generated current inventory. No detection,
+  score or confidence changes. External AV capabilities retain raw provenance and
+  retired/unknown-ID diagnostics. Luhn exposure rationales link separately to PCI
+  DSS stored-PAN protection. See `docs/ATTACK_METADATA.md`.
+
+- Rules v23 / weights v21 add offline per-hash AV-supported behavioural
+  enrichment from verified VT reports, qualifying ATT&CK-associated signatures,
+  Sigma matched events and behaviour tags. Correlated evidence contributes once
+  per capability under a shared 14-point cap; no online lookup is performed while
+  scoring. Remove the unsupported Razy-name-to-ransomware override; preserve
+  existing base AV/category weights otherwise. See `docs/AV_BEHAVIOUR.md`.
+
+- Rules v22 / weights v20 refine investigator ranking: reduce unqualified cron
+  and repetition background contributions, preserve qualified payload context,
+  require actual interpreter syntax, lower unqualified Linux unit-metadata
+  contributions and qualify web-repository clues. Native path-identity hardening separately
+  preserves POSIX case and Windows-specific folding without changing this policy
+  pair. See `docs/RANKING_REFINEMENTS.md` and `docs/NATIVE_PATH_IDENTITY.md`.
+
+- Rules v21 / weights v19 add outcome-aware sudo, bounded new-account sudo
+  context, direction/completion-aware FTP archive transfers, preload-control
+  changes and administrative web-edit attempts. Direct AV/YARA web-shell category
+  supports existing shell use without a suggestive filename. Explicit document
+  roots are configured with `configure_web_roots.py`; database exports no longer
+  match arbitrary `dump` substrings. Generic lexical POSIX references and ordered
+  derived facts keep semantics in YAML. See `docs/BEHAVIOURAL_SCORING.md`.
+
+- Rules v20 / weights v18 add root-owned executable SUID staging-file evidence,
+  additive UID-0 creation severity and seven-day, creation-anchored Linux
+  authentication context. Same-host privileged-access association is explicitly
+  weaker than creator/session attribution. Generic sequence reset signals revoke
+  prior lifetimes; opt-in exact integer mask parsing handles Parquet numeric modes.
+  Existing policies and AV weights are preserved. See `docs/LINUX_ACCOUNT_SCORING.md`.
+
+- Weights v17 with unchanged rules v19 raise classified AV malware/exploit
+  contributions from 16 to 32 and ransomware/web-shell contributions from 17
+  to 33. Generic hit, PUA and dual-use-tool weights remain unchanged. Matching,
+  classification, engine code, execution requirements and prior YAML are
+  preserved. See `docs/AV_SCORING.md`; existing frozen runs are unaffected.
+
+- Candidate rules v19 / weights v16 add bounded, qualified Linux repository/file
+  to scheduled-command references with persistent evidence IDs and honest attempt
+  labels. Failed-only SSH loses access/execution/pivot overstatement; success-after-
+  failures remains. Plaso-formatted SSH success and CROND actor roles are corrected.
+  Policy remains YAML-owned and raw feature history remains 24h. See
+  `docs/LINUX_TOOL_SCORING.md`; no main/pipeline adoption or old-output replacement.
+
+- Execution candidate v18 / unchanged weights v15: whole-corpus, YAML-declared
+  applicability and 24h raw-feature windows with compact long contextual history
+  for sidecars. Retain ordinary baseline observations, chronological carry and
+  stable integer row IDs; hydrate composite payloads and output explanations in
+  bounded batches. Windows retains 199h history; eligible Linux uses 24h. The two
+  seven-day qualified-malware-use rules have Windows execution prerequisites.
+  Frame-scoped baseline/identity differences and retained cache behavior are
+  documented in `docs/PARTITION_EXECUTION.md`. No full-memory fit guarantee.
+
+- Memory candidate: zero-buffer missing columns with producer-owned materialisation,
+  last-use atomic caches, matched-only evidence, bounded row-local systemd batches,
+  sidecar-stage raw-field release and safe batched evidence-only Parquet loading by
+  persistent row ID. Core output omits unused position maps and releases completed
+  month masks. Rules v17, weights v15 and configured overlap are unchanged.
+  See `docs/PERFORMANCE.md` for contracts, validation and memory limitations.
+
+- Added candidate rules v17 with unchanged weights v15: provider-qualified
+  remote-authentication identity and distinct acting/affected account/group
+  evidence. Unknown 1149 users no longer enter continuity as NETWORK SERVICE.
+  Generic configured UserData leaf extraction and first-match select/coalesce
+  mechanics retain the existing username consumers; qualified identities remain
+  separate. Missing actor/IP explanation fields are genuine nulls. Added
+  reviewed, raw-evidence-checked ground-truth anchor overlays for evaluation
+  without changing original ledgers or detector inputs. See `docs/IDENTITY_ROLES.md`.
+
+- Added context-provenance candidate rules v16/weights v15: bounded creator
+  risk (+8 once), qualifying PsExec-family first observation (+4), scoped
+  continuity and container-only sensitive-path exclusions. Corrected monthly
+  geography/travel/IP carry using boundary checkpoints and per-identity
+  copy-on-write suffix state, without dataframe or recursive evidence copies.
+  Nearby travel references refresh under explicit policy while distant
+  sub-minute observations retain the earlier reference. Generic observation
+  filters, casefold and per-emission parser exclusions keep policy in YAML.
+  Required overlap is 199h. Prior YAML and additive removal scoring are retained.
+  See `docs/CONTEXT_PROVENANCE.md` for ATT&CK and attribution boundaries.
+
+- Added YAML-only account-removal candidate rules v15/weights v14: ordinary
+  removal contributes 2 and removal from a configured privileged/access-enabling
+  group adds 6. The privilege test uses the affected group, not administrator
+  text elsewhere in the event. One base projection owns points across distinct
+  zero-weight event/text observations, preventing duplicate additive
+  explanations while retaining evidence. Engine, validator, older policies
+  and sidecars remain unchanged. See `docs/ACCOUNT_REMOVAL_SCORING.md` for
+  ATT&CK T1531 rationale, configuration boundaries and the 2 + 6 breakdown.
+
+- Added remaining Windows/web evidence-linkage candidate rules v14/weights v13:
+  strict actual per-rule YARA metadata, HTTP-only URI classification, genuine
+  execution-path inputs, domain-qualified task principals, GPO change-capable
+  operations, AV/YARA-qualified malware-use candidates with one capped shared
+  contribution, same-file shell/download linkage, hostile-client follow-on,
+  and bounded database/content-change evidence. Generic normalization adds
+  post-web evaluation, case-sensitive aliases, complete field joins and bitmask
+  tests without whole-frame defensive copies. ATT&CK rationale and upstream
+  evidence limits are in `docs/DATASET_IMPROVEMENTS.md`. Old policy pairs and
+  completed sidecars remain unchanged; full replay is separately validated.
+
+- Added Windows evidence/context candidate rules v13/weights v12: numeric
+  event-ID and SID/task/execution coverage, seven-day privileged-account
+  context, bounded newly observed logon sources, disabling-value checks,
+  malware-use candidates, USN archive creation, FTP destinations and upload
+  attempts, and corroborated note placement. Failed/unknown transfer completion
+  does not gate attempted or inferred exfiltration scoring. YAML owns policy;
+  comments/docs link MITRE ATT&CK and separate severity from attribution.
+  Generic engine additions provide scoped regex/identity normalization,
+  sequence witness IDs and automatic compounded overlap with strict short-window
+  rejection. Prior YAML, original evidence, completed outputs and main remain
+  unchanged. See `docs/WINDOWS_SCORING_DESIGN.md` for evidence limits.
+
+- Added YAML-only web-client context in candidate rules v12/weights v11:
+  six-hour available-history novelty, a two-hour sensitive-download follow-on,
+  and optional recent country/ASN corroboration. Novelty alone is neutral;
+  successful public sensitive downloads receive 8 contextual points, plus at
+  most 3 shared geographic points. Existing login geography, scoring mechanics,
+  identity gates and prior weights remain unchanged. The candidate CLI selects
+  the new pair; preceding versions remain available. See
+  `docs/EVIDENCE_CALIBRATION.md` for scope, cold-start and history limitations.
+
+- Added weights v10 for the unchanged candidate rules v11: successful sensitive
+  download 10 to 20, shell artefact/request co-occurrence 9 to 15. All other
+  weights, detector conditions and the 50-point cap are unchanged. The isolated
+  runner now defaults to v10; v9 and earlier outputs remain reproducible.
+
+- Added versioned evidence-calibration candidate rules v11/weights v9, retaining
+  v10/v8 for historical comparisons. Renamed broad modification/impact outputs,
+  retained weak observations at lower weights, increased qualified access and
+  successful sensitive-download contributions, and required ransomware-specific
+  sources for the candidate composite. Temporal descriptions qualify inferred
+  identity, note content and impact. The runner selects the candidate pair and
+  checks required extraction YARA metadata before loading evidence; the existing
+  score/quality gate is unchanged. No scoring-executor changes. See
+  `docs/EVIDENCE_CALIBRATION.md` for migration and evaluation boundaries.
+
+- Reused bounded immutable file-identity snapshots within validated manifest
+  calls, avoiding repeated normalisation while retaining independently mutable
+  event metadata. Prepared web-mapping constants/output bindings once per call
+  and reused row-common evidence. Added policy-local, bounded exact-target SQLi
+  result caching; oversized targets still undergo complete uncached detection.
+  Added cache/ownership/predicate regressions and mixed mapping equivalence checks.
+
+- Reduced further per-event work without changing detector policy or sidecar
+  representation: fast string/null handling, bounded pure IP-scope caching,
+  slotted web-classifier context with one-time baseline keys and lazy evidence,
+  and batched referenced-file feature/outcome writes preserving ordered merges.
+  Static baselines retain response values only; row-dependent baselines keep
+  their positional and timestamp records. Added mixed-policy differential
+  checks and separate timing/allocation measurements.
+
+- Removed repeated sparse-state metadata copying from contextual execution.
+  Explicitly passed signal/explanation maps are detached from pandas attrs
+  during internal work, with exception-safe restoration at public boundaries.
+  Web technique and classifier outcome updates are batched by column, and
+  partition-wide/unbounded SQLi baseline statistics and thresholds are computed
+  once per endpoint group.
+  Prior-row and finite-lookback policies retain their exact sample semantics.
+  Added operation-count, metadata-ownership and duplicate-timestamp regressions,
+  plus a bounded before/after benchmark that checks complete sidecar equality.
+  See `docs/PERFORMANCE.md` for synthetic measurements and their limits.
+
 - Fixed hash-enrichment alignment for timelines with duplicate timestamps.
   AV and Luhn lookup results now attach through the persistent unique
   `chronosift_row_id` rather than pandas datetime-index alignment; missing,

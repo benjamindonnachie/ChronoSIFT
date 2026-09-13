@@ -131,6 +131,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import ast
+from collections import Counter
 import bisect
 import hashlib
 import json
@@ -142,21 +143,35 @@ import datetime
 import time
 import re
 import shutil
+import tempfile
 import warnings
 from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree as ET
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from datetime import timedelta
-from functools import lru_cache
+from functools import lru_cache, wraps
 from itertools import islice
 from typing import Any, ClassVar, Dict, Iterable, List, Optional, Set, Tuple, Union
 from urllib.parse import parse_qsl, unquote, unquote_plus, urlparse
 
 import numpy as np
 import pandas as pd
+
+# pandas 2.x coerces epoch-microsecond dates outside 1677–2262 to NaT.
+# Enforce the tested dependency floor even when scripts bypass installation.
+if np.lib.NumpyVersion(pd.__version__) < "3.0.3":
+    raise ImportError(
+        f"ChronoSIFT requires pandas>=3.0.3; found {pd.__version__}. "
+        "Older pandas can silently drop forensic timestamps. "
+        "Install this checkout's dependencies with: uv pip install -e ."
+    )
+
 import pyarrow as pa
 
 import duckdb  # required dependency since v2.31
+import av_behaviour as _av_behaviour
+import attack_metadata as _attack_metadata
 
 try:
     import psutil  # type: ignore
@@ -181,6 +196,7 @@ def _geoip_db_metadata(path: str | None) -> dict | None:
         return {"path": str(path)}
 
 import geoip2.database as geoip2_database  # required dependency since v2.31
+from geoip2.errors import AddressNotFoundError
 
 
 try:
@@ -408,6 +424,12 @@ def _is_null(x: Any) -> bool:
     if x is None:
         return True
 
+    # Strings cannot be pandas missing scalars. Handle the common log-field
+    # case without dispatching through pd.isna for every conversion.
+    if isinstance(x, str):
+        s = x.strip()
+        return not s or s.lower() in PLACEHOLDER_STRINGS
+
     # Do not treat containers as null; their emptiness may be meaningful later.
     if isinstance(x, (dict, list)):
         return False
@@ -417,13 +439,6 @@ def _is_null(x: Any) -> bool:
             return True
     except Exception:
         pass
-
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return True
-        if s.lower() in PLACEHOLDER_STRINGS:
-            return True
 
     return False
 
@@ -713,6 +728,7 @@ def _extract_windows_event_values_from_evtx_xml(
         return extracted
 
     data_map: Dict[str, str] = {}
+    leaf_aliases = {alias for field in policy.fields for alias in field.event_data_aliases}
     system_values: Dict[str, Optional[str]] = {
         "provider": None,
         "channel": None,
@@ -738,6 +754,19 @@ def _extract_windows_event_values_from_evtx_xml(
             val = _normalise_windows_auth_value(elem.text, policy.placeholders)
             if key and val and key not in data_map:
                 data_map[key] = val
+
+    # UserData may use named leaf elements instead of EventData/Data@Name.
+    # The aliases remain YAML-owned; never interpret System/Security as an
+    # authenticated user or guess positional identities from message text.
+    for section in root.iter():
+        if _strip_xml_ns(section.tag).lower() not in {"userdata", "eventdata"}:
+            continue
+        for elem in section.iter():
+            key = _normalise_windows_event_field_name(_strip_xml_ns(elem.tag))
+            if len(elem) == 0 and key in leaf_aliases and key not in data_map:
+                val = _normalise_windows_auth_value(elem.text, policy.placeholders)
+                if val:
+                    data_map[key] = val
 
     values_by_id: Dict[str, Optional[str]] = {}
     for field_policy in policy.fields:
@@ -946,6 +975,20 @@ def _http_sqli_indicators(
     )
 
 
+def _make_sqli_indicator_lookup(policy: WebIndicatorPolicy):
+    """Cache exact target results for one fixed policy invocation only."""
+    @lru_cache(maxsize=8192)
+    def cached(text: str) -> Tuple[str, ...]:
+        return _http_sqli_indicators(text, policy)
+
+    def lookup(text: str) -> Tuple[str, ...]:
+        # The caller already normalised this string. Oversized request bodies
+        # retain their full detection semantics without occupying cache slots.
+        return cached(text) if len(text) <= 4096 else _http_sqli_indicators(text, policy)
+
+    return lookup
+
+
 def _http_injection_probe(
     decoded: str,
     policy: WebInjectionProbePolicy,
@@ -1034,31 +1077,46 @@ def _web_request_host(path_or_url: Any, headers: Any) -> Optional[str]:
     return host.rsplit(":", 1)[0].strip("[]").lower() or None
 
 
+def _web_filesystem_path_is_case_insensitive(path: str) -> bool:
+    """Recognise explicit Windows path syntax, not the analysis host's OS.
+
+    POSIX and unknown paths stay case-sensitive. This is the native web-alias
+    contract, not proof that a server cannot have custom URL rewriting.
+    """
+    return bool(re.match(r"^(?:[A-Za-z]:[\\/]|NTFS:[\\/]|\\)", path, re.I))
+
+
 def _web_path_aliases_for_filesystem_path(path: Any, document_roots: Iterable[str]) -> Tuple[str, ...]:
-    """Map a filesystem path below a configured document root to URL aliases."""
-    raw_path = _safe_str(path).strip().replace("\\", "/")
+    """Map configured roots at component boundaries, preserving URL case."""
+    original_path = _safe_str(path).strip()
+    case_insensitive = _web_filesystem_path_is_case_insensitive(original_path)
+    raw_path = original_path.replace("\\", "/")
     if not raw_path:
         return tuple()
     while "//" in raw_path:
         raw_path = raw_path.replace("//", "/")
-    path_folded = raw_path.casefold()
+    path_parts = raw_path.split("/")
+    comparison_parts = [part.casefold() for part in path_parts] if case_insensitive else path_parts
     aliases: List[str] = []
     seen: Set[str] = set()
     for configured_root in document_roots:
         root = _safe_str(configured_root).strip().replace("\\", "/").rstrip("/")
         if not root:
             continue
-        root_folded = root.casefold()
-        start = 0 if path_folded.startswith(f"{root_folded}/") else -1
-        if start < 0 and not root_folded.startswith("/"):
-            marker = f"/{root_folded.lstrip('/')}"
-            marker_i = path_folded.find(marker)
-            if marker_i >= 0:
-                start = marker_i
-                root_folded = marker
-        if start < 0:
+        while "//" in root:
+            root = root.replace("//", "/")
+        root_parts = root.split("/")
+        if case_insensitive:
+            root_parts = [part.casefold() for part in root_parts]
+        starts = (0,) if root.startswith("/") else range(len(path_parts))
+        end = next((
+            start + len(root_parts) for start in starts
+            if start + len(root_parts) < len(path_parts)
+            and comparison_parts[start:start + len(root_parts)] == root_parts
+        ), None)
+        if end is None:
             continue
-        remainder = raw_path[start + len(root_folded):].lstrip("/")
+        remainder = "/".join(path_parts[end:])
         alias = _canonical_web_request_path(remainder)
         if alias and alias not in seen:
             seen.add(alias)
@@ -1087,7 +1145,7 @@ def _normalise_upload_filename(
         and normalise_file_extension(candidate) is None
     ):
         return None
-    return candidate.casefold()
+    return candidate
 
 
 def _bounded_metadata_strings(value: Any, max_items: int = 32, max_chars: int = 65536) -> Tuple[str, ...]:
@@ -1360,6 +1418,10 @@ def build_geoip_enrichment_table(
     The IP key and six nullable output column names are supplied by the
     mandatory canonicalisation and GeoIP-enrichment policies. Python owns the
     unique-IP lookup mechanics, not the derived schema names.
+
+    A genuine AddressNotFoundError leaves that database's outputs missing.
+    Unexpected reader/record failures propagate: degraded enrichment must not
+    masquerade as geographic absence. Readers are closed on success or failure.
     """
     configured_outputs = tuple(
         output_fields[role] for role in GEOIP_ENRICHMENT_OUTPUT_ROLES
@@ -1404,7 +1466,7 @@ def build_geoip_enrichment_table(
                 if not ip_obj.is_global:
                     rows.append(empty_record(ip_s))
                     continue
-            except Exception:
+            except ValueError:
                 # Invalid IP string
                 rows.append(empty_record(ip_s))
                 continue
@@ -1419,14 +1481,14 @@ def build_geoip_enrichment_table(
                 out[output_fields["country_iso"]] = resp.country.iso_code
                 out[output_fields["latitude"]] = resp.location.latitude
                 out[output_fields["longitude"]] = resp.location.longitude
-            except Exception:
+            except AddressNotFoundError:
                 pass
 
             # ASN DB
             try:
                 resp_asn = reader_asn.asn(ip_s)
                 out[output_fields["asn"]] = resp_asn.autonomous_system_number
-            except Exception:
+            except AddressNotFoundError:
                 pass
 
             rows.append(out)
@@ -1438,6 +1500,10 @@ def build_geoip_enrichment_table(
 
 
 def normalise_yara_match_count(v: Any) -> int:
+    # Arrow list columns arrive as ndarray cells in pandas. Do not stringify
+    # the entire array into one apparent rule name (or count it as one hit).
+    if isinstance(v, np.ndarray):
+        v = v.tolist()
     if _is_null(v):
         return 0
 
@@ -1495,9 +1561,11 @@ def extract_yara_rule_names(v: Any) -> List[str]:
     """Extract individual YARA rule name strings from a yara_match column value.
 
     Handles the same format variability as ``normalise_yara_match_count``
-    (None, list, JSON-serialised list, Python literal list, bare string) but
+    (None, list/Arrow ndarray, JSON-serialised list, Python literal list, bare string) but
     returns the actual rule names rather than just a count.
     """
+    if isinstance(v, np.ndarray):
+        v = v.tolist()
     if _is_null(v):
         return []
     try:
@@ -1639,6 +1707,24 @@ def parse_yara_forge_metadata(
     def _finalise():
         nonlocal current_name, in_meta, meta_fields, inline_tags
         if current_name:
+            if classifier_policy.metadata_on_incomplete_rule == "fail":
+                for field_name in ("score", "quality"):
+                    raw_value = meta_fields.get(field_name)
+                    try:
+                        int(raw_value)
+                        available = True
+                    except (TypeError, ValueError, OverflowError):
+                        available = False
+                    if not available:
+                        raise ValueError(
+                            f"YARA rule {current_name!r}: missing or invalid {field_name} "
+                            f"metadata {raw_value!r} in {yar_path}; actual numeric value required"
+                        )
+                    # Forge can supply negative quality values. These are
+                    # observed metadata, bounded by the existing 0..100 policy,
+                    # not a reason to substitute the configured default.
+                if current_name in index:
+                    raise ValueError(f"Duplicate YARA metadata rule {current_name!r} in {yar_path}")
             score = _yara_metadata_percent(
                 meta_fields.get("score"),
                 classifier_policy.default_score,
@@ -1717,8 +1803,8 @@ def parse_yara_forge_metadata(
 # The ``Category`` field is the primary classifier.  Some older or community
 # signatures may deviate from this scheme, so the parser is lenient.
 
-REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION = 7
-REFERENCED_FILE_HIT_MANIFEST_SOURCE_FINGERPRINT_VERSION = 4
+REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION = 9
+REFERENCED_FILE_HIT_MANIFEST_SOURCE_FINGERPRINT_VERSION = 6
 
 
 @dataclass
@@ -1886,8 +1972,9 @@ def _truncate_evidence_text(s: str, limit: int = 240) -> str:
 
 
 def _coalesce_first_meaningful(df: pd.DataFrame, fields: List[str]) -> pd.Series:
+    fields = [f for f in fields if f in df.columns and not _is_compact_null(df[f])]
     if not fields:
-        return pd.Series(pd.NA, index=df.index, dtype=object)
+        return _compact_null_series(df.index)
 
     candidates = [_normalise_coalesce_candidate_series(df[f]) for f in fields]
     if len(candidates) == 1:
@@ -1925,12 +2012,12 @@ def _coalesce_first_meaningful_for_mask(
 
     candidates = []
     for field in fields:
-        if field not in df.columns:
+        if field not in df.columns or _is_compact_null(df[field]):
             continue
-        norm = _normalise_coalesce_candidate_series(df[field])
-        candidates.append(norm.iloc[mask_array])
+        # Normalise only requested positions, not the entire input window.
+        candidates.append(_normalise_coalesce_candidate_series(df[field].iloc[mask_array]))
     if not candidates:
-        return pd.Series(pd.NA, index=out_index, dtype=object)
+        return _compact_null_series(out_index)
     if len(candidates) == 1:
         return pd.Series(candidates[0].to_numpy(copy=False), index=out_index, dtype=object)
 
@@ -1950,9 +2037,63 @@ def _coalesce_first_meaningful_for_mask(
     return result_series
 
 
+def _compact_null_series(index: pd.Index) -> pd.Series:
+    """Visible missing values without a dense per-row object-pointer buffer."""
+    return pd.Series(pa.nulls(len(index)), index=index, dtype=pd.ArrowDtype(pa.null()))
+
+
+def _is_compact_null(values: pd.Series) -> bool:
+    return isinstance(values.dtype, pd.ArrowDtype) and pa.types.is_null(values.dtype.pyarrow_dtype)
+
+
+def _prepare_arrow_text_columns(df: pd.DataFrame) -> None:
+    """Convert genuine text once after enrichment, without stringifying evidence.
+
+    Mixed/numeric/nested columns and zero-buffer null placeholders stay intact.
+    Explicit storage avoids dependence on pandas' default inference; existing
+    Arrow arrays are retained. No frame copy or cross-frame cache is needed.
+    """
+    with _detached_sparse_state(df):
+        for column in df.columns:
+            values = df[column]
+            dtype = values.dtype
+            if isinstance(dtype, pd.StringDtype):
+                if dtype.storage == "pyarrow":
+                    continue
+                target = pd.StringDtype(storage="pyarrow", na_value=dtype.na_value)
+            elif pd.api.types.is_object_dtype(dtype):
+                # Inference is over all non-null values, not a sample that could
+                # turn a late dictionary, byte string or number into text.
+                if pd.api.types.infer_dtype(values, skipna=True) not in {"string", "unicode"}:
+                    continue
+                target = pd.StringDtype(storage="pyarrow")
+            else:
+                continue
+            try:
+                converted = values.astype(target)
+            except (UnicodeEncodeError, pa.ArrowInvalid):
+                # Arrow cannot store malformed Unicode. This storage optimisation
+                # must neither discard records nor repair their evidence text.
+                logger.warning("Retaining original text storage for column %r: Arrow encoding unavailable", column)
+                continue
+            df[column] = converted
+
+
+def _materialise_null_column(df: pd.DataFrame, column: str) -> None:
+    """Allocate a writable object column only when its producer has values.
+
+    Whole-column assignments already replace the zero-buffer Arrow null array.
+    Positional/partial assignments need explicit promotion first. This changes
+    storage only: field presence, missing-value predicates and row IDs remain.
+    """
+    with _detached_sparse_state(df):
+        if column in df.columns and _is_compact_null(df[column]):
+            df[column] = pd.Series(None, index=df.index, dtype=object)
+
+
 def _ensure_object_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
     """
-    Add missing placeholder columns in one batch to avoid DataFrame fragmentation.
+    Add zero-buffer missing columns, materialising values at their producer.
     """
     missing: List[str] = []
     seen: Set[str] = set()
@@ -1964,7 +2105,7 @@ def _ensure_object_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataF
     if not missing:
         return df
 
-    additions = pd.DataFrame(index=df.index, columns=missing, dtype=object)
+    additions = pd.DataFrame({col: _compact_null_series(df.index) for col in missing}, index=df.index)
     out = pd.concat([df, additions], axis=1, copy=False)
     if df.attrs:
         out.attrs = dict(df.attrs)
@@ -2489,6 +2630,12 @@ def _collect_emitted_signals_from_rules(
                 )
                 if category_name:
                     emitted.add(str(category_name).strip().lower())
+            behaviour = detector.get("behaviour") or {}
+            if isinstance(behaviour, dict) and (not enabled_only or behaviour.get("enabled") is True):
+                for capability in (behaviour.get("capabilities") or {}).values():
+                    emission = (capability.get("emission") or {}) if isinstance(capability, dict) else {}
+                    if emission.get("name"):
+                        emitted.add(str(emission["name"]).strip().lower())
         elif detector.get("executor") == "yara_classifier":
             strength_emission = ((detector.get("strength") or {}).get("emission") or {})
             strength_name = (
@@ -2559,7 +2706,7 @@ def _collect_emitted_signals_from_rules(
         elif detector.get("executor") in {
             "canonical_authentication", "execution_context_classifier",
             "file_lifecycle", "ordered_row_rules", "geographic_continuity",
-            "impossible_travel", "ip_scope_continuity",
+            "impossible_travel", "ip_scope_continuity", "qualified_artifact_command",
         }:
             for emission_cfg in (detector.get("emissions") or {}).values():
                 name = (
@@ -2600,6 +2747,8 @@ def _collect_profiling_output_signals(rules_cfg: dict) -> set[str]:
 def _collect_temporal_input_signals(rules_cfg: dict) -> set[str]:
     needed: set[str] = set()
     for tr in (rules_cfg or {}).get("temporal_rules", []) or []:
+        for sig in ((tr or {}).get("condition", {}) or {}).get("signals_any", []) or []:
+            needed.add(str(sig).strip().lower())
         for step in ((tr or {}).get("sequence", []) or []):
             sig = (step or {}).get("signal")
             if sig:
@@ -2732,6 +2881,42 @@ class NormalisationSpec:
     fields: Tuple[str, ...] = ()
     pattern: Optional[re.Pattern[str]] = None
     group: int = 0
+    key_field: Optional[str] = None
+    value_field: Optional[str] = None
+    selector_field: Optional[str] = None
+    selector_pattern: Optional[re.Pattern[str]] = None
+    overwrite_existing: bool = False
+    stage: str = "pre"
+    case_sensitive: bool = False
+    separator: str = ""
+    bitmask: int = 0
+    number_format: str = "legacy_decimal_hex"
+    base_field: Optional[str] = None
+    cases: Tuple[Tuple[str, re.Pattern[str], Tuple[str, ...]], ...] = ()
+
+
+@dataclass(frozen=True)
+class QualifiedArtifactCommandPolicy:
+    """Bounded, scalar-only file/reference correlation; admission is YAML-owned."""
+    enabled: bool
+    fields: Dict[str, str]
+    file_parser: re.Pattern[str]
+    file_type: re.Pattern[str]
+    marker_pattern: re.Pattern[str]
+    references: Tuple[Tuple[str, re.Pattern[str]], ...]
+    source_signals: frozenset[str]
+    target_signals: frozenset[str]
+    lookback: timedelta
+    unlabelled_file_scope: str
+    emissions_by_semantic: Dict[str, DetectorEmissionPolicy]
+
+    @property
+    def emissions(self):
+        return tuple(self.emissions_by_semantic.values())
+
+    @property
+    def input_signals(self):
+        return self.source_signals | self.target_signals
 
 
 @dataclass(frozen=True)
@@ -2931,6 +3116,7 @@ class DetectorEmissionPolicy:
     rule_id: str
     description: str
     confidence: str
+    attack_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -2953,6 +3139,7 @@ class ClamAVClassifierPolicy:
     categories: Dict[str, ClamAVCategoryPolicy]
     evidence_type: str
     policy_digest: str
+    behaviour: Optional[_av_behaviour.BehaviourPolicy] = None
 
     @property
     def category_order(self) -> Tuple[str, ...]:
@@ -2967,6 +3154,7 @@ class ClamAVClassifierPolicy:
         return (
             self.generic_emission,
             *(category.emission for category in self.categories.values()),
+            *(self.behaviour.emissions if self.behaviour is not None else ()),
         )
 
 
@@ -3043,6 +3231,7 @@ class YaraClassifierPolicy:
     referenced_file_gate: YaraReferencedFileGatePolicy
     evidence_type: str
     policy_digest: str
+    metadata_on_incomplete_rule: str = "defaults"
 
     @property
     def category_order(self) -> Tuple[str, ...]:
@@ -3283,6 +3472,7 @@ class WebRequestClassifierPolicy:
     exploit_emission_id: str
     exploit_branches: Tuple[WebExploitBranchPolicy, ...]
     policy_digest: str
+    allowed_url_schemes: Optional[Tuple[str, ...]] = None
 
     @property
     def emissions(self) -> Tuple[DetectorEmissionPolicy, ...]:
@@ -3382,6 +3572,48 @@ class WebMappingBranchPolicy:
     exclude: Optional[WebMappingConditionPolicy]
     output_ids: Tuple[str, ...]
     evidence: Tuple[str, ...]
+
+
+def _prepare_web_mapping_condition(condition: WebMappingConditionPolicy):
+    """Bind policy constants once, without changing predicate evaluation order."""
+    match_all = condition.match == "all"
+    indicators_any = condition.indicators_any
+    prefixes = condition.indicator_prefixes_any
+    signals_any = condition.signals_any
+    threshold = float(condition.minimum_signal_value_exclusive) if signals_any else 0.0
+    categories_any = condition.categories_any
+    methods_any = condition.methods_any
+    outcomes_any = condition.upload_outcomes_any
+    scopes_any = condition.source_ip_scopes_any
+
+    def matches(indicators, categories, method, outcome, scope, signals) -> bool:
+        result = match_all
+        # Evaluate each configured group even when the result is already known,
+        # as before; malformed signal values must not be silently masked.
+        if indicators_any:
+            hit = bool(indicators & indicators_any)
+            result = (result and hit) if match_all else (result or hit)
+        if prefixes:
+            hit = any(indicator.startswith(prefix) for indicator in indicators for prefix in prefixes)
+            result = (result and hit) if match_all else (result or hit)
+        if signals_any:
+            hit = any(float(signals.get(name, 0.0) or 0.0) > threshold for name in signals_any)
+            result = (result and hit) if match_all else (result or hit)
+        if categories_any:
+            hit = bool(categories & categories_any)
+            result = (result and hit) if match_all else (result or hit)
+        if methods_any:
+            hit = method in methods_any
+            result = (result and hit) if match_all else (result or hit)
+        if outcomes_any:
+            hit = outcome in outcomes_any
+            result = (result and hit) if match_all else (result or hit)
+        if scopes_any:
+            hit = scope in scopes_any
+            result = (result and hit) if match_all else (result or hit)
+        return result
+
+    return matches
 
 
 @dataclass(frozen=True)
@@ -3723,8 +3955,11 @@ class FileLifecycleRowDecisionPolicy:
     match: str
     timestamp_kinds: frozenset[str]
     derived_predicates: frozenset[str]
+    excluded_parser_prefixes: Tuple[str, ...] = ()
 
-    def matches(self, timestamp_kind: str, predicates: Dict[str, bool]) -> bool:
+    def matches(self, timestamp_kind: str, predicates: Dict[str, bool], parser: str = "") -> bool:
+        if self.excluded_parser_prefixes and parser.lower().startswith(self.excluded_parser_prefixes):
+            return False
         conditions: List[bool] = []
         if self.timestamp_kinds:
             conditions.append(timestamp_kind in self.timestamp_kinds)
@@ -4339,7 +4574,7 @@ def _detector_definition_required_fields(
     if not bool(policy.enabled):
         return set()
     if definition.executor == "clamav_classifier":
-        return {"av_hit", "av_signature", "filename"}
+        return {"av_hit", "av_signature", "filename", "sha256_hash"}
     if definition.executor == "yara_classifier":
         return {"yara_match"}
     if definition.executor == "web_request_classifier":
@@ -4471,6 +4706,8 @@ def _detector_definition_required_fields(
             *policy.command_fields,
             policy.message_field,
         }
+    if definition.executor == "qualified_artifact_command":
+        return set(policy.fields.values())
     if definition.executor == "signal_sequence":
         fields = _policy_evidence_fields(policy.evidence)
         if policy.key_scope == "field" and policy.key_field:
@@ -4670,20 +4907,78 @@ def _parse_normalisation_policy(raw: Any, path: str) -> Tuple[NormalisationSpec,
     for index, raw_spec in enumerate(raw):
         spec_path = f"{path}[{index}]"
         cfg = _policy_mapping(raw_spec, spec_path)
+        # Stage only controls generic field evaluation order. Vocabulary and
+        # linkage keys remain owned by the declarative policy.
+        stage = _policy_enum(cfg.get("stage", "pre"), f"{spec_path}.stage", {"pre", "post_web"})
+        cfg = {key: value for key, value in cfg.items() if key != "stage"}
         method = _policy_enum(
             cfg.get("method"),
             f"{spec_path}.method",
-            {"coalesce", "regex_first", "ipv4_first", "file_extension"},
+            {"coalesce", "select_coalesce", "regex_first", "ipv4_first", "file_extension", "identity_lookup", "canonical_web_path", "join_fields", "bitmask_any", "path_separators", "casefold", "posix_path_resolve"},
         )
         name = _policy_string(cfg.get("name"), f"{spec_path}.name")
         if name in seen_names:
             raise ValueError(f"{spec_path}.name: duplicate output field {name!r}")
         seen_names.add(name)
 
+        if method == "select_coalesce":
+            _policy_keys(cfg, spec_path, required={"name", "method", "cases", "default_fields"})
+            if not isinstance(cfg["cases"], list) or not cfg["cases"]:
+                raise ValueError(f"{spec_path}.cases: expected a non-empty list")
+            cases = []
+            for case_index, raw_case in enumerate(cfg["cases"]):
+                case_path = f"{spec_path}.cases[{case_index}]"
+                case = _policy_mapping(raw_case, case_path)
+                _policy_keys(case, case_path, required={"field", "pattern", "fields"})
+                cases.append((_policy_string(case["field"], f"{case_path}.field"),
+                    _compile_canonicalisation_regex(case["pattern"], f"{case_path}.pattern", 0),
+                    _policy_string_list_or_empty(case["fields"], f"{case_path}.fields")))
+            parsed.append(NormalisationSpec(name=name, method=method, stage=stage, cases=tuple(cases),
+                fields=_policy_string_list_or_empty(cfg["default_fields"], f"{spec_path}.default_fields")))
+            continue
+
+        if method == "posix_path_resolve":
+            _policy_keys(cfg, spec_path, required={"name", "method", "from", "base_field"})
+            parsed.append(NormalisationSpec(name=name, method=method, stage=stage,
+                source=_policy_string(cfg["from"], f"{spec_path}.from"),
+                base_field=_policy_string(cfg["base_field"], f"{spec_path}.base_field")))
+            continue
+
+        if method == "join_fields":
+            _policy_keys(cfg, spec_path, required={"name", "method", "fields", "separator"})
+            parsed.append(NormalisationSpec(name=name, method=method, stage=stage,
+                fields=_policy_string_list(cfg["fields"], f"{spec_path}.fields"),
+                separator=_policy_string(cfg["separator"], f"{spec_path}.separator")))
+            continue
+        if method == "bitmask_any":
+            _policy_keys(cfg, spec_path, required={"name", "method", "from", "mask"}, optional={"number_format"})
+            mask = _policy_nonnegative_int(cfg["mask"], f"{spec_path}.mask")
+            if not mask:
+                raise ValueError(f"{spec_path}.mask: expected non-zero bit mask")
+            parsed.append(NormalisationSpec(name=name, method=method, stage=stage,
+                source=_policy_string(cfg["from"], f"{spec_path}.from"), bitmask=mask,
+                number_format=_policy_enum(cfg.get("number_format", "legacy_decimal_hex"),
+                    f"{spec_path}.number_format", {"legacy_decimal_hex", "strict_integer"})))
+            continue
+
+        if method == "identity_lookup":
+            _policy_keys(cfg, spec_path, required={"name", "method", "from", "key_field", "value_field"}, optional={"case_sensitive"})
+            parsed.append(NormalisationSpec(
+                name=name, method=method, stage=stage,
+                case_sensitive=_policy_bool(cfg.get("case_sensitive", False), f"{spec_path}.case_sensitive"),
+                source=_policy_string(cfg["from"], f"{spec_path}.from"),
+                key_field=_policy_string(cfg["key_field"], f"{spec_path}.key_field"),
+                value_field=_policy_string(cfg["value_field"], f"{spec_path}.value_field"),
+            ))
+            continue
+
         if method == "coalesce":
-            _policy_keys(cfg, spec_path, required={"name", "method", "fields"})
+            _policy_keys(cfg, spec_path, required={"name", "method", "fields"}, optional={"overwrite_existing"})
             fields = _policy_string_list(cfg["fields"], f"{spec_path}.fields")
-            parsed.append(NormalisationSpec(name=name, method=method, fields=fields))
+            overwrite = cfg.get("overwrite_existing", False)
+            if not isinstance(overwrite, bool):
+                raise ValueError(f"{spec_path}.overwrite_existing: expected a boolean")
+            parsed.append(NormalisationSpec(name=name, method=method, fields=fields, overwrite_existing=overwrite, stage=stage))
             continue
 
         if method == "regex_first":
@@ -4691,8 +4986,17 @@ def _parse_normalisation_policy(raw: Any, path: str) -> Tuple[NormalisationSpec,
                 cfg,
                 spec_path,
                 required={"name", "method", "from", "pattern", "group"},
-                optional={"flags"},
+                optional={"flags", "selector"},
             )
+            selector_field = None
+            selector_pattern = None
+            if "selector" in cfg:
+                selector = _policy_mapping(cfg["selector"], f"{spec_path}.selector")
+                _policy_keys(selector, f"{spec_path}.selector", required={"field", "pattern"})
+                selector_field = _policy_string(selector["field"], f"{spec_path}.selector.field")
+                selector_pattern = _compile_canonicalisation_regex(
+                    selector["pattern"], f"{spec_path}.selector.pattern", 0
+                )
             flags = (
                 _policy_nonnegative_int(cfg["flags"], f"{spec_path}.flags")
                 if "flags" in cfg
@@ -4711,9 +5015,12 @@ def _parse_normalisation_policy(raw: Any, path: str) -> Tuple[NormalisationSpec,
                 NormalisationSpec(
                     name=name,
                     method=method,
+                    stage=stage,
                     source=_policy_string(cfg["from"], f"{spec_path}.from"),
                     pattern=compiled,
                     group=group,
+                    selector_field=selector_field,
+                    selector_pattern=selector_pattern,
                 )
             )
             continue
@@ -4723,6 +5030,7 @@ def _parse_normalisation_policy(raw: Any, path: str) -> Tuple[NormalisationSpec,
             NormalisationSpec(
                 name=name,
                 method=method,
+                stage=stage,
                 source=_policy_string(cfg["from"], f"{spec_path}.from"),
             )
         )
@@ -5457,11 +5765,12 @@ def _parse_policy_emission(
     required = {"name", "value", "rule_id"}
     if include_explanation:
         required.update({"description", "confidence"})
-    _policy_keys(cfg, path, required=required)
+    _policy_keys(cfg, path, required=required, optional=_attack_metadata.ANNOTATION_KEYS)
     return DetectorEmissionPolicy(
         name=_policy_signal_name(cfg["name"], f"{path}.name"),
         value=_policy_positive_number(cfg["value"], f"{path}.value"),
         rule_id=_policy_string(cfg["rule_id"], f"{path}.rule_id"),
+        attack_ref=_attack_metadata.parse_annotation(cfg, path),
         description=(
             _policy_string(cfg["description"], f"{path}.description")
             if include_explanation
@@ -5488,6 +5797,7 @@ def _parse_clamav_classifier_policy(
             "default_category", "category_tokens", "family_overrides",
             "generic", "categories",
         },
+        optional={"behaviour"},
     )
     _policy_enum(cfg["stage"], f"{path}.stage", {"atomic"})
     _policy_enum(cfg["executor"], f"{path}.executor", {"clamav_classifier"})
@@ -5663,6 +5973,12 @@ def _parse_clamav_classifier_policy(
         categories=categories,
         evidence_type=evidence_type,
         policy_digest=policy_digest,
+        behaviour=(
+            _av_behaviour.parse_policy(
+                cfg["behaviour"],
+                lambda raw, path: _parse_policy_emission(raw, path, include_explanation=True),
+            ) if "behaviour" in cfg else None
+        ),
     )
 
 
@@ -5744,6 +6060,11 @@ def _parse_yara_classifier_policy(
             "path", "on_missing", "on_parse_error", "defaults",
             "unindexed_rule",
         },
+        optional={"on_incomplete_rule"},
+    )
+    on_incomplete_rule = _policy_enum(
+        metadata_cfg.get("on_incomplete_rule", "defaults"),
+        f"{metadata_path}.on_incomplete_rule", {"defaults", "fail"},
     )
     configured_metadata_path = _policy_string(
         metadata_cfg["path"],
@@ -6120,6 +6441,7 @@ def _parse_yara_classifier_policy(
         metadata_path=configured_metadata_path,
         metadata_on_missing=on_missing,
         metadata_on_parse_error=on_parse_error,
+        metadata_on_incomplete_rule=on_incomplete_rule,
         default_score=default_score,
         default_quality=default_quality,
         unindexed_score=unindexed_score,
@@ -6319,7 +6641,11 @@ def _parse_web_request_classifier_policy(
 
     matching_path = f"{path}.matching"
     matching_cfg = _policy_mapping(cfg["matching"], matching_path)
-    _policy_keys(matching_cfg, matching_path, required={"web_log_parser_tokens"})
+    _policy_keys(matching_cfg, matching_path, required={"web_log_parser_tokens"}, optional={"allowed_url_schemes"})
+    allowed_url_schemes = (
+        _policy_string_list(matching_cfg["allowed_url_schemes"], f"{matching_path}.allowed_url_schemes", lower=True)
+        if "allowed_url_schemes" in matching_cfg else None
+    )
     web_log_parser_tokens = _policy_string_list_or_empty(
         matching_cfg["web_log_parser_tokens"],
         f"{matching_path}.web_log_parser_tokens",
@@ -7299,6 +7625,7 @@ def _parse_web_request_classifier_policy(
         inputs=input_policy,
         outputs=output_policy,
         web_log_parser_tokens=web_log_parser_tokens,
+        allowed_url_schemes=allowed_url_schemes,
         indicators=indicator_policy,
         upload=upload_policy,
         outcomes=outcomes,
@@ -8331,6 +8658,43 @@ def _parse_named_policy_emissions(
         )
         for semantic in semantic_names
     }
+
+
+def _parse_qualified_artifact_command_policy(raw: Any, path: str) -> QualifiedArtifactCommandPolicy:
+    cfg = _policy_mapping(raw, path)
+    _policy_keys(cfg, path, required={"stage", "executor", "enabled", "fields", "file_parser",
+        "file_type", "marker_pattern", "references", "source_signals", "target_signals",
+        "lookback", "emissions", "unlabelled_file_scope"})
+    _policy_enum(cfg["stage"], f"{path}.stage", {"contextual"})
+    _policy_enum(cfg["executor"], f"{path}.executor", {"qualified_artifact_command"})
+    fields = _policy_mapping(cfg["fields"], f"{path}.fields")
+    _policy_keys(fields, f"{path}.fields", required={"path", "parser", "type", "scope", "command", "row_id", "hash"})
+    fields = {k: _policy_string(v, f"{path}.fields.{k}") for k, v in fields.items()}
+    marker = _compile_canonicalisation_regex(cfg["marker_pattern"], f"{path}.marker_pattern")
+    if set(marker.groupindex) != {"root"}:
+        raise ValueError(f"{path}.marker_pattern: requires named root capture only")
+    refs = _policy_mapping(cfg["references"], f"{path}.references")
+    if not refs:
+        raise ValueError(f"{path}.references: expected at least one reference pattern")
+    compiled = []
+    for name, value in refs.items():
+        pattern = _compile_canonicalisation_regex(value, f"{path}.references.{name}")
+        if not {"target"} <= set(pattern.groupindex) <= {"target", "directory"}:
+            raise ValueError(f"{path}.references.{name}: requires target and optional directory captures")
+        compiled.append((_policy_signal_name(name, f"{path}.references key"), pattern))
+    lookback = parse_lookback(_policy_string(cfg["lookback"], f"{path}.lookback"))
+    if lookback <= timedelta(0):
+        raise ValueError(f"{path}.lookback: expected positive duration")
+    return QualifiedArtifactCommandPolicy(
+        enabled=_policy_bool(cfg["enabled"], f"{path}.enabled"), fields=fields,
+        file_parser=_compile_canonicalisation_regex(cfg["file_parser"], f"{path}.file_parser"),
+        file_type=_compile_canonicalisation_regex(cfg["file_type"], f"{path}.file_type"),
+        marker_pattern=marker, references=tuple(compiled), lookback=lookback,
+        unlabelled_file_scope=_policy_enum(cfg["unlabelled_file_scope"], f"{path}.unlabelled_file_scope", {"isolated", "current_dataset"}),
+        source_signals=frozenset(_policy_signal_list(cfg["source_signals"], f"{path}.source_signals")),
+        target_signals=frozenset(_policy_signal_list(cfg["target_signals"], f"{path}.target_signals")),
+        emissions_by_semantic=_parse_named_policy_emissions(cfg["emissions"], f"{path}.emissions", ("exact_path", "repository")),
+    )
 
 
 def _parse_boolean_fact_decision(
@@ -9609,10 +9973,12 @@ def _parse_file_lifecycle_policy(
         facts: List[str] = []
         for index, item in enumerate(value):
             fact = _policy_signal_name(item, f"{value_path}[{index}]")
-            if fact not in base_row_facts:
+            # Only previously declared derived facts are eligible: declaration
+            # order is a bounded DAG, with no forward references or cycles.
+            if fact not in base_row_facts and fact not in derived_predicates:
                 raise ValueError(
-                    f"{value_path}[{index}]: unknown base fact {fact!r}; "
-                    "expected " + ", ".join(sorted(base_row_facts))
+                    f"{value_path}[{index}]: unknown base or prior derived fact {fact!r}; "
+                    "expected " + ", ".join(sorted(base_row_facts | set(derived_predicates)))
                 )
             if fact in facts:
                 raise ValueError(
@@ -9711,6 +10077,7 @@ def _parse_file_lifecycle_policy(
             decision_cfg,
             decision_path,
             required={"match", "timestamp_kinds", "derived_predicates"},
+            optional={"excluded_parser_prefixes"},
         )
         decision_kinds = lifecycle_kind_set(
             decision_cfg["timestamp_kinds"],
@@ -9739,6 +10106,9 @@ def _parse_file_lifecycle_policy(
             ),
             timestamp_kinds=decision_kinds,
             derived_predicates=decision_predicates,
+            excluded_parser_prefixes=_policy_string_list_or_empty(
+                decision_cfg.get("excluded_parser_prefixes", []),
+                f"{decision_path}.excluded_parser_prefixes", lower=True),
         )
 
     windows_path = f"{conditions_path}.windows"
@@ -11124,7 +11494,7 @@ def _parse_impossible_travel_policy(
     rejected_observation_update = _policy_enum(
         state["rejected_observation_update"],
         f"{state_path}.rejected_observation_update",
-        {"retain_reference", "update_reference"},
+        {"retain_reference", "update_reference", "update_if_nearby"},
     )
     qualifying_comparison_update = _policy_enum(
         state["qualifying_comparison_update"],
@@ -12365,6 +12735,9 @@ def _parse_detector_policy(
                 raw_detector, detector_path
             )
             stage = "temporal"
+        elif executor == "qualified_artifact_command":
+            payload = _parse_qualified_artifact_command_policy(raw_detector, detector_path)
+            stage = "contextual"
         elif executor == "signal_projection":
             payload = _parse_signal_projection_policy(
                 raw_detector, detector_path
@@ -12383,7 +12756,7 @@ def _parse_detector_policy(
         else:
             raise ValueError(
                 f"{detector_path}.executor: additional detectors must use one of "
-                "signal_gate, signal_sequence, signal_projection"
+                "signal_gate, signal_sequence, signal_projection, qualified_artifact_command"
             )
         definitions.append(
             DetectorDefinition(
@@ -12486,6 +12859,8 @@ def _parse_detector_policy(
     }
 
     def policy_phase(definition: DetectorDefinition) -> int:
+        if definition.executor == "qualified_artifact_command":
+            return 38
         if definition.executor in {
             "clamav_classifier", "yara_classifier", "web_request_classifier",
             "canonical_authentication", "execution_context_classifier",
@@ -12604,6 +12979,8 @@ def _parse_detector_policy(
                     )
         elif definition.executor == "execution_context_classifier":
             inputs = frozenset()
+        elif definition.executor == "qualified_artifact_command":
+            inputs = definition.payload.input_signals
         elif definition.executor == "file_lifecycle":
             inputs = frozenset()
         elif definition.executor == "mft_timestomping":
@@ -12900,6 +13277,7 @@ class Rule:
     emit_signals: List[EmitSignal]
     evidence_fields: List[str]
     confidence: str
+    attack_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -12927,6 +13305,10 @@ class TemporalRule:
     condition_reference_selection: Optional[str]
     emit_signals: List[EmitSignal]
     confidence: str
+    include_supporting_rows: bool = False
+    condition_signals_any: Tuple[str, ...] = ()
+    reset_signals: Tuple[str, ...] = ()
+    attack_ref: str = ""
 
 
 def _parse_schema_aliases(raw: Any) -> Dict[str, Tuple[str, ...]]:
@@ -13750,10 +14132,57 @@ def _best_effort_file_path_vectorised(
     return pd.Series(result, index=df.index, dtype=object)
 
 
+@dataclass(slots=True)
+class _WebRequestContext:
+    """Compact, already-normalised state retained between classifier passes."""
+
+    row_i: int
+    group_key: Optional[Tuple[str, ...]]
+    method: str
+    http_path: str
+    endpoint: str
+    indicators: Tuple[str, ...]
+    attack_indicators: Tuple[str, ...]
+    status_code: Optional[int]
+    response_bytes: Optional[int]
+    successful_response: bool
+    timestamp_tick: int
+    upload_name: str
+    upload_names: str
+    upload_outcome: str
+
+
+@contextmanager
+def _detached_sparse_state(df: "pd.DataFrame"):
+    """Keep explicitly passed sparse maps out of pandas' metadata deepcopy path.
+
+    This changes no columns and copies no state. Nested scopes are safe, and the
+    original object is restored even on failure. Other attrs (notably profiling
+    and provenance) remain available to the detector. Use only where sparse maps
+    are passed explicitly, not where an API reads or replaces its sparse attrs.
+    """
+    present = "chronosift_sparse" in df.attrs
+    sparse = df.attrs.pop("chronosift_sparse", None)
+    try:
+        yield
+    finally:
+        if present:
+            df.attrs["chronosift_sparse"] = sparse
+
+
+def _without_sparse_state_attrs(method):
+    """Scope sparse metadata detachment to an in-place detector/stage call."""
+    @wraps(method)
+    def wrapped(self, df, *args, **kwargs):
+        with _detached_sparse_state(df):
+            return method(self, df, *args, **kwargs)
+    return wrapped
+
+
 def _column_values_or_none(df: "pd.DataFrame", column: str) -> np.ndarray:
-    if column in df.columns:
+    if column in df.columns and not _is_compact_null(df[column]):
         return df[column].to_numpy(copy=False)
-    return np.full(len(df), None, dtype=object)
+    return np.broadcast_to(np.array([None], dtype=object), (len(df),))
 
 
 def _normalised_text_array(
@@ -13763,8 +14192,8 @@ def _normalised_text_array(
     lower: bool = False,
 ) -> np.ndarray:
     """Return a stripped text array for a column, defaulting to empty strings."""
-    if column not in df.columns:
-        return np.full(len(df), "", dtype=object)
+    if column not in df.columns or _is_compact_null(df[column]):
+        return np.broadcast_to(np.array([""], dtype=object), (len(df),))
     s = df[column].astype("string").fillna("").str.strip()
     if lower:
         s = s.str.lower()
@@ -13899,6 +14328,16 @@ def _ip_scope(value: Any) -> Optional[str]:
     s = _safe_str(value).strip()
     if not s:
         return None
+    # Cache only bounded strings, never arbitrary/unhashable evidence objects
+    # or oversized invalid addresses. This is not GeoIP enrichment caching.
+    if len(s) > 128:
+        return _ip_scope_from_text.__wrapped__(s)
+    return _ip_scope_from_text(s)
+
+
+@lru_cache(maxsize=8192)
+def _ip_scope_from_text(s: str) -> Optional[str]:
+    """Pure, bounded address classification with the existing IP semantics."""
     try:
         ip = ipaddress.ip_address(s)
     except Exception:
@@ -14002,7 +14441,9 @@ def _load_hash_enrichment_frame(
     if cached is not None:
         return cached
 
-    enrich = pd.read_csv(csv_path, comment="#")
+    # VT transport JSON belongs in a unique-hash catalog, never in a dense
+    # event-column join. Ordinary AV/Luhn fields retain their existing API.
+    enrich = pd.read_csv(csv_path, comment="#", usecols=lambda name: not name.startswith("vt_"))
     if csv_hash_col not in enrich.columns:
         raise ValueError(f"Enrichment CSV missing required column: {csv_hash_col!r}")
 
@@ -14205,6 +14646,25 @@ def _duckdb_lookup_nsrl_hashes(parquet_path: str, hashes: Iterable[str]) -> pd.D
     return df
 
 
+def _continuity_working_state(committed, speculative, key, timestamp, commit_before):
+    """Keep carried state strictly before the next overlapping frame starts.
+
+    The suffix must still be evaluated for contextual evidence, but its state
+    is disposable. Fork only the first time an affected identity enters that
+    suffix: never copy a dataframe, all identities, or nested evidence maps.
+    Continuity observations/history metadata are replaced, not mutated; only
+    the outer entry and its directly mutable history dictionaries need copies.
+    """
+    if commit_before is None or timestamp < commit_before:
+        return committed
+    if key not in speculative and key in committed:
+        speculative[key] = {
+            name: dict(value) if isinstance(value, dict) else value
+            for name, value in committed[key].items()
+        }
+    return speculative
+
+
 class ChronoSiftEngine:
     _dataset_columns_cache: ClassVar[Dict[Tuple[str, Tuple[Any, ...]], List[str]]] = {}
     _duckdb_conn: ClassVar[Any] = None
@@ -14221,7 +14681,7 @@ class ChronoSiftEngine:
                 "engine_config", "profiling",
                 "geoip_enrichment", "rule_signal_merge", "detector_policy",
             },
-            optional={"engine_notes"},
+            optional={"engine_notes", "partition_execution", "attack_metadata"},
         )
         self.rules_doc = rules_doc
         self.weights_doc = weights_doc
@@ -14246,6 +14706,9 @@ class ChronoSiftEngine:
         self.temporal_rules = self._parse_temporal_rules(
             rules_doc["temporal_rules"]
         )
+        self.partition_execution_policy = self._parse_partition_execution_policy(
+            rules_doc.get("partition_execution")
+        )
         self.engine_cfg = _policy_mapping(
             rules_doc["engine_config"], "engine_config"
         )
@@ -14255,6 +14718,8 @@ class ChronoSiftEngine:
         self.detector_policy: DetectorPolicy = _parse_detector_policy(
             rules_doc, weights_doc
         )
+        self.attack_metadata = _attack_metadata.AttackMetadata(rules_doc)
+        self.attack_metadata.validate_typed_refs(self.detector_policy, self.rules, self.temporal_rules)
         _validate_geoip_enrichment_bindings(
             self.geoip_enrichment_policy,
             self.detector_policy,
@@ -14418,7 +14883,10 @@ class ChronoSiftEngine:
                 step.signal for step in temporal_rule.sequence
             } | {
                 need.signal for need in temporal_rule.cooccur_all
-            }
+            } | set(temporal_rule.condition_signals_any) | set(temporal_rule.reset_signals)
+            unknown_reset = sorted(set(temporal_rule.reset_signals) - declared_signals)
+            if unknown_reset:
+                raise ValueError(f"temporal_rules[{index}].reset_signals: no declared producer: " + ", ".join(unknown_reset))
             forbidden_inputs = sorted(
                 temporal_inputs & self.temporal_ineligible_signals
             )
@@ -14467,6 +14935,12 @@ class ChronoSiftEngine:
 
         # Required columns for stable evaluation across datasets
         self.required_fields: Set[str] = self._collect_required_fields()
+        self._av_behaviour_catalog: Dict[str, Any] = {}
+        behaviour = self.detector_policy.clamav_classification.behaviour
+        if behaviour is not None and behaviour.enabled:
+            missing = {emission.name for emission in behaviour.emissions} - self.weights.keys()
+            if missing:
+                raise ValueError("AV behaviour emissions require explicit YAML weights: " + ", ".join(sorted(missing)))
 
         # YARA Forge metadata index — maps rule names to forensic categories
         # and quality scores. The authoritative policy owns the resource path,
@@ -14521,6 +14995,8 @@ class ChronoSiftEngine:
         metadata = self.yara_metadata_index.get(rule_name)
         if metadata is not None:
             return metadata
+        if policy.metadata_on_incomplete_rule == "fail":
+            raise ValueError(f"YARA match {rule_name!r} has no indexed score/quality metadata; check extraction corpus provenance")
         use_name_classifier = (
             self._yara_metadata_available is False
             or policy.unindexed_rule == "name_only"
@@ -14687,10 +15163,21 @@ class ChronoSiftEngine:
         for row_i in candidate_rows:
             request = request_text[row_i]
             url = url_text[row_i]
+            if web_policy.allowed_url_schemes is not None:
+                outer = re.match(r"^([a-z][a-z0-9+.-]*):", url, re.I)
+                if outer and outer.group(1).casefold() not in web_policy.allowed_url_schemes and not _HTTP_REQUEST_LINE_RE.search(request):
+                    continue
             semantics = _extract_http_request_semantics(message_vals[row_i], request, url)
             request_target = _safe_str(semantics.get("path")).strip()
             if not request_target:
                 continue
+            if web_policy.allowed_url_schemes is not None:
+                # A local URI is not an HTTP request. Only inspect the outer
+                # scheme: file:// inside an HTTP query remains attack evidence.
+                outer = re.match(r"^([a-z][a-z0-9+.-]*):", request_target, re.I)
+                scheme = outer.group(1).casefold() if outer else ""
+                if scheme and scheme not in web_policy.allowed_url_schemes:
+                    continue
             is_web_event[row_i] = True
             method = _safe_str(semantics.get("method")).strip().upper()
             endpoint = _canonical_web_request_path(request_target)
@@ -15009,7 +15496,7 @@ class ChronoSiftEngine:
                 out[col] = matched_col.array
         return out
 
-    def _atomic_required_columns(self) -> List[str]:
+    def _atomic_required_columns(self, include_rule_evidence: bool = True) -> List[str]:
         """
         Return the minimal column subset needed for the atomic pass.
         This includes:
@@ -15021,7 +15508,7 @@ class ChronoSiftEngine:
         # This method is part of the parquet/DuckDB optimisation contract. Any
         # new field added to atomic logic should be reflected here so projected
         # reads stay minimal instead of silently widening to full-row loads.
-        cols: Set[str] = set(self.required_fields)
+        cols: Set[str] = set(self.required_fields if include_rule_evidence else self._collect_required_fields(include_rule_evidence=False))
 
         # Core enrichment and injection inputs
         cols.update({
@@ -15189,6 +15676,7 @@ class ChronoSiftEngine:
             selected = np.flatnonzero(merge_mask)
             fill_pos = target_pos[selected]
             fill_values = target_values.iloc[selected].to_numpy(copy=False)
+            _materialise_null_column(out, col)
             col_loc = out.columns.get_loc(col)
             out.iloc[fill_pos, col_loc] = fill_values
 
@@ -15246,6 +15734,7 @@ class ChronoSiftEngine:
             selected = np.flatnonzero(merge_mask)
             fill_pos = target_pos[selected]
             fill_values = target_values.iloc[selected].to_numpy(copy=False)
+            _materialise_null_column(out, col)
             col_loc = out.columns.get_loc(col)
             out.iloc[fill_pos, col_loc] = fill_values
 
@@ -15261,11 +15750,17 @@ class ChronoSiftEngine:
             if not canonical:
                 continue
             alias_fields = [a for a in aliases if a and a in out.columns]
+            alias_fields = [a for a in alias_fields if not _is_compact_null(out[a])]
             if canonical not in out.columns and not alias_fields:
                 continue
             if canonical not in out.columns:
                 out = _ensure_object_columns(out, [canonical])
                 out[canonical] = _coalesce_first_meaningful(out, alias_fields)
+                continue
+
+            if _is_compact_null(out[canonical]):
+                if alias_fields:
+                    out[canonical] = _coalesce_first_meaningful(out, alias_fields)
                 continue
 
             if not (
@@ -15305,6 +15800,9 @@ class ChronoSiftEngine:
             if not bool(missing.any()) or not source_fields:
                 continue
             filled = _coalesce_first_meaningful_for_mask(out, source_fields, missing)
+            if _is_compact_null(filled):
+                continue
+            _materialise_null_column(out, canonical)
             out.loc[missing, canonical] = filled.to_numpy(copy=False)
 
         normalised: Dict[str, pd.Series] = {}
@@ -15600,6 +16098,7 @@ class ChronoSiftEngine:
                 expl = self._sparse_explain_list(explain_map, row_i)
                 for emission, sources in added:
                     expl.append({
+                        **_attack_metadata.reference_fields(emission.attack_ref),
                         "rule_id": emission.rule_id,
                         "description": emission.description,
                         "confidence": emission.confidence,
@@ -15775,6 +16274,7 @@ class ChronoSiftEngine:
                     ),
                 }
                 expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": emission.description,
                     "confidence": emission.confidence,
@@ -16033,6 +16533,7 @@ class ChronoSiftEngine:
                 ):
                     continue
                 explanations.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "detector_rule_id": rule.rule_id,
                     "description": rule.description,
@@ -16243,6 +16744,7 @@ class ChronoSiftEngine:
                         "window_seconds": int(window.total_seconds()),
                     }
                     self._sparse_explain_list(explain_map, row_i).append({
+                        **_attack_metadata.reference_fields(emission.attack_ref),
                         "rule_id": emission.rule_id,
                         "description": emission.description,
                         "confidence": emission.confidence,
@@ -16404,6 +16906,7 @@ class ChronoSiftEngine:
         nsrl_parquet_path: Optional[str] = None,
         nsrl_cache_df: Optional[pd.DataFrame] = None,
         profile_manifest: Optional[Dict[str, Any]] = None,
+        evidence_source: Optional["_ParquetEvidenceSource"] = None,
     ) -> Tuple[pd.DataFrame, Dict[int, Dict[str, Any]], Dict[int, List[Dict[str, Any]]]]:
         # Atomic-stage ordering matters: normalise first, then enrichment, then
         # structured IP recovery, then profiling, then rule evaluation. Later
@@ -16417,6 +16920,10 @@ class ChronoSiftEngine:
         out = self._apply_normalisation(out)
         out = self._derive_pivot_destination_fields(out)
 
+        self._av_behaviour_catalog = _av_behaviour.load_catalog(
+            av_csv_path, self.detector_policy.clamav_classification.behaviour
+            if self.detector_policy.clamav_classification.enabled else None
+        )
         if av_csv_path:
             out = self._apply_hash_enrichment_csv(out, av_csv_path, hash_col="sha256_hash", csv_hash_col="sha256")
         if luhn_csv_path:
@@ -16438,6 +16945,8 @@ class ChronoSiftEngine:
         # engine-owned allowlist of output names.
         out = self._apply_normalisation(out)
         self._materialise_normalised_web_features(out)
+        if any(spec.stage == "post_web" for spec in self.normalisation):
+            out = self._apply_normalisation(out, stage="post_web")
 
         if "yara_match" not in out.columns:
             out["yara_match"] = None
@@ -16458,12 +16967,23 @@ class ChronoSiftEngine:
                 out = out.drop(columns=overlap)
             out = out.join(geo_df, on=ip_recovery_field)
 
+        # All normalisation/enrichment writes are complete. Keep genuine text in
+        # Arrow storage for reuse by the existing atomic/contextual text helpers.
+        _prepare_arrow_text_columns(out)
+
         if apply_profiling and self.profiling_policy.enabled:
             out = self._apply_hour_of_week_profiling(out, profile_manifest=profile_manifest)
 
         try:
-            signal_map, explain_map = self._eval_atomic_rules_sparse(out)
+            if evidence_source is None:
+                signal_map, explain_map = self._eval_atomic_rules_sparse(out)
+            else:
+                signal_map, explain_map = self._eval_atomic_rules_sparse(out, evidence_source=evidence_source)
         except Exception:
+            if evidence_source is not None:
+                # A legacy fallback cannot see deferred fields. Fail explicitly
+                # rather than silently dropping evidence after an I/O failure.
+                raise
             logger.exception("Atomic stage: vectorized rule evaluation failed; falling back to legacy tuple evaluation")
             signal_map, explain_map = self._eval_atomic_rules_sparse_legacy(out)
         self._apply_web_request_classifier_sparse(out, signal_map, explain_map)
@@ -16503,6 +17023,7 @@ class ChronoSiftEngine:
         nsrl_cache_df: Optional[pd.DataFrame] = None,
         materialise_event_columns: bool = False,
         profile_manifest: Optional[Dict[str, Any]] = None,
+        evidence_source: Optional["_ParquetEvidenceSource"] = None,
     ) -> pd.DataFrame:
         logger.info("Atomic stage: validating input frame")
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -16526,6 +17047,7 @@ class ChronoSiftEngine:
             nsrl_parquet_path=nsrl_parquet_path,
             nsrl_cache_df=nsrl_cache_df,
             profile_manifest=profile_manifest,
+            evidence_source=evidence_source,
         )
         if materialise_event_columns:
             logger.info("Atomic stage: materialising sparse event columns")
@@ -16546,39 +17068,40 @@ class ChronoSiftEngine:
         signal_map = ((df.attrs.get("chronosift_sparse", {}) or {}).get("signal_map", {}) or {})
         explain_map = ((df.attrs.get("chronosift_sparse", {}) or {}).get("explain_map", {}) or {})
 
-        self._apply_non_temporal_contextual_sparse(
-            df,
-            signal_map,
-            explain_map,
-            file_hit_manifest=file_hit_manifest,
-        )
-
-        if apply_temporal:
-            self._apply_temporal_contextual_sparse(
+        with _detached_sparse_state(df):
+            self._apply_non_temporal_contextual_sparse(
                 df,
                 signal_map,
                 explain_map,
-                impossible_travel_state=impossible_travel_state,
+                file_hit_manifest=file_hit_manifest,
             )
 
-        self._apply_contextual_postprocessing_sparse(
-            df,
-            signal_map,
-            explain_map,
-            apply_profiling=apply_profiling,
-        )
+            if apply_temporal:
+                self._apply_temporal_contextual_sparse(
+                    df,
+                    signal_map,
+                    explain_map,
+                    impossible_travel_state=impossible_travel_state,
+                )
 
-        logger.info("Contextual stage: scoring contextual output")
-        df["chronosift_score"] = self._score_signal_map_sparse(
-            len(df),
-            signal_map,
-            index=df.index,
-            score_multipliers=(
-                self._profile_score_amplifier_values(df)
-                if apply_profiling
-                else None
-            ),
-        )
+            self._apply_contextual_postprocessing_sparse(
+                df,
+                signal_map,
+                explain_map,
+                apply_profiling=apply_profiling,
+            )
+
+            logger.info("Contextual stage: scoring contextual output")
+            df["chronosift_score"] = self._score_signal_map_sparse(
+                len(df),
+                signal_map,
+                index=df.index,
+                score_multipliers=(
+                    self._profile_score_amplifier_values(df)
+                    if apply_profiling
+                    else None
+                ),
+            )
 
         if materialise_event_columns:
             logger.info("Contextual stage: materialising sparse event columns")
@@ -16683,6 +17206,8 @@ class ChronoSiftEngine:
     def _temporal_required_columns(self) -> List[str]:
         """Return the minimal column subset needed for stateful temporal processing."""
         cols: Set[str] = set()
+        if any(tr.include_supporting_rows for tr in self.temporal_rules):
+            cols.add(CHRONOSIFT_ROW_ID_COLUMN)
         for tr in self.temporal_rules:
             for k in tr.key_by:
                 if k:
@@ -16696,6 +17221,101 @@ class ChronoSiftEngine:
             cols.update(_detector_definition_required_fields(definition))
         return sorted(c for c in cols if c)
 
+    def _compact_temporal_columns(self):
+        """Keep baseline inputs; composite-only payloads are hydrated later."""
+        cols = {CHRONOSIFT_ROW_ID_COLUMN, "__chronosift_composite_payload_candidate"}
+        for tr in self.temporal_rules:
+            cols.update(tr.key_by)
+            if tr.field:
+                cols.add(tr.field)
+        for definition in self.detector_policy.definitions(stage="temporal", enabled_only=True):
+            if definition.executor not in {"signal_sequence", "signal_sequence_by_artifact",
+                                            "temporal_context_branches", "counted_signal_window", "artifact_follow_on_sequence"}:
+                cols.update(_detector_definition_required_fields(definition))
+        return sorted(c for c in cols if c)
+
+    def _mark_compact_temporal_payload_candidates(self, df):
+        """Bounded lexical admission for composites with unscored raw support.
+
+        Ransom-note names and copy-command text can qualify without a signal.
+        Preserve those rows too; this flag never contributes to a score.
+        Full predicates still run in the unchanged temporal executor later.
+        """
+        marker = "__chronosift_composite_payload_candidate"
+        if marker in df:
+            raise ValueError("Reserved compact-history marker already exists in input")
+        mask = np.zeros(len(df), dtype=bool)
+        note = self.detector_policy.ransomware_impact
+        follow = self.detector_policy.definitions(executor="artifact_follow_on_sequence", enabled_only=True)
+        for lower in range(0, len(df), 65_536):
+            upper = min(len(df), lower + 65_536)
+            batch = df.iloc[lower:upper]
+            if note.enabled:
+                paths = _best_effort_file_path_vectorised(batch, note.note_path_fields)
+                for i, value in enumerate(paths):
+                    basename = os.path.basename(_safe_str(value).strip().lower().replace("\\", "/"))
+                    if any(token in basename for token in note.note_basename_tokens):
+                        mask[lower + i] = True
+            for definition in follow:
+                policy = definition.payload
+                if policy.follow_on_qualification.matches(dict(copy_command=False, copy_text_support=False,
+                                                               copy_signal_support=False, follow_on_signal=False)):
+                    mask[lower:upper] = True
+                    continue
+                paths = _best_effort_file_path_vectorised(batch, policy.path_fields)
+                arrays = [_normalised_text_array(batch, field, lower=True) for field in policy.text_fields]
+                tokens = (*policy.copy_tokens, *policy.copy_text_support_tokens)
+                for i, value in enumerate(paths):
+                    path = _safe_str(value).strip().lower().replace("\\", "/")
+                    text = " ".join(v for v in (*(values[i] for values in arrays), path, os.path.basename(path)) if v).replace("\\ ", " ")
+                    if any(token in text for token in tokens):
+                        mask[lower + i] = True
+        df[marker] = mask
+
+    def _apply_compact_temporal_composites(self, df, signal_map, explain_map, source):
+        """Hydrate raw composite inputs only after temporal signals are known.
+
+        Sequence-by-signal executors have no ordinary-observation baseline.
+        All potential source AND target rows are retained, including producers
+        used by another composite. Negative thresholds conservatively admit
+        every row. First-seen and continuity ran on the complete frame above.
+        """
+        definitions = [d for d in self.detector_policy.definitions(stage="temporal", enabled_only=True)
+                       if d.executor in {"signal_sequence", "signal_sequence_by_artifact",
+                                         "temporal_context_branches", "counted_signal_window", "artifact_follow_on_sequence"}]
+        names = {name for d in definitions for name in (*d.payload.source_signals, *d.payload.target_signals)}
+        all_rows = any(value < 0 for d in definitions for key, value in vars(d.payload).items()
+                       if key.endswith("minimum_signal_value_exclusive"))
+        mask = np.ones(len(df), dtype=bool) if all_rows else np.zeros(len(df), dtype=bool)
+        marker = "__chronosift_composite_payload_candidate"
+        if marker not in df:
+            raise ValueError("Compact history lacks its raw-support admission marker")
+        mask |= df[marker].fillna(False).to_numpy(dtype=bool)
+        if not all_rows:
+            for pos, signals in signal_map.items():
+                if any(float(signals.get(name, 0) or 0) > 0 for name in names):
+                    mask[pos] = True
+        positions = np.flatnonzero(mask)
+        if not len(positions):
+            return
+        candidate, candidate_signals, candidate_explain, _ = self._subset_sparse_state(
+            df, signal_map, explain_map, mask, columns=list(df.columns), build_position_map=False)
+        fields = sorted({f for d in definitions for f in _detector_definition_required_fields(d)} - set(candidate.columns))
+        if fields:
+            batches = [source.fetch(candidate[source.row_id_col].iloc[lower:lower + 65_536], fields)
+                       for lower in range(0, len(candidate), 65_536)]
+            hydrated = pd.concat(batches, ignore_index=True)
+            for field in fields:
+                candidate[field] = hydrated[field].to_numpy(copy=False)
+            del batches, hydrated
+        self._apply_deadbox_temporal_composites_sparse(candidate, candidate_signals, candidate_explain)
+        for new_pos, old_pos in enumerate(positions):
+            if new_pos in candidate_signals:
+                signal_map[int(old_pos)] = candidate_signals[new_pos]
+            if new_pos in candidate_explain:
+                explain_map[int(old_pos)] = candidate_explain[new_pos]
+
+    @_without_sparse_state_attrs
     def _apply_non_temporal_contextual_sparse(
         self,
         df: pd.DataFrame,
@@ -16718,14 +17338,19 @@ class ChronoSiftEngine:
         self._apply_timestomping_detection_sparse(
             df, signal_map, explain_map, contextual_cache=contextual_cache
         )
+        # Text/path normalisations are disposable, not temporal state. Bound
+        # their lifetime to the detector family rather than the whole pass.
+        contextual_cache.clear()
         logger.info("Contextual stage: applying persistence and system-change signals")
         self._apply_persistence_and_config_signals_sparse(
             df, signal_map, explain_map, contextual_cache=contextual_cache
         )
+        contextual_cache.clear()
         logger.info("Contextual stage: applying systemd persistence policy")
         self._apply_systemd_service_persistence_sparse(
             df, signal_map, explain_map, contextual_cache=contextual_cache
         )
+        contextual_cache.clear()
 
         logger.info("Contextual stage: propagating referenced-file hit signals")
         self._apply_referenced_file_hit_signals_sparse(df, signal_map, explain_map, hit_manifest=file_hit_manifest)
@@ -16737,11 +17362,13 @@ class ChronoSiftEngine:
         self._apply_webshell_artifact_policy_sparse(
             df, signal_map, explain_map, contextual_cache=contextual_cache
         )
+        contextual_cache.clear()
 
         logger.info("Contextual stage: applying direct dead-box ATT&CK signals")
         self._apply_deadbox_direct_signals_sparse(
             df, signal_map, explain_map, contextual_cache=contextual_cache
         )
+        contextual_cache.clear()
         self._apply_policy_signal_projections_sparse(
             signal_map,
             explain_map,
@@ -16758,6 +17385,180 @@ class ChronoSiftEngine:
             detector_id="contextual_signal_adjustments",
         )
 
+        self._apply_qualified_artifact_commands_sparse(df, signal_map, explain_map)
+
+    def _apply_qualified_artifact_commands_sparse(self, df, signal_map, explain_map):
+        """Correlate observed file candidates, not arbitrary co-located payloads.
+
+        File/marker observations must precede the command inside the declared
+        feature horizon. A referenced path is not proof of an exit status or
+        payload effects. Only scalar indexes are retained; never copy frames or
+        their nested sparse state. YAML can admit hostless filesystem records
+        from the current single-image dataset. Explicit conflicting file-host
+        labels never match; a remote/log hostname is not filesystem ownership.
+        """
+        for definition in self.detector_policy.definitions(stage="contextual", enabled_only=True):
+            if definition.executor != "qualified_artifact_command":
+                continue
+            policy = definition.payload
+            def positive(pos, names):
+                signals = signal_map.get(pos, {})
+                return any(float(signals.get(name, 0) or 0) > 0 for name in names)
+            sources = [pos for pos in signal_map if positive(pos, policy.source_signals)]
+            targets = [pos for pos in signal_map if positive(pos, policy.target_signals)]
+            if not sources or not targets:
+                continue
+            fields = policy.fields
+            if any(field not in df for field in fields.values()):
+                continue
+            # Accessed inside the detached contextual pass, avoiding attrs copy.
+            columns = {role: df[field].to_numpy(copy=False) for role, field in fields.items()}
+            stamps = df.index
+            horizon = pd.Timedelta(policy.lookback)
+            def scalar(role, pos):
+                value = columns[role][pos]
+                return "" if _is_null(value) else _safe_str(value).strip()
+            def clean_path(value):
+                if not value.startswith("/") or value.startswith("//") or "\x00" in value:
+                    return None
+                # Never resolve traversal, variables or a shell expression into
+                # a convenient different file; YAML controls accepted syntax.
+                if any(part in {".", ".."} for part in value.split("/")):
+                    return None
+                return value.rstrip("/") or None
+            commands = []
+            needed_paths = set()
+            for pos in targets:
+                command = scalar("command", pos)
+                references = {}
+                for basis, pattern in policy.references:
+                    match = pattern.fullmatch(command)
+                    if match is None:
+                        continue
+                    target = match.group("target")
+                    directory = match.groupdict().get("directory")
+                    if not target.startswith("/") and directory:
+                        target = directory.rstrip("/") + "/" + target
+                    target = clean_path(target)
+                    if target:
+                        references.setdefault(target, basis)
+                if len(references) != 1:
+                    continue
+                target, basis = next(iter(references.items()))
+                commands.append((pos, scalar("scope", pos), target, basis, command))
+                needed_paths.add(target)
+            qualified = []
+            for pos in sources:
+                path = clean_path(scalar("path", pos))
+                if (path and policy.file_parser.fullmatch(scalar("parser", pos))
+                        and policy.file_type.fullmatch(scalar("type", pos))):
+                    qualified.append((pos, scalar("scope", pos), path))
+                    needed_paths.add(path)
+            if not commands or not qualified:
+                continue
+            # Index only referenced/source files and configured markers, not
+            # every file in a mega-month. Hash ambiguity is fail-closed.
+            observations = {}
+            markers = {}
+            for pos in range(len(df)):
+                if not policy.file_parser.fullmatch(scalar("parser", pos)):
+                    continue
+                path = clean_path(scalar("path", pos))
+                if not path:
+                    continue
+                marker = policy.marker_pattern.fullmatch(path)
+                scope = scalar("scope", pos)
+                row_id = columns["row_id"][pos]
+                if _is_null(row_id) or not isinstance(row_id, (int, np.integer)):
+                    raise ValueError("Qualified artifact linkage requires persistent integer row IDs")
+                if marker and policy.file_type.fullmatch(scalar("type", pos)):
+                    root = clean_path(marker.group("root"))
+                    if root and root != "/":
+                        markers.setdefault((scope, root), []).append((stamps[pos], int(row_id)))
+                if path in needed_paths and policy.file_type.fullmatch(scalar("type", pos)):
+                    observations.setdefault((scope, path), []).append((stamps[pos], int(row_id), scalar("hash", pos)))
+            for values in (*observations.values(), *markers.values()):
+                values.sort()
+            def observed(mapping, key, now):
+                keys = [key]
+                if key[0] and policy.unlabelled_file_scope == "current_dataset":
+                    keys.append(("", key[1]))
+                result = []
+                for candidate_key in keys:
+                    values = mapping.get(candidate_key, ())
+                    left = bisect.bisect_left(values, (now - horizon,))
+                    right = bisect.bisect_right(values, (now, math.inf))
+                    result.extend(values[left:right])
+                return sorted(result)
+            def repository(scope, path, now):
+                parent = posixpath.dirname(path)
+                while parent and parent != "/":
+                    seen = observed(markers, (scope, parent), now)
+                    if seen:
+                        return parent, seen[-1]
+                    parent = posixpath.dirname(parent)
+                return None
+            qualified_paths = {}
+            qualified_roots = {}
+            marker_roots = {root for _, root in markers}
+            for entry in qualified:
+                _, scope, path = entry
+                qualified_paths.setdefault((scope, path), []).append(entry)
+                parent = posixpath.dirname(path)
+                while parent and parent != "/":
+                    if parent in marker_roots:
+                        qualified_roots.setdefault((scope, parent), []).append(entry)
+                    parent = posixpath.dirname(parent)
+            for pos, scope, target, basis, command in commands:
+                now = stamps[pos]
+                target_seen = observed(observations, (scope, target), now)
+                if not target_seen or len({v[2] for v in target_seen if v[2]}) > 1:
+                    continue
+                target_repo = repository(scope, target, now)
+                candidates = []
+                relevant = qualified_paths.get((scope, target), [])
+                if scope and policy.unlabelled_file_scope == "current_dataset":
+                    relevant = [*relevant, *qualified_paths.get(("", target), [])]
+                if target_repo:
+                    relevant = [*relevant, *qualified_roots.get((scope, target_repo[0]), [])]
+                    if scope and policy.unlabelled_file_scope == "current_dataset":
+                        relevant.extend(qualified_roots.get(("", target_repo[0]), []))
+                for source_pos, source_scope, source_path in relevant:
+                    scope_matches = source_scope == scope or (not source_scope and policy.unlabelled_file_scope == "current_dataset")
+                    if not scope_matches or not now - horizon <= stamps[source_pos] <= now:
+                        continue
+                    seen = observed(observations, (scope, source_path), now)
+                    if not seen or len({v[2] for v in seen if v[2]}) > 1:
+                        continue
+                    source_id = int(columns["row_id"][source_pos])
+                    if source_path == target:
+                        candidates.append((1, stamps[source_pos], source_id, "exact_path", source_path, None))
+                    elif target_repo:
+                        source_repo = repository(scope, source_path, now)
+                        if source_repo and source_repo[0] == target_repo[0]:
+                            candidates.append((0, stamps[source_pos], source_id, "repository", source_path, target_repo))
+                if not candidates:
+                    continue
+                _, source_time, source_id, semantic, source_path, repo = max(candidates)
+                emission = policy.emissions_by_semantic[semantic]
+                signals = self._sparse_signal_dict(signal_map, pos)
+                signals[emission.name] = max(float(signals.get(emission.name, 0) or 0), emission.value)
+                evidence = {"referenced_path": target, "qualified_source_path": source_path,
+                    "source_row_id": source_id, "source_time": str(source_time),
+                    "target_file_row_id": target_seen[-1][1], "command": command,
+                    "reference_basis": basis, "scope": scope or "current_evidence_dataset",
+                    "unlabelled_file_scope": policy.unlabelled_file_scope,
+                    "linkage": semantic, "outcome": "command_reference_observed_effects_unproved",
+                    "lookback_seconds": policy.lookback.total_seconds()}
+                if repo:
+                    evidence.update(repository_root=repo[0], marker_row_id=repo[1][1])
+                self._sparse_explain_list(explain_map, pos).append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
+                    "rule_id": emission.rule_id, "description": emission.description,
+                    "confidence": emission.confidence, "evidence_type": "contextual",
+                    "signals": [emission.name], "evidence": evidence})
+
+    @_without_sparse_state_attrs
     def _apply_contextual_postprocessing_sparse(
         self,
         df: pd.DataFrame,
@@ -16776,6 +17577,7 @@ class ChronoSiftEngine:
                 df, signal_map, explain_map
             )
 
+    @_without_sparse_state_attrs
     def _apply_temporal_contextual_sparse(
         self,
         df: pd.DataFrame,
@@ -16784,6 +17586,8 @@ class ChronoSiftEngine:
         geo_continuity_state: Optional[Dict[tuple, Dict[str, Any]]] = None,
         impossible_travel_state: Optional[Dict[tuple, Dict[str, Any]]] = None,
         ip_continuity_state: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        continuity_commit_before: Optional[pd.Timestamp] = None,
+        composite_source=None,
     ) -> None:
         if self.detector_policy.geographic_continuity.enabled:
             logger.info("Contextual stage: applying geo continuity detection")
@@ -16792,6 +17596,7 @@ class ChronoSiftEngine:
                 signal_map,
                 explain_map,
                 carried_state=geo_continuity_state,
+                commit_before=continuity_commit_before,
             )
 
         if self.detector_policy.impossible_travel.enabled:
@@ -16801,6 +17606,7 @@ class ChronoSiftEngine:
                 signal_map,
                 explain_map,
                 carried_last=impossible_travel_state,
+                commit_before=continuity_commit_before,
             )
 
         if self.detector_policy.ip_scope_continuity.enabled:
@@ -16808,6 +17614,7 @@ class ChronoSiftEngine:
             self._apply_private_ip_continuity_sparse(
                 df, signal_map, explain_map,
                 carried_last=ip_continuity_state,
+                commit_before=continuity_commit_before,
             )
 
         if self.temporal_rules:
@@ -16815,7 +17622,10 @@ class ChronoSiftEngine:
             self._apply_temporal_rules_sparse(df, signal_map, explain_map)
 
         logger.info("Contextual stage: applying dead-box temporal composites")
-        self._apply_deadbox_temporal_composites_sparse(df, signal_map, explain_map)
+        if composite_source is None:
+            self._apply_deadbox_temporal_composites_sparse(df, signal_map, explain_map)
+        else:
+            self._apply_compact_temporal_composites(df, signal_map, explain_map, composite_source)
         self._apply_policy_signal_projections_sparse(
             signal_map,
             explain_map,
@@ -16823,7 +17633,11 @@ class ChronoSiftEngine:
         )
 
     def _temporal_candidate_reduction_safe(self) -> bool:
-        if self.detector_policy.ip_scope_continuity.enabled:
+        if any(policy.enabled for policy in (
+            self.detector_policy.geographic_continuity,
+            self.detector_policy.impossible_travel,
+            self.detector_policy.ip_scope_continuity,
+        )):
             return False
         for tr in self.temporal_rules:
             if tr.mode in {"first_seen_value", "change_detected"}:
@@ -16838,6 +17652,143 @@ class ChronoSiftEngine:
                 enabled_only=True,
             )
         )
+
+    def minimum_partition_overlap(self, temporal_rules=None) -> timedelta:
+        """Conservative context horizon, including composed generic rules.
+
+        Generic temporal rules replay from overlap, unlike the specialised
+        carried authentication state. A seven-day follow-on derived from a
+        one-hour sequence therefore needs seven days plus one hour of input.
+        """
+        horizon = timedelta(0)
+        by_signal: Dict[str, timedelta] = {}
+        for tr in self.temporal_rules if temporal_rules is None else temporal_rules:
+            inputs = [item.signal for item in (*tr.sequence, *tr.cooccur_all)]
+            inputs.extend(tr.condition_signals_any)
+            inputs.extend(tr.reset_signals)
+            required = tr.lookback + max((by_signal.get(s, timedelta(0)) for s in inputs), default=timedelta(0))
+            horizon = max(horizon, required)
+            for emission in tr.emit_signals:
+                by_signal[emission.name] = max(required, by_signal.get(emission.name, timedelta(0)))
+        for _, policy in self._enabled_temporal_policy_detectors():
+            horizon = max(horizon, policy.lookback)
+        return horizon
+
+    def _parse_partition_execution_policy(self, raw):
+        """Optional execution contract; historical YAML retains its old path.
+
+        This is not a detector fallback. A present contract is complete and
+        validated; pruning requires a whole-dataset proof explicitly in YAML.
+        """
+        if raw is None:
+            return None
+        path = "partition_execution"
+        cfg = _policy_mapping(raw, path)
+        _policy_keys(cfg, path, required={"feature_overlap", "compact_history", "applicability_groups"})
+        feature_overlap = parse_lookback(cfg["feature_overlap"])
+        if feature_overlap <= timedelta(0):
+            raise ValueError(f"{path}.feature_overlap must be positive")
+        compact = _policy_bool(cfg["compact_history"], f"{path}.compact_history")
+        if not isinstance(cfg["applicability_groups"], list):
+            raise ValueError(f"{path}.applicability_groups must be a list")
+        known = {tr.rule_id for tr in self.temporal_rules}
+        seen = set()
+        groups = []
+        for i, item in enumerate(cfg["applicability_groups"]):
+            where = f"{path}.applicability_groups[{i}]"
+            item = _policy_mapping(item, where)
+            _policy_keys(item, where, required={"id", "temporal_rule_ids", "parser_field",
+                "all_parsers_match", "at_least_one_parser_matches", "absent_columns", "forbidden_field_patterns"})
+            names = _policy_string_list(item["temporal_rule_ids"], where + ".temporal_rule_ids")
+            if not names or set(names) - known or seen.intersection(names):
+                raise ValueError(f"{where}: unknown, empty or repeated temporal rule IDs")
+            seen.update(names)
+            for key in ("id", "parser_field", "all_parsers_match", "at_least_one_parser_matches"):
+                if not isinstance(item[key], str) or not item[key].strip():
+                    raise ValueError(f"{where}.{key}: expected nonempty string")
+            re.compile(item["all_parsers_match"])
+            re.compile(item["at_least_one_parser_matches"])
+            forbidden = _policy_mapping(item["forbidden_field_patterns"], where + ".forbidden_field_patterns")
+            for field, pattern in forbidden.items():
+                if not isinstance(field, str) or not field or not isinstance(pattern, str) or not pattern:
+                    raise ValueError(f"{where}.forbidden_field_patterns requires nonempty field/pattern strings")
+                re.compile(pattern)
+            groups.append({**item, "temporal_rule_ids": names,
+                "absent_columns": _policy_string_list(item["absent_columns"], where + ".absent_columns")})
+        return dict(feature_overlap=feature_overlap, compact_history=compact, applicability_groups=groups)
+
+    def plan_partition_execution(self, dataset_root: str, overlap=None):
+        """Conservative full-corpus applicability census, never a sample.
+
+        Null/unknown parsers, mixed evidence, or even the presence of a guarded
+        structured column retain the rules. No image filename/OS guess enters
+        this decision. Rule omissions are limited to the YAML declaration.
+        """
+        policy = self.partition_execution_policy
+        if policy is None:
+            return None
+        available = set(_duckdb_dataset_columns(dataset_root))
+        con = _get_duckdb_connection()
+        parser_values = {}
+        omitted = set()
+        proofs = []
+        for group in policy["applicability_groups"]:
+            field = group["parser_field"]
+            if field not in available or available.intersection(group["absent_columns"]):
+                continue
+            # Some producers accept structured data_type independently of
+            # parser. The YAML declares those disqualifying values as well.
+            disqualified = False
+            for other_field, pattern in group["forbidden_field_patterns"].items():
+                if other_field in available:
+                    quoted = '"' + other_field.replace('"', '""') + '"'
+                    values = con.execute(f'SELECT DISTINCT {quoted} FROM read_parquet(?, union_by_name=true, hive_partitioning=true)',
+                                         [_parquet_dataset_glob(dataset_root)]).fetchall()
+                    if any(v[0] is not None and re.search(pattern, str(v[0])) for v in values):
+                        disqualified = True
+                        break
+            if disqualified:
+                continue
+            if field not in parser_values:
+                quoted = '"' + field.replace('"', '""') + '"'
+                values = con.execute(f'SELECT DISTINCT {quoted} FROM read_parquet(?, union_by_name=true, hive_partitioning=true)',
+                                     [_parquet_dataset_glob(dataset_root)]).fetchall()
+                parser_values[field] = [None if value[0] is None else str(value[0]) for value in values]
+            values = parser_values[field]
+            if (not values or any(v is None or not re.fullmatch(group["all_parsers_match"], v) for v in values)
+                    or not any(re.fullmatch(group["at_least_one_parser_matches"], v) for v in values)):
+                continue
+            proposed = set(group["temporal_rule_ids"])
+            removed_outputs = {es.name for tr in self.temporal_rules if tr.rule_id in proposed for es in tr.emit_signals}
+            # A group cannot leave another temporal rule dependent on a removed
+            # producer. Keep the complete graph when the proof is incomplete.
+            if any(removed_outputs.intersection(
+                    [need.signal for need in (*tr.sequence, *tr.cooccur_all)] + list(tr.condition_signals_any) + list(tr.reset_signals))
+                   for tr in self.temporal_rules if tr.rule_id not in proposed):
+                continue
+            omitted.update(proposed)
+            proofs.append(dict(group=group["id"], parser_field=field, parsers=sorted(values),
+                               absent_columns=group["absent_columns"], omitted_rule_ids=sorted(proposed)))
+        selected = [tr for tr in self.temporal_rules if tr.rule_id not in omitted]
+        required = self.minimum_partition_overlap(selected)
+        feature = policy["feature_overlap"]
+        # Non-temporal detector lookbacks are part of feature generation, not
+        # permission to shorten temporal history. Current built-ins use <=24h.
+        for definition in self.detector_policy.definitions(enabled_only=True):
+            if definition.stage != "temporal":
+                lookback = getattr(definition.payload, "lookback", None)
+                if isinstance(lookback, timedelta):
+                    feature = max(feature, lookback)
+        required = max(required, feature)
+        history = max(timedelta(hours=24), required) if overlap is None else parse_lookback(overlap)
+        if history < required:
+            raise ValueError(f"Partition overlap must cover applicable temporal dependencies and feature windows: {history} < {required}")
+        return dict(configured_history_seconds=int(self.minimum_partition_overlap().total_seconds()),
+                    history_seconds=int(history.total_seconds()), feature_seconds=int(feature.total_seconds()),
+                    compact_history=bool(policy["compact_history"] and history > feature),
+                    omitted_rule_ids=sorted(omitted), applicability_proofs=proofs,
+                    feature_scope="calendar_month_plus_feature_overlap",
+                    baseline_scope_note="Frame-scoped baselines and identity lookups use the feature window; global manifests remain corpus-wide")
 
     def _temporal_candidate_actor_columns(self) -> List[str]:
         cols: List[str] = list(dict.fromkeys((
@@ -16870,6 +17821,7 @@ class ChronoSiftEngine:
         base = pd.Series(False, index=df.index, dtype=bool)
         needed_signals: Set[str] = set()
         for tr in self.temporal_rules:
+            needed_signals.update(tr.reset_signals)
             if tr.mode == "cooccur":
                 needed_signals.update(
                     need.signal for need in tr.cooccur_all if getattr(need, "signal", None)
@@ -17127,6 +18079,7 @@ class ChronoSiftEngine:
         out["score_contribution"] = total_contribution
         if signal_details:
             out["signals"] = signal_details
+        self.attack_metadata.annotate(out)
         return out
 
     def _materialise_sparse_event_columns(
@@ -17148,7 +18101,7 @@ class ChronoSiftEngine:
         if "actor_principal" in df.columns:
             actor_series = df["actor_principal"].astype("string").fillna("").str.strip()
             actor_series = actor_series.mask(actor_series.str.lower().isin(PLACEHOLDER_STRINGS), "")
-            canonical_actor_values = actor_series.where(actor_series.ne(""), other=None).to_numpy(copy=False)
+            canonical_actor_values = actor_series.where(actor_series.ne(""), other=None).to_numpy(dtype=object, na_value=None, copy=False)
 
         canonical_src_ip_values: Optional[np.ndarray] = None
         recovered_ip_field = self.canonicalisation_policy.ip_recovery.output_field
@@ -17160,7 +18113,7 @@ class ChronoSiftEngine:
         if src_field is not None:
             src_series = df[src_field].astype("string").fillna("").str.strip()
             src_series = src_series.mask(src_series.str.lower().isin(PLACEHOLDER_STRINGS), "")
-            canonical_src_ip_values = src_series.where(src_series.ne(""), other=None).to_numpy(copy=False)
+            canonical_src_ip_values = src_series.where(src_series.ne(""), other=None).to_numpy(dtype=object, na_value=None, copy=False)
 
         if signal_map:
             signals_col: List[Optional[Dict[str, Any]]] = [None] * n
@@ -17300,6 +18253,7 @@ class ChronoSiftEngine:
 
         return score_series.clip(upper=self.max_event_score)
 
+    @_without_sparse_state_attrs
     def _apply_referenced_file_hit_signals_sparse(
         self,
         df: pd.DataFrame,
@@ -17324,6 +18278,13 @@ class ChronoSiftEngine:
         if policy.current_path_field not in df.columns and hit_manifest is None:
             return
 
+        behaviour_policy = (self.detector_policy.clamav_classification.behaviour
+                            if self.detector_policy.clamav_classification.enabled else None)
+        behaviour_payload = (hit_manifest or {}).get("av_behaviour", {})
+        _av_behaviour.validate_payload(behaviour_payload, behaviour_policy)
+        behaviour_profiles = behaviour_payload.get("profiles", self._av_behaviour_catalog)
+        behaviour_paths = behaviour_payload.get("paths", {})
+
         if hit_manifest is not None:
             hit_map = (hit_manifest.get("hit_map", {}) or {})
             basename_map = (hit_manifest.get("basename_map", {}) or {})
@@ -17331,6 +18292,10 @@ class ChronoSiftEngine:
             web_basename_map = (hit_manifest.get("web_basename_map", {}) or {})
             web_identity_map = (hit_manifest.get("web_identity_map", {}) or {})
             web_basename_identity_map = (hit_manifest.get("web_basename_identity_map", {}) or {})
+            web_casefold_path_map = (hit_manifest.get("web_casefold_path_map", {}) or {})
+            web_casefold_basename_map = (hit_manifest.get("web_casefold_basename_map", {}) or {})
+            web_casefold_identity_map = (hit_manifest.get("web_casefold_identity_map", {}) or {})
+            web_casefold_basename_identity_map = (hit_manifest.get("web_casefold_basename_identity_map", {}) or {})
             hash_hit_map = (hit_manifest.get("hash_hit_map", {}) or {})
             hash_identity_map = (hit_manifest.get("hash_identity_map", {}) or {})
         else:
@@ -17340,6 +18305,10 @@ class ChronoSiftEngine:
             web_basename_map = {}
             web_identity_map = {}
             web_basename_identity_map = {}
+            web_casefold_path_map = {}
+            web_casefold_basename_map = {}
+            web_casefold_identity_map = {}
+            web_casefold_basename_identity_map = {}
             hash_hit_map = {}
             hash_identity_map = {}
 
@@ -17352,6 +18321,13 @@ class ChronoSiftEngine:
             _yara_mask = _ymc_arr > 0
             # Only iterate rows with at least one hit type
             _any_hit = _av_mask | _luhn_mask | _yara_mask
+            if behaviour_policy is not None and behaviour_policy.enabled:
+                hash_values = _column_values_or_none(df, "sha256_hash")
+                for row_i in np.flatnonzero(_av_mask):
+                    file_hash = _safe_str(hash_values[row_i]).strip().upper()
+                    filename = current_filenames[row_i]
+                    if filename and file_hash in behaviour_profiles:
+                        behaviour_paths.setdefault(filename, []).append(file_hash)
             for i in np.flatnonzero(_any_hit):
                 fname = current_filenames[i]
                 if not fname:
@@ -17369,8 +18345,13 @@ class ChronoSiftEngine:
                     if base:
                         basename_map.setdefault(base, set()).update(tags)
 
-        if not hit_map and not web_path_map and not hash_hit_map:
+        if not any((hit_map, web_path_map, web_basename_map,
+                    web_casefold_path_map, web_casefold_basename_map, hash_hit_map)):
             return
+
+        # Local to this validated manifest/policy invocation. Cached snapshots
+        # are immutable; every row still owns its mutable identity and evidence.
+        identity_cache = _FileIdentityCache()
 
         current_filenames = (
             _normalise_reference_path_series(df[policy.current_path_field]).to_numpy(dtype=object, copy=False)
@@ -17386,6 +18367,8 @@ class ChronoSiftEngine:
         upload_names_vals = _column_values_or_none(df, policy.upload_names_field)
         upload_hashes_vals = _column_values_or_none(df, policy.upload_hashes_field)
         upload_outcome_vals = _column_values_or_none(df, policy.upload_outcome_field)
+        web_event_vals = _column_values_or_none(df, "chronosift_web_is_event")
+        require_web_event = self.detector_policy.web_request_classification.allowed_url_schemes is not None
 
         # Collect execution-context columns that may reference hit files.
         # These cover scheduled tasks, services, prefetch, amcache, process
@@ -17401,9 +18384,35 @@ class ChronoSiftEngine:
             if col in df.columns:
                 exec_ctx_direct_vals.append(_normalise_reference_path_series(df[col]).to_numpy(dtype=object, copy=False))
 
+        canonical_feature_fields = {
+            "hit_types": "chronosift_web_file_hit_types",
+            "categories": "chronosift_web_file_categories",
+            "rules": "chronosift_web_file_rules",
+            "families": "chronosift_web_file_families",
+        }
+        feature_columns = {
+            role: tuple(column for column in dict.fromkeys((
+                canonical_field, policy.web_feature_fields[role],
+            )) if column in df.columns)
+            for role, canonical_field in canonical_feature_fields.items()
+        }
+        outcome_arrays = {
+            column: df[column].to_numpy(copy=False)
+            for column in dict.fromkeys((
+                "chronosift_web_outcome", policy.web_outcome_field,
+            )) if column in df.columns
+        }
+        # Only matching positions are retained. Read the latest pending value
+        # when merging outcomes so ordered branches and aliases keep exactly
+        # the same precedence as the former scalar writes.
+        pending_columns: Dict[str, Dict[int, Any]] = {}
+
         for i in range(len(df)):
             msg = messages[i]
             current_fname = current_filenames[i]
+            behaviour_hashes: Set[str] = set()
+            behaviour_upload_names: Set[str] = set()
+            behaviour_upload_hashes: Set[str] = set()
             # Extract referenced paths from message text.
             refs = _extract_referenced_paths_from_text(msg)
             ref_set = set(refs)
@@ -17438,6 +18447,10 @@ class ChronoSiftEngine:
                     tags = basename_map.get(base)
                 if not tags:
                     continue
+                # Bind behavioural identity only to an exact known path; the
+                # weaker basename fallback must not invent a hash identity.
+                if "av" in tags:
+                    behaviour_hashes.update(behaviour_paths.get(rp, ()))
                 for tag in tags:
                     matched[tag].append(rp)
 
@@ -17464,19 +18477,34 @@ class ChronoSiftEngine:
                 or bool(_safe_str(url_vals[i]).strip())
                 or any(token in parser for token in policy.web_log_parser_tokens)
             )
-            if (web_path_map or web_basename_map or hash_hit_map) and request_semantics:
+            if require_web_event:
+                request_semantics = request_semantics and bool(
+                    _safe_str(web_event_vals[i]).casefold() == "true"
+                )
+            if any((web_path_map, web_basename_map, web_casefold_path_map,
+                    web_casefold_basename_map, hash_hit_map)) and request_semantics:
                 http_semantics = _extract_http_request_semantics(msg, http_request_vals[i], url_vals[i])
                 http_method = _safe_str(http_semantics.get("method")).strip().upper()
                 http_path = _safe_str(http_semantics.get("path")).strip()
                 canonical_web_path = _canonical_web_request_path(http_path)
                 if canonical_web_path:
-                    web_path_key = canonical_web_path.casefold()
-                    web_access_tags.update(web_path_map.get(web_path_key, set()) or set())
-                    _merge_file_identity(web_access_identity, web_identity_map.get(web_path_key))
+                    # The builder removes cross-root/cross-mode ambiguities.
+                    # Never fold a POSIX URL or union conflicting identities.
+                    web_path_key = canonical_web_path
+                    path_map, identity_map = web_path_map, web_identity_map
+                    behaviour_web_map = behaviour_payload.get("web_paths", {})
+                    if web_path_key not in path_map:
+                        web_path_key = canonical_web_path.casefold()
+                        path_map, identity_map = web_casefold_path_map, web_casefold_identity_map
+                        behaviour_web_map = behaviour_payload.get("web_casefold_paths", {})
+                    web_access_tags.update(path_map.get(web_path_key, set()) or set())
+                    if "av" in web_access_tags:
+                        behaviour_hashes.update(behaviour_web_map.get(web_path_key, ()))
+                    identity_cache.merge_into(web_access_identity, identity_map.get(web_path_key))
                     for tag in web_access_tags:
                         matched[tag].append(canonical_web_path)
 
-                if http_method in policy.upload_methods and web_basename_map:
+                if http_method in policy.upload_methods and (web_basename_map or web_casefold_basename_map):
                     upload_names = [
                         value for value in _safe_str(upload_names_vals[i]).split("|") if value
                     ] or list(
@@ -17492,12 +18520,20 @@ class ChronoSiftEngine:
                         )
                     )
                     for upload_name in upload_names:
-                        upload_key = upload_name.casefold()
-                        name_tags = web_basename_map.get(upload_key, set()) or set()
+                        upload_key = upload_name
+                        name_map, name_identity_map = web_basename_map, web_basename_identity_map
+                        behaviour_name_map = behaviour_payload.get("web_names", {})
+                        if upload_key not in name_map:
+                            upload_key = upload_name.casefold()
+                            name_map, name_identity_map = web_casefold_basename_map, web_casefold_basename_identity_map
+                            behaviour_name_map = behaviour_payload.get("web_casefold_names", {})
+                        name_tags = name_map.get(upload_key, set()) or set()
+                        if "av" in name_tags:
+                            behaviour_upload_names.update(behaviour_name_map.get(upload_key, ()))
                         upload_name_tags.update(name_tags)
-                        _merge_file_identity(
+                        identity_cache.merge_into(
                             upload_name_identity,
-                            web_basename_identity_map.get(upload_key),
+                            name_identity_map.get(upload_key),
                         )
                         for tag in name_tags:
                             upload_name_paths[tag].append(f"upload:{upload_name}")
@@ -17507,8 +18543,10 @@ class ChronoSiftEngine:
                         if not upload_hash:
                             continue
                         hash_tags = hash_hit_map.get(upload_hash, set()) or set()
+                        if "av" in hash_tags and upload_hash in behaviour_profiles:
+                            behaviour_upload_hashes.add(upload_hash)
                         upload_hash_tags.update(hash_tags)
-                        _merge_file_identity(
+                        identity_cache.merge_into(
                             upload_hash_identity,
                             hash_identity_map.get(upload_hash),
                         )
@@ -17524,10 +18562,12 @@ class ChronoSiftEngine:
                     web_upload_tags = upload_hash_tags
                     web_upload_identity = upload_hash_identity
                     selected_upload_paths = upload_hash_paths
+                    behaviour_hashes.update(behaviour_upload_hashes)
                 else:
                     web_upload_tags = upload_name_tags
                     web_upload_identity = upload_name_identity
                     selected_upload_paths = upload_name_paths
+                    behaviour_hashes.update(behaviour_upload_names)
                 for tag, paths in selected_upload_paths.items():
                     matched[tag].extend(paths)
 
@@ -17536,6 +18576,14 @@ class ChronoSiftEngine:
 
             sig = self._sparse_signal_dict(signal_map, i)
             expl = self._sparse_explain_list(explain_map, i)
+            if behaviour_hashes:
+                _av_behaviour.merge_into_row(behaviour_policy,
+                    (behaviour_profiles[key] for key in sorted(behaviour_hashes)),
+                    sig, expl, self.weights, scope="reference")
+                if behaviour_upload_hashes:
+                    _av_behaviour.merge_into_row(behaviour_policy,
+                        (behaviour_profiles[key] for key in sorted(behaviour_upload_hashes)),
+                        sig, expl, self.weights, scope="upload_hash")
             for tag, paths in matched.items():
                 if not paths:
                     continue
@@ -17557,6 +18605,7 @@ class ChronoSiftEngine:
                     "message": _safe_str(msg)[:240],
                 }
                 expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": emission.description,
                     "confidence": emission.confidence,
@@ -17578,8 +18627,8 @@ class ChronoSiftEngine:
                 )
                 all_web_tags = web_access_tags | web_upload_tags
                 combined_identity = _empty_file_identity()
-                _merge_file_identity(combined_identity, web_access_identity)
-                _merge_file_identity(combined_identity, web_upload_identity)
+                _merge_normalised_file_identity(combined_identity, web_access_identity)
+                _merge_normalised_file_identity(combined_identity, web_upload_identity)
                 combined_identity["hit_types"].update(all_web_tags)
                 categories = sorted(combined_identity["av_categories"] | combined_identity["yara_categories"])
                 rules = sorted(combined_identity["yara_rules"])
@@ -17591,31 +18640,22 @@ class ChronoSiftEngine:
                     "rules": "|".join(rules),
                     "families": "|".join(families),
                 }
-                canonical_feature_fields = {
-                    "hit_types": "chronosift_web_file_hit_types",
-                    "categories": "chronosift_web_file_categories",
-                    "rules": "chronosift_web_file_rules",
-                    "families": "chronosift_web_file_families",
-                }
                 for role, value in feature_values.items():
-                    for column in dict.fromkeys((
-                        canonical_feature_fields[role],
-                        policy.web_feature_fields[role],
-                    )):
-                        if column in df.columns:
-                            df.iat[i, df.columns.get_loc(column)] = value or pd.NA
+                    for column in feature_columns[role]:
+                        pending_columns.setdefault(column, {})[i] = value or pd.NA
 
                 for branch in policy.web_branches:
                     if branch.source == "access":
-                        branch_tags = set(web_access_tags)
-                        branch_identity = _normalise_file_identity(web_access_identity)
+                        branch_tags = web_access_tags
+                        branch_identity = web_access_identity
                     elif branch.source == "upload":
-                        branch_tags = set(web_upload_tags)
-                        branch_identity = _normalise_file_identity(web_upload_identity)
+                        branch_tags = web_upload_tags
+                        branch_identity = web_upload_identity
                     else:
-                        branch_tags = set(all_web_tags)
-                        branch_identity = _normalise_file_identity(combined_identity)
-                    branch_identity["hit_types"].update(branch_tags)
+                        branch_tags = all_web_tags
+                        branch_identity = combined_identity
+                    # These row-owned identities are already normalised. The
+                    # branch only reads them; hit-type evidence uses branch_tags.
                     branch_categories = (
                         branch_identity["av_categories"]
                         | branch_identity["yara_categories"]
@@ -17634,7 +18674,6 @@ class ChronoSiftEngine:
                         float(sig.get(emission.name, 0.0) or 0.0),
                         emission.value,
                     )
-                    serialised_identity = _serialise_file_identity(branch_identity)
                     all_evidence = {
                         "evidence_type": "web_file_identity",
                         "http_method": http_method,
@@ -17647,9 +18686,13 @@ class ChronoSiftEngine:
                         "file_categories": "|".join(sorted(branch_categories)),
                         "yara_rules": "|".join(sorted(branch_identity["yara_rules"])),
                         "av_families": "|".join(sorted(branch_identity["av_families"])),
-                        "yara_rule_metadata": serialised_identity["yara_rule_metadata"],
+                        "yara_rule_metadata": {
+                            rule: dict(meta)
+                            for rule, meta in sorted(branch_identity["yara_rule_metadata"].items())
+                        } if "yara_rule_metadata" in branch.evidence else None,
                     }
                     expl.append({
+                        **_attack_metadata.reference_fields(emission.attack_ref),
                         "rule_id": emission.rule_id,
                         "description": emission.description,
                         "confidence": emission.confidence,
@@ -17665,22 +18708,17 @@ class ChronoSiftEngine:
                             if successful_response
                             else branch.other_outcome
                         )
-                        for outcome_field in dict.fromkeys((
-                            "chronosift_web_outcome",
-                            policy.web_outcome_field,
-                        )):
-                            if outcome_field in df.columns:
-                                merged_outcome = policy.web_outcome_merge.merge(
-                                    df.iat[
-                                        i,
-                                        df.columns.get_loc(outcome_field),
-                                    ],
-                                    outcome_value,
-                                )
-                                df.iat[i, df.columns.get_loc(outcome_field)] = (
-                                    merged_outcome
-                                )
+                        for outcome_field, existing in outcome_arrays.items():
+                            updates = pending_columns.setdefault(outcome_field, {})
+                            updates[i] = policy.web_outcome_merge.merge(
+                                updates.get(i, existing[i]), outcome_value,
+                            )
 
+        for column, updates in pending_columns.items():
+            _materialise_null_column(df, column)
+            df.iloc[list(updates), df.columns.get_loc(column)] = list(updates.values())
+
+    @_without_sparse_state_attrs
     def _apply_web_attack_mapping_sparse(
         self,
         df: pd.DataFrame,
@@ -17709,6 +18747,26 @@ class ChronoSiftEngine:
             ))
             if field_name in df.columns
         )
+        # Mapping conditions observe pre-mapping inputs, so output writes can
+        # be batched. Read each existing column once; never box a Series for
+        # every scalar iat read. Only matched-row result strings are buffered.
+        technique_values = {
+            col: df.iloc[:, col].to_numpy(copy=False) for col in technique_cols
+        }
+        technique_rows: List[int] = []
+        technique_updates: Dict[int, List[str]] = {
+            col: [] for col in technique_cols
+        }
+        prepared_branches = []
+        for branch in policy.mapping_branches:
+            outputs = tuple(policy.mapping_outputs[name] for name in branch.output_ids)
+            fallback_technique = next((output.attack_technique_id for output in outputs
+                                       if output.attack_technique_id), "")
+            prepared_branches.append((
+                _prepare_web_mapping_condition(branch.conditions),
+                _prepare_web_mapping_condition(branch.exclude) if branch.exclude is not None else None,
+                outputs, fallback_technique, branch.evidence,
+            ))
 
         for row_i in range(len(df)):
             indicators = {
@@ -17727,37 +18785,12 @@ class ChronoSiftEngine:
             source_ip_scope = _ip_scope(source_ip) or ""
             signals = signal_map.get(row_i, {}) or {}
 
-            def matches(condition: WebMappingConditionPolicy) -> bool:
-                groups: List[bool] = []
-                if condition.indicators_any:
-                    groups.append(bool(indicators & condition.indicators_any))
-                if condition.indicator_prefixes_any:
-                    groups.append(any(
-                        indicator.startswith(prefix)
-                        for indicator in indicators
-                        for prefix in condition.indicator_prefixes_any
-                    ))
-                if condition.signals_any:
-                    groups.append(any(
-                        float(signals.get(name, 0.0) or 0.0)
-                        > float(condition.minimum_signal_value_exclusive)
-                        for name in condition.signals_any
-                    ))
-                if condition.categories_any:
-                    groups.append(bool(categories & condition.categories_any))
-                if condition.methods_any:
-                    groups.append(method in condition.methods_any)
-                if condition.upload_outcomes_any:
-                    groups.append(upload_outcome in condition.upload_outcomes_any)
-                if condition.source_ip_scopes_any:
-                    groups.append(source_ip_scope in condition.source_ip_scopes_any)
-                return all(groups) if condition.match == "all" else any(groups)
-
+            facts = (indicators, categories, method, upload_outcome, source_ip_scope, signals)
             matched_branches = [
                 branch
-                for branch in policy.mapping_branches
-                if matches(branch.conditions)
-                and not (branch.exclude is not None and matches(branch.exclude))
+                for branch in prepared_branches
+                if branch[0](*facts)
+                and not (branch[1] is not None and branch[1](*facts))
             ]
             if not matched_branches:
                 continue
@@ -17765,14 +18798,17 @@ class ChronoSiftEngine:
             mutable_signals = self._sparse_signal_dict(signal_map, row_i)
             explanations = self._sparse_explain_list(explain_map, row_i)
             techniques: Set[str] = set()
-            for branch in matched_branches:
-                branch_technique_id = next((
-                    policy.mapping_outputs[output_id].attack_technique_id
-                    for output_id in branch.output_ids
-                    if policy.mapping_outputs[output_id].attack_technique_id
-                ), "")
-                for output_id in branch.output_ids:
-                    output = policy.mapping_outputs[output_id]
+            common_evidence = {
+                "http_method": method,
+                "canonical_endpoint": _safe_str(endpoint_vals[row_i]).strip(),
+                "http_response_code": _normalise_integral_metadata_value(status_vals[row_i]),
+                "attack_indicators": "|".join(sorted(indicators)),
+                "file_categories": "|".join(sorted(categories)),
+                "source_ip": source_ip,
+                "upload_outcome": upload_outcome,
+            }
+            for _, _, outputs, branch_technique_id, evidence_names in matched_branches:
+                for output in outputs:
                     emission = output.emission
                     mutable_signals[emission.name] = max(
                         float(mutable_signals.get(emission.name, 0.0) or 0.0),
@@ -17780,21 +18816,8 @@ class ChronoSiftEngine:
                     )
                     if output.attack_technique_id:
                         techniques.add(output.attack_technique_id)
-                    all_evidence = {
-                        "attack_technique_id": (
-                            output.attack_technique_id or branch_technique_id
-                        ),
-                        "http_method": method,
-                        "canonical_endpoint": _safe_str(endpoint_vals[row_i]).strip(),
-                        "http_response_code": _normalise_integral_metadata_value(
-                            status_vals[row_i]
-                        ),
-                        "attack_indicators": "|".join(sorted(indicators)),
-                        "file_categories": "|".join(sorted(categories)),
-                        "source_ip": source_ip,
-                        "upload_outcome": upload_outcome,
-                    }
                     explanations.append({
+                        **_attack_metadata.reference_fields(emission.attack_ref),
                         "rule_id": emission.rule_id,
                         "description": emission.description,
                         "confidence": emission.confidence,
@@ -17805,23 +18828,32 @@ class ChronoSiftEngine:
                         ),
                         "signals": [emission.name],
                         "evidence": {
-                            name: all_evidence[name] for name in branch.evidence
+                            name: (output.attack_technique_id or branch_technique_id)
+                            if name == "attack_technique_id" else common_evidence[name]
+                            for name in evidence_names
                         },
                     })
 
             if technique_cols and techniques:
+                technique_rows.append(row_i)
                 for technique_col in technique_cols:
                     existing = {
                         token
                         for token in _safe_str(
-                            df.iat[row_i, technique_col]
+                            technique_values[technique_col][row_i]
                         ).split("|")
                         if token
                     }
-                    df.iat[row_i, technique_col] = "|".join(
-                        sorted(existing | techniques)
+                    technique_updates[technique_col].append(
+                        "|".join(sorted(existing | techniques))
                     )
 
+        if technique_rows:
+            for technique_col in technique_cols:
+                _materialise_null_column(df, df.columns[technique_col])
+                df.iloc[technique_rows, technique_col] = technique_updates[technique_col]
+
+    @_without_sparse_state_attrs
     def _apply_web_request_classifier_sparse(
         self,
         df: pd.DataFrame,
@@ -17880,122 +18912,23 @@ class ChronoSiftEngine:
             else None
         )
 
-        def baseline_key(context: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
-            values = tuple(
-                _safe_str(context[role]).strip().casefold()
-                for role in inference.baseline_key_fields
-            )
-            by_role = dict(zip(inference.baseline_key_fields, values))
-            if any(
-                not by_role[role]
-                for role in inference.baseline_require_nonempty_keys
-            ):
+        key_roles = {"method": 0, "host": 1, "endpoint": 2}
+        key_indices = tuple(key_roles[role] for role in inference.baseline_key_fields)
+        required_key_indices = tuple(
+            key_roles[role] for role in inference.baseline_require_nonempty_keys
+        )
+
+        def baseline_key(method: str, host: str, endpoint: str) -> Optional[Tuple[str, ...]]:
+            # These fields have already passed placeholder/null handling and
+            # stripping. Compute once, not again for every baseline lookup.
+            values = (method, host, endpoint)
+            if any(not values[index] for index in required_key_indices):
                 return None
-            return values
+            return tuple(values[index].casefold() for index in key_indices)
 
-        row_context: Dict[int, Dict[str, Any]] = {}
-        baseline_groups: Dict[
-            Tuple[str, ...], List[Tuple[int, int, int]]
-        ] = {}
-        for row_i in range(len(df)):
-            http_path = _safe_str(path_vals[row_i]).strip()
-            if not http_path:
-                continue
-            endpoint = _safe_str(endpoint_vals[row_i]).strip()
-            method = _safe_str(method_vals[row_i]).strip().upper()
-            host = _safe_str(host_vals[row_i]).strip().lower()
-            indicators = _http_sqli_indicators(http_path, policy.indicators)
-            attack_indicators = tuple(
-                token.strip().lower()
-                for token in _safe_str(attack_indicator_vals[row_i]).split("|")
-                if token.strip()
-            )
-            status_code = _normalise_integral_metadata_value(status_vals[row_i])
-            response_bytes = _normalise_integral_metadata_value(response_bytes_vals[row_i])
-            successful_response = (
-                status_code is not None
-                and policy.outcomes.success_status_minimum
-                <= status_code
-                < policy.outcomes.success_status_maximum_exclusive
-            )
-            context = {
-                "method": method,
-                "host": host,
-                "http_path": http_path,
-                "endpoint": endpoint or "",
-                "indicators": indicators,
-                "attack_indicators": attack_indicators,
-                "status_code": status_code,
-                "response_bytes": response_bytes,
-                "successful_response": successful_response,
-                "timestamp_tick": int(timestamp_values[row_i]),
-                "upload_name": _safe_str(upload_name_vals[row_i]).strip(),
-                "upload_names": _safe_str(upload_names_vals[row_i]).strip(),
-                "upload_outcome": _safe_str(upload_outcome_vals[row_i]).strip(),
-            }
-            row_context[row_i] = context
-            indicators_match = (
-                inference.baseline_sample_indicators == "any"
-                or (
-                    inference.baseline_sample_indicators == "present"
-                    and bool(indicators)
-                )
-                or (
-                    inference.baseline_sample_indicators == "absent"
-                    and not indicators
-                )
-            )
-            response_match = (
-                inference.baseline_sample_response == "any"
-                or successful_response
-            )
-            bytes_match = (
-                response_bytes is not None
-                and (
-                    response_bytes >= 0
-                    if inference.baseline_sample_bytes == "nonnegative"
-                    else response_bytes > 0
-                )
-            )
-            group_key = baseline_key(context)
-            if (
-                group_key is not None
-                and indicators_match
-                and response_match
-                and bytes_match
-            ):
-                baseline_groups.setdefault(group_key, []).append(
-                    (row_i, context["timestamp_tick"], response_bytes)
-                )
-
-        for row_i, context in row_context.items():
-            indicators = context["indicators"]
-            group_key = baseline_key(context)
-            baseline_records = (
-                baseline_groups.get(group_key, [])
-                if group_key is not None
-                else []
-            )
-            baseline_values: List[int] = []
-            for sample_row_i, sample_timestamp_tick, sample_value in baseline_records:
-                if (
-                    inference.baseline_scope == "prior_rows"
-                    and sample_row_i >= row_i
-                ):
-                    continue
-                if baseline_lookback_ticks is not None:
-                    delta_ticks = (
-                        context["timestamp_tick"] - sample_timestamp_tick
-                    )
-                    if inference.baseline_scope == "partition":
-                        delta_ticks = abs(delta_ticks)
-                    if (
-                        delta_ticks < 0
-                        or delta_ticks > baseline_lookback_ticks
-                    ):
-                        continue
-                baseline_values.append(sample_value)
-
+        def summarise_baseline(
+            baseline_values: List[int],
+        ) -> Tuple[int, Optional[float], float]:
             baseline_statistic_value: Optional[float] = None
             anomaly_threshold = float(inference.absolute_large_response_bytes)
             if len(baseline_values) >= inference.baseline_min_samples:
@@ -18025,9 +18958,155 @@ class ChronoSiftEngine:
                     if inference.threshold_combine == "maximum"
                     else min(configured_thresholds)
                 )
-            status_code = context["status_code"]
-            response_bytes = context["response_bytes"]
-            successful_response = context["successful_response"]
+            return len(baseline_values), baseline_statistic_value, anomaly_threshold
+
+        # Only this policy gives every row in a group the same sample set.
+        # Prior-row and finite-lookback policies retain row-specific selection.
+        cache_partition_baseline = (
+            inference.baseline_scope == "partition"
+            and baseline_lookback_ticks is None
+        )
+        baseline_cache: Dict[
+            Optional[Tuple[str, ...]], Tuple[int, Optional[float], float]
+        ] = {}
+
+        row_context: List[Optional[_WebRequestContext]] = []
+        baseline_groups: Dict[Tuple[str, ...], list] = {}
+        sqli_indicators = _make_sqli_indicator_lookup(policy.indicators)
+        for row_i in range(len(df)):
+            http_path = _safe_str(path_vals[row_i]).strip()
+            if not http_path:
+                continue
+            endpoint = _safe_str(endpoint_vals[row_i]).strip()
+            method = _safe_str(method_vals[row_i]).strip().upper()
+            host = _safe_str(host_vals[row_i]).strip().lower()
+            indicators = sqli_indicators(http_path)
+            attack_indicators = tuple(
+                token.strip().lower()
+                for token in _safe_str(attack_indicator_vals[row_i]).split("|")
+                if token.strip()
+            )
+            status_code = _normalise_integral_metadata_value(status_vals[row_i])
+            response_bytes = _normalise_integral_metadata_value(response_bytes_vals[row_i])
+            successful_response = (
+                status_code is not None
+                and policy.outcomes.success_status_minimum
+                <= status_code
+                < policy.outcomes.success_status_maximum_exclusive
+            )
+            group_key = baseline_key(method, host, endpoint)
+            context = _WebRequestContext(
+                row_i=row_i, group_key=group_key, method=method,
+                http_path=http_path, endpoint=endpoint,
+                indicators=indicators, attack_indicators=attack_indicators,
+                status_code=status_code, response_bytes=response_bytes,
+                successful_response=successful_response,
+                timestamp_tick=int(timestamp_values[row_i]),
+                upload_name=_safe_str(upload_name_vals[row_i]).strip(),
+                upload_names=_safe_str(upload_names_vals[row_i]).strip(),
+                upload_outcome=_safe_str(upload_outcome_vals[row_i]).strip(),
+            )
+            row_context.append(context)
+            indicators_match = (
+                inference.baseline_sample_indicators == "any"
+                or (
+                    inference.baseline_sample_indicators == "present"
+                    and bool(indicators)
+                )
+                or (
+                    inference.baseline_sample_indicators == "absent"
+                    and not indicators
+                )
+            )
+            response_match = (
+                inference.baseline_sample_response == "any"
+                or successful_response
+            )
+            bytes_match = (
+                response_bytes is not None
+                and (
+                    response_bytes >= 0
+                    if inference.baseline_sample_bytes == "nonnegative"
+                    else response_bytes > 0
+                )
+            )
+            if (
+                group_key is not None
+                and indicators_match
+                and response_match
+                and bytes_match
+            ):
+                baseline_groups.setdefault(group_key, []).append(
+                    response_bytes if cache_partition_baseline else
+                    (row_i, context.timestamp_tick, response_bytes)
+                )
+
+        outcome_cols = tuple(
+            df.columns.get_loc(field_name)
+            for field_name in dict.fromkeys((
+                "chronosift_web_outcome", outputs.web_outcome_field,
+            ))
+            if field_name in df.columns
+        )
+        outcome_values: List[str] = []
+        outcome_rows: List[int] = []
+        emission_ids_by_semantic = {
+            "attempt": inference.attempt_emission_id,
+            "response_anomaly": inference.anomaly_emission_id,
+            "probable_success": inference.probable_success_emission_id,
+        }
+        for context_i, context in enumerate(row_context):
+            # Release each record as its output payload takes over; do not
+            # retain millions of now-unused contexts until the stage exits.
+            row_context[context_i] = None
+            row_i = context.row_i
+            indicators = context.indicators
+            group_key = context.group_key
+            if cache_partition_baseline and group_key in baseline_cache:
+                baseline_sample_count, baseline_statistic_value, anomaly_threshold = (
+                    baseline_cache[group_key]
+                )
+            else:
+                baseline_records = (
+                    baseline_groups.get(group_key, [])
+                    if group_key is not None
+                    else []
+                )
+                baseline_values: List[int] = (
+                    baseline_records if cache_partition_baseline else []
+                )
+                selected_records = () if cache_partition_baseline else baseline_records
+                for sample_row_i, sample_timestamp_tick, sample_value in selected_records:
+                    if (
+                        inference.baseline_scope == "prior_rows"
+                        and sample_row_i >= row_i
+                    ):
+                        continue
+                    if baseline_lookback_ticks is not None:
+                        delta_ticks = (
+                            context.timestamp_tick - sample_timestamp_tick
+                        )
+                        if inference.baseline_scope == "partition":
+                            delta_ticks = abs(delta_ticks)
+                        if (
+                            delta_ticks < 0
+                            or delta_ticks > baseline_lookback_ticks
+                        ):
+                            continue
+                    baseline_values.append(sample_value)
+
+                baseline_sample_count, baseline_statistic_value, anomaly_threshold = (
+                    summarise_baseline(baseline_values)
+                )
+                if cache_partition_baseline:
+                    baseline_cache[group_key] = (
+                        baseline_sample_count, baseline_statistic_value, anomaly_threshold
+                    )
+                    # Cached summaries are sufficient for every remaining row.
+                    baseline_groups.pop(group_key, None)
+            status_code = context.status_code
+            response_bytes = context.response_bytes
+            successful_response = context.successful_response
             threshold_exceeded = (
                 response_bytes is not None
                 and (
@@ -18050,24 +19129,27 @@ class ChronoSiftEngine:
             sig = self._sparse_signal_dict(signal_map, row_i)
             expl = self._sparse_explain_list(explain_map, row_i)
 
-            evidence_values = {
-                "http_method": context["method"],
-                "http_path": context["http_path"][:500],
-                "canonical_endpoint": context["endpoint"],
-                "sqli_indicators": "|".join(indicators),
-                "http_response_code": status_code,
-                "http_response_bytes": response_bytes,
-                "baseline_response_statistic": baseline_statistic_value,
-                "baseline_statistic": inference.baseline_statistic,
-                "baseline_sample_count": len(baseline_values),
-                "response_anomaly_threshold": round(anomaly_threshold, 3),
-                "actor_ip": _safe_str(actor_ip_vals[row_i]).strip(),
-                "http_request_user_agent": _safe_str(ua_vals[row_i])[:240],
-                "attack_indicators": "|".join(context["attack_indicators"]),
-                "upload_name": context["upload_name"][:120],
-                "upload_names": context["upload_names"][:480],
-                "upload_outcome": context["upload_outcome"],
-            }
+            evidence_values = None
+
+            def build_evidence_values() -> Dict[str, Any]:
+                return {
+                    "http_method": context.method,
+                    "http_path": context.http_path[:500],
+                    "canonical_endpoint": context.endpoint,
+                    "sqli_indicators": "|".join(indicators),
+                    "http_response_code": status_code,
+                    "http_response_bytes": response_bytes,
+                    "baseline_response_statistic": baseline_statistic_value,
+                    "baseline_statistic": inference.baseline_statistic,
+                    "baseline_sample_count": baseline_sample_count,
+                    "response_anomaly_threshold": round(anomaly_threshold, 3),
+                    "actor_ip": _safe_str(actor_ip_vals[row_i]).strip(),
+                    "http_request_user_agent": _safe_str(ua_vals[row_i])[:240],
+                    "attack_indicators": "|".join(context.attack_indicators),
+                    "upload_name": context.upload_name[:120],
+                    "upload_names": context.upload_names[:480],
+                    "upload_outcome": context.upload_outcome,
+                }
 
             def emit(
                 emission: DetectorEmissionPolicy,
@@ -18076,11 +19158,15 @@ class ChronoSiftEngine:
                 confidence: Optional[str] = None,
                 evidence_names: Tuple[str, ...],
             ) -> bool:
+                nonlocal evidence_values
                 prior = float(sig.get(emission.name, 0.0) or 0.0)
                 if prior >= emission.value:
                     return False
+                if evidence_values is None:
+                    evidence_values = build_evidence_values()
                 sig[emission.name] = max(prior, emission.value)
                 expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": description or emission.description,
                     "confidence": confidence or emission.confidence,
@@ -18092,11 +19178,6 @@ class ChronoSiftEngine:
                 })
                 return True
 
-            emission_ids_by_semantic = {
-                "attempt": inference.attempt_emission_id,
-                "response_anomaly": inference.anomaly_emission_id,
-                "probable_success": inference.probable_success_emission_id,
-            }
             matched_semantics: Set[str] = set()
             for semantic, decision in inference.decisions_by_semantic.items():
                 if not decision.matches(decision_facts):
@@ -18115,20 +19196,17 @@ class ChronoSiftEngine:
             if (
                 "attempt" in matched_semantics
                 or policy.outcomes.attempt_when.matches(
-                    context["attack_indicators"]
+                    context.attack_indicators
                 )
             ):
                 outcome_candidates.add("attempt")
             outcome_value = policy.outcomes.select(outcome_candidates)
-            for outcome_field in dict.fromkeys((
-                "chronosift_web_outcome",
-                outputs.web_outcome_field,
-            )):
-                if outcome_field in df.columns:
-                    df.iat[row_i, df.columns.get_loc(outcome_field)] = outcome_value
+            if outcome_cols:
+                outcome_values.append(outcome_value)
+                outcome_rows.append(row_i)
 
             current_signals = signal_map.get(row_i) or {}
-            attack_indicators_set = set(context["attack_indicators"])
+            attack_indicators_set = set(context.attack_indicators)
             for branch in policy.exploit_branches:
                 conditions = branch.conditions
                 group_matches: List[bool] = []
@@ -18160,6 +19238,14 @@ class ChronoSiftEngine:
                         evidence_names=branch.evidence,
                     )
                     break
+
+        # Scalar Arrow-string assignments repeatedly rebuild array state.
+        # No classification branch consumes these outputs during this pass;
+        # write once per alias, leaving non-HTTP rows (including nulls) intact.
+        if outcome_cols and outcome_values:
+            for outcome_col in outcome_cols:
+                _materialise_null_column(df, df.columns[outcome_col])
+                df.iloc[outcome_rows, outcome_col] = outcome_values
 
     def _apply_file_lifecycle_signals_sparse(
         self,
@@ -18256,6 +19342,7 @@ class ChronoSiftEngine:
                 for name in policy.evidence_by_semantic[semantic]
             }
             self._sparse_explain_list(explain_map, row_i).append({
+                **_attack_metadata.reference_fields(emission.attack_ref),
                 "rule_id": emission.rule_id,
                 "description": emission.description,
                 "confidence": emission.confidence,
@@ -18361,7 +19448,7 @@ class ChronoSiftEngine:
                 "is_allocated": alloc_bool,
             }
             for semantic, decision in policy.row_decisions_by_semantic.items():
-                if decision.matches(kind, predicates):
+                if decision.matches(kind, predicates, parser_vals[row_i]):
                     emit(row_i, semantic, evidence_values)
 
         def lifecycle_key(row_i: int, fields: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -18649,6 +19736,7 @@ class ChronoSiftEngine:
                 "directory_hit_count": parent_counts.get(parent, 0),
             }
             expl.append({
+                **_attack_metadata.reference_fields(emission.attack_ref),
                 "rule_id": emission.rule_id,
                 "description": explanation.description,
                 "confidence": explanation.confidence,
@@ -18731,6 +19819,7 @@ class ChronoSiftEngine:
                         for evidence_value in policy.evidence
                     }
                     self._sparse_explain_list(explain_map, row_i).append({
+                        **_attack_metadata.reference_fields(projection.emission.attack_ref),
                         "rule_id": projection.emission.rule_id,
                         "description": projection.emission.description,
                         "confidence": projection.emission.confidence,
@@ -18835,6 +19924,7 @@ class ChronoSiftEngine:
                     signals[emission.name] = max(prior, emission.value)
                     explain = self._sparse_explain_list(explain_map, row_i)
                     explain.append({
+                        **_attack_metadata.reference_fields(emission.attack_ref),
                         "rule_id": emission.rule_id,
                         "description": emission.description,
                         "confidence": emission.confidence,
@@ -18994,6 +20084,7 @@ class ChronoSiftEngine:
             signals[emission.name] = max(prior, emission.value)
             explain = self._sparse_explain_list(explain_map, row_i)
             explain.append({
+                **_attack_metadata.reference_fields(emission.attack_ref),
                 "rule_id": emission.rule_id,
                 "description": emission.description,
                 "confidence": emission.confidence,
@@ -19009,6 +20100,25 @@ class ChronoSiftEngine:
         explain_map: Dict[int, List[Dict[str, Any]]],
         contextual_cache: Optional[Dict[Tuple[Any, ...], np.ndarray]] = None,
     ) -> None:
+        # This executor is row-local: batches do not change its evidence scope,
+        # baseline or temporal window. Keep global sparse-map positions stable.
+        # Never store full-window normalised text in the shared cache here.
+        frame = _drop_dataframe_attrs(df)
+        for start in range(0, len(frame), 65_536):
+            self._apply_systemd_service_persistence_batch(
+                frame.iloc[start:start + 65_536], signal_map, explain_map,
+                row_offset=start,
+            )
+
+    def _apply_systemd_service_persistence_batch(
+        self,
+        df: pd.DataFrame,
+        signal_map: Dict[int, Dict[str, Any]],
+        explain_map: Dict[int, List[Dict[str, Any]]],
+        *,
+        row_offset: int,
+    ) -> None:
+        contextual_cache: Dict[Tuple[Any, ...], np.ndarray] = {}
         policy = self.detector_policy.systemd_service_persistence
         nrows = len(df)
         if nrows == 0 or not policy.enabled:
@@ -19048,46 +20158,6 @@ class ChronoSiftEngine:
             dtype=object,
             count=nrows,
         )
-        evidence_arrays: Dict[str, np.ndarray] = {}
-        for evidence_value in policy.evidence:
-            if evidence_value.resolver == "best_effort_file_path":
-                values = _contextual_file_paths(
-                    df, contextual_cache, evidence_value.fields
-                )
-            elif evidence_value.resolver == "row_field":
-                values = _contextual_text_array(
-                    df, contextual_cache, evidence_value.fields[0]
-                )
-            elif evidence_value.resolver == "first_nonempty":
-                arrays = tuple(
-                    _contextual_text_array(df, contextual_cache, field)
-                    for field in evidence_value.fields
-                )
-                values = np.fromiter(
-                    (
-                        next(
-                            (array[row_i] for array in arrays if array[row_i]),
-                            "",
-                        )
-                        for row_i in range(nrows)
-                    ),
-                    dtype=object,
-                    count=nrows,
-                )
-            else:
-                raise ValueError(
-                    "unsupported systemd evidence resolver: "
-                    f"{evidence_value.resolver}"
-                )
-            if evidence_value.max_chars is not None:
-                limit = evidence_value.max_chars
-                values = np.fromiter(
-                    (_safe_str(value)[:limit] for value in values),
-                    dtype=object,
-                    count=nrows,
-                )
-            evidence_arrays[evidence_value.name] = values
-
         path_patterns = tuple(
             token.replace("\\", "/")
             for token in policy.artifact.path_patterns
@@ -19176,7 +20246,33 @@ class ChronoSiftEngine:
             any_branch_matches |= matches
 
         emission = policy.emission
-        for row_i in np.flatnonzero(any_branch_matches):
+        matched_positions = np.array([
+            int(i) for i in np.flatnonzero(any_branch_matches)
+            if float(signal_map.get(int(i) + row_offset, {}).get(emission.name, 0.0) or 0.0) < emission.value
+        ], dtype=np.int64)
+        if not len(matched_positions):
+            return
+
+        # Evidence resolvers do not participate in conditions. Hydrate them
+        # only for matched rows, preserving the original resolver semantics.
+        evidence_frame = df.iloc[matched_positions]
+        evidence_cache: Dict[Tuple[Any, ...], np.ndarray] = {}
+        evidence_arrays: Dict[str, np.ndarray] = {}
+        for evidence_value in policy.evidence:
+            if evidence_value.resolver == "best_effort_file_path":
+                values = _contextual_file_paths(evidence_frame, evidence_cache, evidence_value.fields)
+            elif evidence_value.resolver == "row_field":
+                values = _contextual_text_array(evidence_frame, evidence_cache, evidence_value.fields[0])
+            elif evidence_value.resolver == "first_nonempty":
+                values = _first_nonempty_normalised_text_array(evidence_frame, evidence_value.fields)
+            else:
+                raise ValueError(f"unsupported systemd evidence resolver: {evidence_value.resolver}")
+            if evidence_value.max_chars is not None:
+                values = np.fromiter((_safe_str(value)[:evidence_value.max_chars] for value in values),
+                                     dtype=object, count=len(matched_positions))
+            evidence_arrays[evidence_value.name] = values
+
+        for evidence_i, row_i in enumerate(matched_positions):
             matched_branch_ids = [
                 branch_id
                 for branch_id in policy.branch_order
@@ -19184,22 +20280,23 @@ class ChronoSiftEngine:
             ]
             if policy.branch_mode == "first_match":
                 matched_branch_ids = matched_branch_ids[:1]
-            signals = self._sparse_signal_dict(signal_map, int(row_i))
+            signals = self._sparse_signal_dict(signal_map, int(row_i) + row_offset)
             prior = float(signals.get(emission.name, 0.0) or 0.0)
             if prior >= emission.value:
                 continue
             signals[emission.name] = max(prior, emission.value)
-            explanations = self._sparse_explain_list(explain_map, int(row_i))
+            explanations = self._sparse_explain_list(explain_map, int(row_i) + row_offset)
             for branch_id in matched_branch_ids:
                 branch = branch_policies[branch_id]
                 explanations.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": branch.description,
                     "confidence": branch.confidence,
                     "evidence_type": policy.evidence_type,
                     "signals": [emission.name],
                     "evidence": {
-                        name: evidence_arrays[name][row_i]
+                        name: evidence_arrays[name][evidence_i]
                         for name in branch.evidence
                     },
                 })
@@ -19235,6 +20332,7 @@ class ChronoSiftEngine:
             return
         signals[emission.name] = max(prior, emission.value)
         self._sparse_explain_list(explain_map, row_i).append({
+            **_attack_metadata.reference_fields(emission.attack_ref),
             "rule_id": emission.rule_id,
             "description": description or emission.description,
             "confidence": emission.confidence,
@@ -19731,6 +20829,7 @@ class ChronoSiftEngine:
                 *,
                 value: float = 1.0,
                 rule_id: Optional[str] = None,
+                attack_ref: str = "",
                 evidence_type: str = "contextual",
             ) -> None:
                 sig = self._sparse_signal_dict(signal_map, row_i)
@@ -19740,6 +20839,7 @@ class ChronoSiftEngine:
                 sig[signal_name] = max(prior, value)
                 expl = self._sparse_explain_list(explain_map, row_i)
                 expl.append({
+                    **_attack_metadata.reference_fields(attack_ref),
                     "rule_id": rule_id or signal_name.upper(),
                     "description": description,
                     "confidence": confidence,
@@ -19774,7 +20874,7 @@ class ChronoSiftEngine:
                             emission.confidence,
                             evidence,
                             value=emission.value,
-                            rule_id=emission.rule_id,
+                            rule_id=emission.rule_id, attack_ref=emission.attack_ref,
                             evidence_type=download_policy.evidence_type,
                         )
 
@@ -19849,7 +20949,7 @@ class ChronoSiftEngine:
                         emission.confidence,
                         evidence,
                         value=emission.value,
-                        rule_id=emission.rule_id,
+                        rule_id=emission.rule_id, attack_ref=emission.attack_ref,
                         evidence_type=policy.evidence_type,
                     )
 
@@ -19875,12 +20975,18 @@ class ChronoSiftEngine:
         av_vals = df["av_hit"].to_numpy(copy=False)
         filenames = _column_values_or_none(df, "filename")
         avsig_vals = _column_values_or_none(df, "av_signature")
+        hash_vals = _column_values_or_none(df, "sha256_hash")
         for i in range(len(df)):
             if not _truthy_like(av_vals[i]):
                 continue
 
             sig = self._sparse_signal_dict(signal_map, i)
             expl = self._sparse_explain_list(explain_map, i)
+            profile = self._av_behaviour_catalog.get(_safe_str(hash_vals[i]).strip().upper())
+            if profile is not None:
+                _av_behaviour.merge_into_row(
+                    classifier_policy.behaviour, (profile,), sig, expl, self.weights, scope="hash"
+                )
 
             raw_sig = _safe_str(avsig_vals[i]).strip()
             parsed = (
@@ -19905,6 +21011,7 @@ class ChronoSiftEngine:
                 prior = float(sig.get(emission.name, 0.0) or 0.0)
                 sig[emission.name] = max(prior, emission.value)
                 expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": description,
                     "confidence": emission.confidence,
@@ -19959,6 +21066,10 @@ class ChronoSiftEngine:
             return
 
         ym_vals = df["yara_match"].values if "yara_match" in df.columns else np.array([None] * len(df))
+        qualified_categories = (
+            np.full(len(df), None, dtype=object)
+            if classifier_policy.metadata_on_incomplete_rule == "fail" else None
+        )
 
         for i in candidate_rows:
             match_count = int(ymc_arr[i])
@@ -19975,6 +21086,8 @@ class ChronoSiftEngine:
 
             strength_policy = classifier_policy.strength
             if not rule_names:
+                if classifier_policy.metadata_on_incomplete_rule == "fail":
+                    raise ValueError("Positive YARA evidence has no rule names; actual score/quality metadata cannot be resolved")
                 base_strength = min(
                     1.0,
                     match_count / float(strength_policy.saturation_count),
@@ -20000,6 +21113,7 @@ class ChronoSiftEngine:
                         "rule_names": [],
                     }
                     expl.append({
+                        **_attack_metadata.reference_fields(strength_policy.emission.attack_ref),
                         "rule_id": strength_policy.emission.rule_id,
                         "description": strength_policy.emission.description,
                         "confidence": strength_policy.emission.confidence,
@@ -20028,6 +21142,15 @@ class ChronoSiftEngine:
                     contributing_rule_metadata.append(meta)
 
             contributing_count = len(contributing_rule_metadata)
+            if qualified_categories is not None:
+                gate = classifier_policy.referenced_file_gate
+                qualified_categories[i] = "|".join(sorted(
+                    category for category, entries in category_hits.items()
+                    if category in gate.categories and any(
+                        meta.score >= gate.minimum_score and meta.quality >= gate.minimum_quality
+                        for _, meta in entries
+                    )
+                ))
             best_score = max(
                 (int(meta.score) for meta in contributing_rule_metadata),
                 default=0,
@@ -20074,6 +21197,7 @@ class ChronoSiftEngine:
                     "rule_names": rule_names[:strength_policy.max_rule_names],
                 }
                 expl.append({
+                    **_attack_metadata.reference_fields(strength_policy.emission.attack_ref),
                     "rule_id": strength_policy.emission.rule_id,
                     "description": strength_policy.emission.description,
                     "confidence": strength_confidence,
@@ -20118,6 +21242,7 @@ class ChronoSiftEngine:
                     "best_quality": category_best_quality,
                 }
                 expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": emission.description,
                     "confidence": category_confidence,
@@ -20128,6 +21253,9 @@ class ChronoSiftEngine:
                         for name in category_policy.evidence
                     },
                 })
+
+        if qualified_categories is not None:
+            df["chronosift_yara_qualified_categories"] = pd.array(qualified_categories, dtype="string")
 
     def _inject_profile_base_signals_sparse(
         self,
@@ -20297,6 +21425,7 @@ class ChronoSiftEngine:
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
         carried_last: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        commit_before: Optional[pd.Timestamp] = None,
     ) -> None:
         policy = self.detector_policy.ip_scope_continuity
         if not policy.enabled:
@@ -20323,6 +21452,7 @@ class ChronoSiftEngine:
         state: Dict[tuple, Dict[str, Any]] = (
             carried_last if carried_last is not None else {}
         )
+        speculative: Dict[tuple, Dict[str, Any]] = {}
 
         for actor, idxs in groups.items():
             for row_i in idxs:
@@ -20343,9 +21473,11 @@ class ChronoSiftEngine:
                     "subnet": cur_subnet,
                     "ts": t_now,
                 }
-                actor_state = state.get(actor)
+                working_state = _continuity_working_state(
+                    state, speculative, actor, t_now, commit_before)
+                actor_state = working_state.get(actor)
                 if actor_state is None:
-                    state[actor] = {
+                    working_state[actor] = {
                         "retained_reference": observation,
                         "previous_observation": observation,
                     }
@@ -20406,6 +21538,7 @@ class ChronoSiftEngine:
                             emission.value,
                         )
                         expl.append({
+                            **_attack_metadata.reference_fields(emission.attack_ref),
                             "rule_id": emission.rule_id,
                             "description": emission.description,
                             "confidence": emission.confidence,
@@ -20457,6 +21590,7 @@ class ChronoSiftEngine:
         explain_map: Dict[int, List[Dict[str, Any]]],
         row_i: int,
         key_tuple: Tuple[str, ...],
+        supporting_evidence: Optional[Dict[str, Any]] = None,
     ) -> None:
         sig = self._sparse_signal_dict(signal_map, row_i)
         expl = self._sparse_explain_list(explain_map, row_i)
@@ -20469,6 +21603,7 @@ class ChronoSiftEngine:
             )
 
         expl.append({
+            **_attack_metadata.reference_fields(tr.attack_ref),
             "rule_id": tr.rule_id,
             "description": tr.description,
             "confidence": tr.confidence,
@@ -20479,6 +21614,7 @@ class ChronoSiftEngine:
                 "key_by": ",".join(tr.key_by),
                 "key": "|".join(key_tuple),
                 "lookback_seconds": int(tr.lookback.total_seconds()),
+                **(supporting_evidence or {}),
             },
         })
 
@@ -20499,11 +21635,12 @@ class ChronoSiftEngine:
 
         thresholds_by_signal: Dict[str, Set[float]] = {}
         for tr in self.temporal_rules:
-            temporal_inputs: List[str] = []
+            temporal_inputs: List[str] = list(tr.condition_signals_any)
             if tr.mode == "cooccur":
                 temporal_inputs = [need.signal for need in tr.cooccur_all if getattr(need, "signal", None)]
             elif tr.mode == "sequence":
                 temporal_inputs = [step.signal for step in tr.sequence if getattr(step, "signal", None)]
+            temporal_inputs.extend(tr.reset_signals)
             if temporal_inputs and not all(self._is_temporal_eligible_signal(sig) for sig in temporal_inputs):
                 continue
             for signal_name in temporal_inputs:
@@ -20634,11 +21771,12 @@ class ChronoSiftEngine:
         for tr in self.temporal_rules:
             rule_start = time.perf_counter()
             emitted = 0
-            temporal_inputs: List[str] = []
+            temporal_inputs: List[str] = list(tr.condition_signals_any)
             if tr.mode == "cooccur":
                 temporal_inputs = [need.signal for need in tr.cooccur_all if getattr(need, "signal", None)]
             elif tr.mode == "sequence":
                 temporal_inputs = [step.signal for step in tr.sequence if getattr(step, "signal", None)]
+            temporal_inputs.extend(tr.reset_signals)
             if temporal_inputs and not all(self._is_temporal_eligible_signal(sig) for sig in temporal_inputs):
                 continue
 
@@ -20740,11 +21878,14 @@ class ChronoSiftEngine:
                     key in signal_has_hits for key in set(signal_keys)
                 ):
                     step_flags = [signal_hit_flags[key] for key in signal_keys]
+                    reset_flags = [signal_hit_flags[(name, tr.minimum_signal_value_exclusive)] for name in tr.reset_signals]
                     last_step = len(step_flags) - 1
+                    witness_ids = _column_values_or_none(df, "chronosift_row_id") if tr.include_supporting_rows else None
 
                     for start, end, key_tuple in group_slices:
                         left = 0
                         latest_start = [-1] * len(step_flags)
+                        latest_paths: List[Tuple[int, ...]] = [()] * len(step_flags)
                         idxs = ordered_rows[start:end]
 
                         for right, row_pos in enumerate(idxs):
@@ -20757,16 +21898,26 @@ class ChronoSiftEngine:
                             ):
                                 left += 1
 
+                            # Reset BEFORE admitting this row: recreation may seed
+                            # a new lifetime, but cannot inherit the previous one.
+                            # Scalar sequence paths only; no frame/state-tree copies.
+                            if any(flags[row_i] for flags in reset_flags):
+                                latest_start = [-1] * len(step_flags)
+                                latest_paths = [()] * len(step_flags)
                             for step_i in range(last_step, -1, -1):
                                 if not step_flags[step_i][row_i]:
                                     continue
                                 if step_i == 0:
                                     if right > latest_start[0]:
                                         latest_start[0] = right
+                                        if tr.include_supporting_rows:
+                                            latest_paths[0] = (row_i,)
                                 else:
                                     prev_start = latest_start[step_i - 1]
-                                    if prev_start >= 0 and prev_start > latest_start[step_i]:
+                                    if prev_start >= 0 and prev_start >= latest_start[step_i]:
                                         latest_start[step_i] = prev_start
+                                        if tr.include_supporting_rows:
+                                            latest_paths[step_i] = (*latest_paths[step_i - 1], row_i)
 
                             if step_flags[last_step][row_i] and latest_start[last_step] >= left:
                                 emit_row_i = (
@@ -20777,6 +21928,17 @@ class ChronoSiftEngine:
                                 self._temporal_emit_sparse(
                                     tr, signal_map, explain_map,
                                     emit_row_i, key_tuple,
+                                    supporting_evidence=(
+                                        {
+                                            "supporting_row_ids": [
+                                                witness_ids[p]
+                                                for p in latest_paths[last_step]
+                                            ],
+                                            "supporting_timestamps": [
+                                                df.index[p].isoformat() for p in latest_paths[last_step]
+                                            ],
+                                        } if tr.include_supporting_rows else None
+                                    ),
                                 )
                                 _refresh_needed_signal_hits(emit_row_i)
                                 emitted += 1
@@ -20784,6 +21946,14 @@ class ChronoSiftEngine:
             elif tr.mode in {"first_seen_value", "change_detected"}:
                 if tr.field and tr.field in cols_present:
                     field_values = _normalised_values(tr.field)
+                    admission_flags = [
+                        signal_hit_flags[(name, tr.minimum_signal_value_exclusive)]
+                        for name in tr.condition_signals_any
+                    ]
+
+                    def observation_admitted(row_i):
+                        return not admission_flags or any(flags[row_i] for flags in admission_flags)
+
                     observe_empty = (
                         tr.condition_empty_value_behavior == "observe"
                     )
@@ -20803,8 +21973,9 @@ class ChronoSiftEngine:
                                     t_now - int(time_values[int(idxs[left])])
                                 )
                             ):
-                                old_val = field_values[int(idxs[left])]
-                                if old_val or observe_empty:
+                                old_row_i = int(idxs[left])
+                                old_val = field_values[old_row_i]
+                                if observation_admitted(old_row_i) and (old_val or observe_empty):
                                     remaining = seen_counts.get(old_val, 0) - 1
                                     if remaining > 0:
                                         seen_counts[old_val] = remaining
@@ -20818,7 +21989,7 @@ class ChronoSiftEngine:
                                 left += 1
 
                             cur_val = field_values[row_i]
-                            if not cur_val and not observe_empty:
+                            if not observation_admitted(row_i) or (not cur_val and not observe_empty):
                                 continue
 
                             has_reference = head < len(observation_positions)
@@ -20872,6 +22043,12 @@ class ChronoSiftEngine:
                                 self._temporal_emit_sparse(
                                     tr, signal_map, explain_map,
                                     emit_row_i, key_tuple,
+                                    supporting_evidence={
+                                        "observed_field": tr.field,
+                                        "observed_value": cur_val,
+                                        "qualifying_signals": list(tr.condition_signals_any),
+                                        "observation_timestamp": df.index[row_i].isoformat(),
+                                    },
                                 )
                                 _refresh_needed_signal_hits(emit_row_i)
                                 emitted += 1
@@ -20902,6 +22079,7 @@ class ChronoSiftEngine:
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
         carried_last: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        commit_before: Optional[pd.Timestamp] = None,
     ) -> None:
         policy = self.detector_policy.impossible_travel
         if not policy.enabled:
@@ -20951,6 +22129,7 @@ class ChronoSiftEngine:
         state: Dict[tuple, Dict[str, Any]] = (
             carried_last if carried_last is not None else {}
         )
+        speculative: Dict[tuple, Dict[str, Any]] = {}
 
         def threshold_matches(
             value: float,
@@ -20986,9 +22165,11 @@ class ChronoSiftEngine:
                 "country": country_values[pos],
                 "ip": ip_values[pos],
             }
-            actor_state = state.get(key)
+            working_state = _continuity_working_state(
+                state, speculative, key, ts, commit_before)
+            actor_state = working_state.get(key)
             if actor_state is None:
-                state[key] = {
+                working_state[key] = {
                     "retained_reference": observation,
                     "previous_observation": observation,
                 }
@@ -21000,14 +22181,21 @@ class ChronoSiftEngine:
                 else "previous_observation"
             ]
             comparison_qualifies = False
+            nearby_observation = False
             if prev:
                 dt_seconds = (ts - prev["ts"]).total_seconds()
+                dist_km = _haversine_km(prev["lat"], prev["lon"], lat, lon)
+                # Refresh a recent observation at the same/nearby location,
+                # but retain the reference for a distant sub-minimum-time
+                # observation. Duplicate/sub-minute foreign rows must not
+                # erase the reference before a qualifying comparison.
+                nearby_observation = dt_seconds > 0 and not threshold_matches(
+                    dist_km, policy.minimum_distance_km, policy.minimum_distance_comparison)
                 if threshold_matches(
                     dt_seconds,
                     policy.minimum_time_seconds,
                     policy.minimum_time_comparison,
                 ):
-                    dist_km = _haversine_km(prev["lat"], prev["lon"], lat, lon)
                     if threshold_matches(
                         dist_km,
                         policy.minimum_distance_km,
@@ -21048,6 +22236,7 @@ class ChronoSiftEngine:
                                 "actor_key": "|".join(key),
                             }
                             expl.append({
+                                **_attack_metadata.reference_fields(emission.attack_ref),
                                 "rule_id": emission.rule_id,
                                 "description": emission.description,
                                 "confidence": emission.confidence,
@@ -21064,7 +22253,9 @@ class ChronoSiftEngine:
                 if comparison_qualifies
                 else policy.rejected_observation_update
             )
-            if update_mode == "update_reference":
+            if update_mode == "update_reference" or (
+                update_mode == "update_if_nearby" and nearby_observation
+            ):
                 actor_state["retained_reference"] = observation
 
     def _apply_geo_continuity_sparse(
@@ -21073,6 +22264,7 @@ class ChronoSiftEngine:
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
         carried_state: Optional[Dict[tuple, Dict[str, Any]]] = None,
+        commit_before: Optional[pd.Timestamp] = None,
     ) -> None:
         if len(df) == 0:
             return
@@ -21117,6 +22309,7 @@ class ChronoSiftEngine:
         )
 
         state = carried_state if carried_state is not None else {}
+        speculative: Dict[tuple, Dict[str, Any]] = {}
         timestamp_values_ns = (
             _datetime_index_absolute_ns(df.index)
             if isinstance(df.index, pd.DatetimeIndex)
@@ -21155,7 +22348,9 @@ class ChronoSiftEngine:
             if not country and not asn:
                 continue
 
-            entry = state.setdefault(
+            working_state = _continuity_working_state(
+                state, speculative, key, df.index[pos], commit_before)
+            entry = working_state.setdefault(
                 key,
                 {
                     "seen_countries": {},
@@ -21231,6 +22426,7 @@ class ChronoSiftEngine:
                     emission.value,
                 )
                 current_expl.append({
+                    **_attack_metadata.reference_fields(emission.attack_ref),
                     "rule_id": emission.rule_id,
                     "description": emission.description,
                     "confidence": emission.confidence,
@@ -21393,7 +22589,7 @@ class ChronoSiftEngine:
     # Required field collection
     # -------------------------------------------------------------------------
 
-    def _collect_required_fields(self) -> Set[str]:
+    def _collect_required_fields(self, include_rule_evidence: bool = True) -> Set[str]:
         fields: Set[str] = set()
 
         # Normalisation inputs
@@ -21401,6 +22597,10 @@ class ChronoSiftEngine:
             if spec.source:
                 fields.add(spec.source)
             fields.update(spec.fields)
+            fields.update(f for f in (spec.key_field, spec.value_field, spec.selector_field, spec.base_field) if f)
+            for selector, _, sources in spec.cases:
+                fields.add(selector)
+                fields.update(sources)
 
         fields.update(self.canonicalisation_policy.input_fields)
         fields.update(self.canonicalisation_policy.output_fields)
@@ -21415,9 +22615,10 @@ class ChronoSiftEngine:
             add_conditions(r.scope_all)
             add_conditions(r.when_any)
             add_conditions(r.when_all)
-            for evf in r.evidence_fields:
-                if evf:
-                    fields.add(evf)
+            if include_rule_evidence:
+                for evf in r.evidence_fields:
+                    if evf:
+                        fields.add(evf)
 
         for tr in self.temporal_rules:
             for k in tr.key_by:
@@ -21460,15 +22661,158 @@ class ChronoSiftEngine:
     def _apply_normalisation(
         self,
         df: pd.DataFrame,
+        stage: str = "pre",
     ) -> pd.DataFrame:
         out = df
 
         # Normalisation creates canonical actor/file/network columns from the
         # heterogeneous source schema. Rules should prefer these derived fields
         # over parser-specific raw names whenever the semantics match.
+        selection_masks: Dict[Tuple[str, str, int], np.ndarray] = {}
         for spec in self.normalisation:
+            if spec.stage != stage:
+                continue
             name = spec.name
             method = spec.method
+            # Reused role selectors are scalar boolean arrays, not row payloads.
+            # Revoke a cached selector if its source is subsequently rewritten.
+            for key in tuple(selection_masks):
+                if key[0] == name:
+                    del selection_masks[key]
+
+            def absent(field: Optional[str]) -> bool:
+                return not field or field not in out.columns or _is_compact_null(out[field])
+
+            if method in {"canonical_web_path", "file_extension", "ipv4_first"} and spec.source not in out.columns:
+                out = _ensure_object_columns(out, [name])
+                continue
+            # Do not expand missing inputs into dense strings/objects merely
+            # to rediscover that a derived column is entirely missing.
+            empty_result = (
+                method in {"bitmask_any", "casefold", "path_separators", "canonical_web_path", "file_extension", "ipv4_first", "posix_path_resolve"}
+                and absent(spec.source)
+            ) or (method == "join_fields" and any(absent(field) for field in spec.fields)) or (
+                method == "identity_lookup" and any(absent(field) for field in (spec.source, spec.key_field, spec.value_field))
+            ) or (
+                method == "select_coalesce"
+                and all(absent(field) for field in (*spec.fields, *(field for _, _, fields in spec.cases for field in fields)))
+            )
+            if empty_result:
+                out[name] = _compact_null_series(out.index)
+                continue
+
+            if method == "select_coalesce":
+                # First matching branch owns the value even when all its
+                # sources are absent. This deliberately revokes stale aliases
+                # instead of falling through to a different evidential role.
+                required = [name, *spec.fields]
+                for selector, _, sources in spec.cases:
+                    required.extend((selector, *sources))
+                out = _ensure_object_columns(out, required)
+                values = np.full(len(out), None, dtype=object)
+                remaining = np.ones(len(out), dtype=bool)
+                for selector, pattern, sources in spec.cases:
+                    cache_key = (selector, pattern.pattern, pattern.flags)
+                    if cache_key not in selection_masks:
+                        selection_masks[cache_key] = out[selector].astype("string").fillna("").str.contains(
+                            pattern, regex=True, na=False).to_numpy(dtype=bool, copy=False)
+                    selected = remaining & selection_masks[cache_key]
+                    if sources and selected.any():
+                        values[selected] = _coalesce_first_meaningful_for_mask(out, sources, selected).to_numpy(copy=False)
+                    remaining[selected] = False
+                if spec.fields and remaining.any():
+                    values[remaining] = _coalesce_first_meaningful_for_mask(out, spec.fields, remaining).to_numpy(copy=False)
+                out[name] = values
+                continue
+
+            if method == "join_fields":
+                out = _ensure_object_columns(out, [name, *spec.fields])
+                parts = [out[field].astype("string").fillna("").str.strip() for field in spec.fields]
+                valid = np.ones(len(out), dtype=bool)
+                result = parts[0]
+                for pos, part in enumerate(parts):
+                    valid &= ~part.str.casefold().isin(PLACEHOLDER_STRINGS | {""}).to_numpy(dtype=bool)
+                    if pos: result = result.str.cat(part, sep=spec.separator)
+                out[name] = result.where(valid, pd.NA)
+                continue
+
+            if method == "posix_path_resolve":
+                # Lexical POSIX reference only: no filesystem access, PATH or
+                # shell expansion, symlink or file-version identity inference.
+                # Reject '..': normalising it across a symlink can invent a
+                # different observed file. Policy owns all suspicious vocabulary.
+                out = _ensure_object_columns(out, [name, spec.source, spec.base_field])
+                values = np.full(len(out), None, dtype=object)
+                cache = {}
+                children = out[spec.source].to_numpy(copy=False)
+                bases = out[spec.base_field].to_numpy(copy=False)
+                positions = np.flatnonzero(~_missing_meaningful_value_mask(out[spec.source]).to_numpy(dtype=bool, copy=False))
+                for pos in positions:
+                    child = _safe_str(children[pos]).strip()
+                    base = "" if child.startswith("/") else _safe_str(bases[pos]).strip()
+                    key = (child, base)
+                    if key not in cache:
+                        candidate = child if child.startswith("/") else posixpath.join(base, child)
+                        valid = (candidate.startswith("/") and "/" in child
+                            and not candidate.startswith("//")
+                            and ".." not in candidate.split("/")
+                            and not re.search(r"[\x00-\x1f\x7f$`~\\]", candidate))
+                        cache[key] = posixpath.normpath(candidate) if valid else None
+                    values[pos] = cache[key]
+                out[name] = values
+                continue
+
+            if method == "bitmask_any":
+                out = _ensure_object_columns(out, [name, spec.source])
+                values = out[spec.source].astype("string").fillna("").str.strip()
+                aliases = {}
+                for value in values.unique():
+                    try:
+                        if spec.number_format == "strict_integer":
+                            # Exact text conversion: no float rounding, NaN, fractions
+                            # or guessed unprefixed octal. Legacy masks stay unchanged.
+                            if re.fullmatch(r"0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+", value):
+                                number = int(value, 0)
+                            elif re.fullmatch(r"[0-9]+(?:\.0+)?", value):
+                                number = int(value.split(".", 1)[0], 10)
+                            else:
+                                raise ValueError("not an exact non-negative integer")
+                        else:
+                            number = int(value, 16 if value.lower().startswith("0x") else 10)
+                    except ValueError:
+                        aliases[value] = None
+                        continue
+                    aliases[value] = str(int(bool(number & spec.bitmask))) if number >= 0 else None
+                out[name] = values.map(aliases)
+                continue
+
+            if method == "identity_lookup":
+                # Generic, dataset-local alias resolution. Ambiguous names do
+                # not resolve; this is not nearest-event actor attribution.
+                # Policy chooses the seed and lookup fields. Keep only scalar
+                # pairs, never nested per-row payloads or df.attrs state.
+                out = _ensure_object_columns(out, [name, spec.source, spec.key_field, spec.value_field])
+                keys = out[spec.key_field].astype("string").fillna("").str.strip()
+                if not spec.case_sensitive:
+                    keys = keys.str.casefold()
+                values = out[spec.value_field].astype("string").fillna("").str.strip()
+                valid = ~keys.isin(PLACEHOLDER_STRINGS | {""}) & ~values.str.lower().isin(PLACEHOLDER_STRINGS | {""})
+                aliases: Dict[str, str] = {}
+                ambiguous: Set[str] = set()
+                for key, value in zip(keys.loc[valid], values.loc[valid]):
+                    if key in aliases and aliases[key] != value:
+                        ambiguous.add(key)
+                    else:
+                        aliases[key] = value
+                for key in ambiguous:
+                    aliases.pop(key, None)
+                lookup = out[spec.source].astype("string").fillna("").str.strip()
+                if not spec.case_sensitive:
+                    lookup = lookup.str.casefold()
+                # Recompute: the second normalisation pass must also revoke
+                # a lookup if new seed data reveals an ambiguity.
+                out[name] = lookup.map(aliases)
+                continue
 
             if method == "coalesce":
                 # Earlier extraction and schema aliasing can populate canonical
@@ -21476,9 +22820,18 @@ class ChronoSiftEngine:
                 # highest-priority coalesce input so the semantic layer does not
                 # erase structured data when a specific source field is absent.
                 source_fields = [field_name for field_name in spec.fields if field_name != name]
+                source_fields = [field for field in source_fields if not absent(field)]
                 ensure_fields = [name] + source_fields
                 out = _ensure_object_columns(out, ensure_fields)
                 if not source_fields:
+                    if spec.overwrite_existing:
+                        out[name] = _compact_null_series(out.index)
+                    continue
+
+                if spec.overwrite_existing:
+                    # Explicit derived-field policy can revoke stale aliases
+                    # when a later pass discovers ambiguous identity seeds.
+                    out[name] = _coalesce_first_meaningful(out, source_fields)
                     continue
 
                 missing = _missing_meaningful_value_mask(out[name])
@@ -21487,6 +22840,7 @@ class ChronoSiftEngine:
 
                 if bool((~missing).any()):
                     filled = _coalesce_first_meaningful_for_mask(out, source_fields, missing)
+                    _materialise_null_column(out, name)
                     out.loc[missing, name] = filled.to_numpy(copy=False)
                 else:
                     out[name] = _coalesce_first_meaningful(out, source_fields)
@@ -21497,20 +22851,64 @@ class ChronoSiftEngine:
                     out = _ensure_object_columns(out, [name])
                     continue
                 assert spec.pattern is not None
-                derived = out[src].map(
-                    lambda value: (
-                        match.group(spec.group)
-                        if (match := spec.pattern.search(_safe_str(value))) is not None
-                        else None
-                    )
-                )
+                eligible = np.ones(len(out), dtype=bool)
+                if spec.selector_field is not None:
+                    if spec.selector_field not in out.columns:
+                        out = _ensure_object_columns(out, [name])
+                        continue
+                    if _is_compact_null(out[spec.selector_field]) and not spec.selector_pattern.search(""):
+                        out = _ensure_object_columns(out, [name])
+                        continue
+                    eligible &= out[spec.selector_field].astype("string").fillna("").str.contains(
+                        spec.selector_pattern, regex=True, na=False
+                    ).to_numpy(dtype=bool, copy=False)
                 if name in out.columns:
-                    existing = out[name]
-                    missing = _missing_meaningful_value_mask(existing)
-                    if bool(missing.any()):
-                        out.loc[missing, name] = derived.loc[missing]
+                    eligible &= _missing_meaningful_value_mask(out[name]).to_numpy(dtype=bool, copy=False)
+                out = _ensure_object_columns(out, [name])
+                positions = np.flatnonzero(eligible)
+                if not len(positions):
+                    continue
+                def extract(value):
+                    match = spec.pattern.search(_safe_str(value))
+                    return match.group(spec.group) if match is not None else None
+                if _is_compact_null(out[src]):
+                    value = extract(None)
+                    if value is None and _is_compact_null(out[name]):
+                        continue
+                    derived = pd.Series(value, index=out.index[positions], dtype=object)
                 else:
-                    out[name] = derived
+                    derived = out[src].iloc[positions].map(extract)
+                # Null matches do not justify materialising a full output
+                # column. Existing values remain untouched by this branch.
+                nonnull = derived.notna().to_numpy(dtype=bool, copy=False)
+                if _is_compact_null(out[name]):
+                    if not nonnull.any():
+                        continue
+                    positions = positions[nonnull]
+                    derived = derived.iloc[np.flatnonzero(nonnull)]
+                _materialise_null_column(out, name)
+                # Positional assignment preserves separate rows at equal
+                # nanosecond timestamps and avoids index-alignment expansion.
+                out.iloc[positions, out.columns.get_loc(name)] = derived.to_numpy(copy=False)
+
+            elif method == "casefold":
+                out = _ensure_object_columns(out, [name, spec.source])
+                out[name] = out[spec.source].astype("string").str.strip().str.casefold()
+
+            elif method == "path_separators":
+                out = _ensure_object_columns(out, [name, spec.source])
+                # Plaso may serialize repeated backslashes. Collapse only
+                # backslash runs; leave POSIX case and forward slashes alone.
+                out[name] = out[spec.source].astype("string").str.replace(r"\\+", "/", regex=True)
+
+            elif method == "canonical_web_path":
+                if spec.source not in out.columns:
+                    out = _ensure_object_columns(out, [name])
+                    continue
+                values = out[spec.source].astype("string").fillna("")
+                # Cache distinct scalar paths only; never copy nested frames.
+                aliases = {value: _canonical_web_request_path(value) for value in values.unique() if value}
+                out[name] = values.map(aliases)
 
             elif method == "file_extension":
                 src = spec.source
@@ -21650,6 +23048,7 @@ class ChronoSiftEngine:
 
             resolved_mask = recovered.notna().to_numpy(dtype=bool, copy=False)
             if resolved_mask.any():
+                _materialise_null_column(out, policy.output_field)
                 ip_col_loc = out.columns.get_loc(policy.output_field)
                 resolved_pos = pending_pos[resolved_mask]
                 resolved_vals = recovered.iloc[np.flatnonzero(resolved_mask)].to_numpy(copy=False)
@@ -21857,6 +23256,7 @@ class ChronoSiftEngine:
                     "id", "description", "priority", "scope", "when",
                     "emit", "confidence",
                 },
+                optional=_attack_metadata.ANNOTATION_KEYS,
             )
             rid = _policy_string(rr["id"], f"{path}.id")
             if rid in seen_rule_ids:
@@ -21937,6 +23337,7 @@ class ChronoSiftEngine:
                 emit_signals=emit_signals,
                 evidence_fields=evidence_fields,
                 confidence=_policy_confidence(rr["confidence"], f"{path}.confidence"),
+                attack_ref=_attack_metadata.parse_annotation(rr, path),
             ))
 
         parsed.sort(key=lambda r: r.priority, reverse=True)
@@ -21958,7 +23359,7 @@ class ChronoSiftEngine:
                     "lookback_lower_bound", "emit_on",
                     "minimum_signal_value_exclusive", "emit", "confidence",
                 },
-                optional={"sequence", "cooccur", "condition"},
+                optional={"sequence", "cooccur", "condition", "include_supporting_rows", "reset_signals"} | _attack_metadata.ANNOTATION_KEYS,
             )
             rid = _policy_string(tr["id"], f"{path}.id")
             if rid in seen_rule_ids:
@@ -21991,6 +23392,7 @@ class ChronoSiftEngine:
             condition_empty_value_behavior: Optional[str] = None
             condition_first_observation_behavior: Optional[str] = None
             condition_reference_selection: Optional[str] = None
+            condition_signals_any: Tuple[str, ...] = ()
 
             configured_modes = [
                 name for name in ("sequence", "cooccur", "condition")
@@ -22047,7 +23449,11 @@ class ChronoSiftEngine:
                         "kind", "field", "empty_value_behavior",
                         "first_observation_behavior", "reference_selection",
                     },
+                    optional={"signals_any"},
                 )
+                if "signals_any" in condition_cfg:
+                    condition_signals_any = _policy_signal_list(
+                        condition_cfg["signals_any"], f"{condition_path}.signals_any")
                 mode = _policy_enum(
                     condition_cfg["kind"],
                     f"{condition_path}.kind",
@@ -22074,6 +23480,12 @@ class ChronoSiftEngine:
                     f"{condition_path}.reference_selection",
                     allowed_reference_selections,
                 )
+
+            reset_signals = ()
+            if "reset_signals" in tr:
+                if mode != "sequence":
+                    raise ValueError(f"{path}.reset_signals: supported only for sequence rules")
+                reset_signals = _policy_signal_list(tr["reset_signals"], f"{path}.reset_signals")
 
             allowed_emit_on = {
                 "sequence": {"sequence_completion", "sequence_start"},
@@ -22144,6 +23556,13 @@ class ChronoSiftEngine:
                 condition_reference_selection=condition_reference_selection,
                 emit_signals=emit_signals,
                 confidence=conf,
+                include_supporting_rows=(
+                    _policy_bool(tr["include_supporting_rows"], f"{path}.include_supporting_rows")
+                    if "include_supporting_rows" in tr else False
+                ),
+                condition_signals_any=condition_signals_any,
+                reset_signals=reset_signals,
+                attack_ref=_attack_metadata.parse_annotation(tr, path),
             ))
 
         parsed.sort(key=lambda r: r.priority, reverse=True)
@@ -22218,6 +23637,7 @@ class ChronoSiftEngine:
                     ev[f] = _truncate_evidence_text(s)
 
             explain.append({
+                **_attack_metadata.reference_fields(rule.attack_ref),
                 "rule_id": rule.rule_id,
                 "description": rule.description,
                 "confidence": rule.confidence,
@@ -22245,6 +23665,7 @@ class ChronoSiftEngine:
     def _eval_atomic_rules_sparse(
         self,
         df: pd.DataFrame,
+        evidence_source: Optional["_ParquetEvidenceSource"] = None,
     ) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, List[Dict[str, Any]]]]:
         nrows = len(df)
         if nrows == 0 or not self.rules:
@@ -22259,8 +23680,11 @@ class ChronoSiftEngine:
         strip_lower_cache: Dict[str, pd.Series] = {}
         numeric_cache: Dict[str, pd.Series] = {}
         null_mask_cache: Dict[str, np.ndarray] = {}
-        evidence_cache: Dict[str, np.ndarray] = {}
         condition_cache: Dict[Tuple[str, str, str], np.ndarray] = {}
+        rule_conditions = [tuple((*r.scope_all, *r.scope_any, *r.when_all, *r.when_any)) for r in self.rules]
+        condition_key = lambda c: (str(c.field), str(c.op), repr(c.value))
+        condition_uses = Counter(condition_key(c) for conditions in rule_conditions for c in conditions)
+        field_uses = Counter(c.field for conditions in rule_conditions for c in conditions)
 
         def _field_series(field: str) -> pd.Series:
             ser = raw_cache.get(field)
@@ -22268,7 +23692,7 @@ class ChronoSiftEngine:
                 if field in df.columns:
                     ser = df[field]
                 else:
-                    ser = pd.Series(pd.NA, index=df.index, dtype=object)
+                    ser = _compact_null_series(df.index)
                 raw_cache[field] = ser
             return ser
 
@@ -22411,52 +23835,56 @@ class ChronoSiftEngine:
 
             return mask
 
-        for rule in self.rules:
+        for rule, conditions in zip(self.rules, rule_conditions):
             match_mask = _rule_mask(rule)
+            # Counts include short-circuited conditions: their last possible
+            # consumer has passed too. Discard cached full-window arrays now.
+            for cond in conditions:
+                key = condition_key(cond)
+                condition_uses[key] -= 1
+                if not condition_uses[key]:
+                    condition_cache.pop(key, None)
+                field_uses[cond.field] -= 1
+                if not field_uses[cond.field]:
+                    for cache in (raw_cache, text_cache, lower_cache, strip_lower_cache, numeric_cache, null_mask_cache):
+                        cache.pop(cond.field, None)
             if not bool(match_mask.any()):
                 continue
 
             positions = np.flatnonzero(match_mask)
             evidence_fields = [f for f in rule.evidence_fields if f]
 
-            for pos in positions:
-                row_i = int(pos)
-                signals = signal_map.get(row_i)
-
-                if signals is None and rule.emit_signals:
-                    signals = {}
-                    signal_map[row_i] = signals
-
-                if signals is not None:
-                    for es in rule.emit_signals:
-                        if not es.name:
-                            continue
-                        _merge_rule_signal_value(
-                            signals,
-                            es,
-                            self.rule_signal_merge_policy.atomic_rules,
-                        )
-
-                ev: Dict[str, str] = {}
+            deferred = [f for f in evidence_fields if evidence_source is not None and f in evidence_source.fields]
+            for start in range(0, len(positions), 65_536):
+                selected = positions[start:start + 65_536]
+                payload = (evidence_source.fetch(df[evidence_source.row_id_col].iloc[selected], deferred)
+                           if deferred else None)
+                evidence_values = {}
                 for field in evidence_fields:
-                    values = evidence_cache.get(field)
-                    if values is None:
-                        if field in df.columns:
-                            values = df[field].to_numpy(dtype=object, copy=False)
-                        else:
-                            values = np.full(nrows, None, dtype=object)
-                        evidence_cache[field] = values
-                    value = values[row_i]
-                    if not _is_null(value):
-                        s = _safe_str(value)
-                        ev[field] = _truncate_evidence_text(s)
-
-                explain_map.setdefault(row_i, []).append({
-                    "rule_id": rule.rule_id,
-                    "description": rule.description,
-                    "confidence": rule.confidence,
-                    "evidence": ev,
-                })
+                    if field in deferred:
+                        evidence_values[field] = payload[field].to_numpy(dtype=object, copy=False)
+                    elif field in df.columns and not _is_compact_null(df[field]):
+                        evidence_values[field] = df[field].iloc[selected].to_numpy(dtype=object, copy=False)
+                for evidence_i, pos in enumerate(selected):
+                    row_i = int(pos)
+                    signals = signal_map.get(row_i)
+                    if signals is None and rule.emit_signals:
+                        signals = {}
+                        signal_map[row_i] = signals
+                    if signals is not None:
+                        for es in rule.emit_signals:
+                            if es.name:
+                                _merge_rule_signal_value(signals, es, self.rule_signal_merge_policy.atomic_rules)
+                    ev = {}
+                    for field, values in evidence_values.items():
+                        value = values[evidence_i]
+                        if not _is_null(value):
+                            ev[field] = _truncate_evidence_text(_safe_str(value))
+                    explain_map.setdefault(row_i, []).append({
+                        **_attack_metadata.reference_fields(rule.attack_ref),
+                        "rule_id": rule.rule_id, "description": rule.description,
+                        "confidence": rule.confidence, "evidence": ev,
+                    })
 
         return signal_map, explain_map
 
@@ -22490,8 +23918,10 @@ class ChronoSiftEngine:
         explain_map: Dict[int, List[Dict[str, Any]]],
         mask: pd.Series,
         columns: Optional[List[str]] = None,
+        *,
+        build_position_map: bool = True,
     ) -> Tuple[pd.DataFrame, Dict[int, Dict[str, Any]], Dict[int, List[Dict[str, Any]]], Dict[int, int]]:
-        """Subset a frame and remap sparse state from old row positions to new row positions."""
+        """Subset and remap sparse state; core output can omit the unused position map."""
         if len(mask) != len(df):
             raise ValueError("Mask length must match DataFrame length")
         mask_array = mask.to_numpy(dtype=bool, copy=False) if hasattr(mask, "to_numpy") else np.asarray(mask, dtype=bool)
@@ -22508,9 +23938,10 @@ class ChronoSiftEngine:
         new_signal_map: Dict[int, Dict[str, Any]] = {}
         new_explain_map: Dict[int, List[Dict[str, Any]]] = {}
         old_to_new: Dict[int, int] = {}
-        for new_i, old_i in enumerate(selected_old.tolist()):
+        for new_i, old_i in enumerate(selected_old):
             old_i = int(old_i)
-            old_to_new[old_i] = new_i
+            if build_position_map:
+                old_to_new[old_i] = new_i
             if old_i in signal_map:
                 new_signal_map[new_i] = signal_map[old_i]
             if old_i in explain_map:
@@ -22559,11 +23990,13 @@ class ChronoSiftEngine:
             *self.detector_policy.geographic_continuity.output_fields.values(),
             *self.detector_policy.impossible_travel.output_fields.values(),
         )))
-        for col in configured_temporal_output_fields:
-            if col in candidate_df.columns:
-                if col not in full_df.columns:
-                    full_df[col] = pd.NA
-                full_df.iloc[old_positions, full_df.columns.get_loc(col)] = candidate_df[col].to_numpy()
+        with _detached_sparse_state(candidate_df):
+            for col in configured_temporal_output_fields:
+                if col in candidate_df.columns:
+                    if col not in full_df.columns:
+                        full_df[col] = pd.NA
+                    _materialise_null_column(full_df, col)
+                    full_df.iloc[old_positions, full_df.columns.get_loc(col)] = candidate_df[col].to_numpy()
 
         full_df.attrs.setdefault("chronosift_sparse", {})
         full_df.attrs["chronosift_sparse"]["signal_map"] = full_signal_map
@@ -22639,11 +24072,317 @@ class ChronoSiftEngine:
             *self.detector_policy.impossible_travel.output_fields.values(),
         )))
 
+    def _release_sidecar_stage_inputs(self, df: pd.DataFrame, row_id_col: str, *, temporal_only: bool) -> List[str]:
+        """Release raw inputs only after their last configured stage consumer.
+
+        This is internal to sidecar execution. Public frame APIs and full-row
+        exports retain their input columns. Output fields and explanation actor
+        fields are always retained, including zero-buffer unknown identities.
+        """
+        keep = set(_sidecar_materialisation_columns(
+            df, row_id_col=row_id_col, configured_columns=self._configured_sidecar_output_columns()))
+        keep.update(self._temporal_required_columns() if temporal_only else self._contextual_required_columns())
+        if self.trust_dampening_policy.enabled:
+            keep.update((self.trust_dampening_policy.principal_field,
+                         self.trust_dampening_policy.ip_field, self.trust_dampening_policy.asn_field))
+        removed = [col for col in df.columns if col not in keep]
+        _delete_columns_inplace(df, removed)
+        return removed
+
+    def _deferred_atomic_evidence_fields(self, available: Set[str], row_id_col: str) -> Set[str]:
+        """Only defer raw evidence that no producer, condition or later stage uses.
+
+        Schema-alias fields stay eager: rereading a raw canonical field would
+        bypass its missing-value coalescing, even if it is explanation-only.
+        """
+        fields = (set(self._atomic_required_columns()) -
+                  set(self._atomic_required_columns(include_rule_evidence=False))) & available
+        protected = {row_id_col, *self.schema_aliases}
+        protected.update(alias for aliases in self.schema_aliases.values() for alias in aliases)
+        return {field for field in fields - protected
+                if not _is_sidecar_output_column(field, self._configured_sidecar_output_columns())}
+
+    @staticmethod
+    def _history_batch_to_frame(batch):
+        """Restore physical cache types without fragile pandas map metadata.
+
+        Arrow's default conversion promotes nullable integers to floats; keep
+        integer/boolean extension arrays so even values above 2**53 are exact.
+        Persistent row IDs remain integers, including at tied timestamps.
+        """
+        import pyarrow as pa
+        def types_mapper(dtype):
+            return pd.ArrowDtype(dtype) if pa.types.is_integer(dtype) or pa.types.is_boolean(dtype) else None
+        return _restore_datetime_index(_restore_stable_nested_payloads(
+            batch.to_pandas(ignore_metadata=True, types_mapper=types_mapper)))
+
+    @staticmethod
+    def _history_key_index(frame, row_id_col):
+        """Array-based persistent-key lookup, never timestamp or row-position joins."""
+        if row_id_col not in frame or frame[row_id_col].isna().any():
+            raise ValueError("Compact history requires non-null persistent integer row IDs")
+        if not pd.api.types.is_integer_dtype(frame[row_id_col].dtype):
+            raise ValueError("Compact history requires persistent integer row IDs")
+        values = frame[row_id_col].to_numpy(copy=False)
+        order = np.argsort(values, kind="stable")
+        ordered = values[order]
+        if len(ordered) > 1 and np.any(ordered[1:] == ordered[:-1]):
+            raise ValueError("Duplicate persistent row ID in compact history")
+        return ordered, order
+
+    @staticmethod
+    def _history_key_positions(key_index, targets):
+        ordered, order = key_index
+        if targets.isna().any() or not pd.api.types.is_integer_dtype(targets.dtype):
+            raise ValueError("Invalid core row ID in compact history")
+        values = targets.to_numpy(copy=False)
+        positions = np.searchsorted(ordered, values)
+        if np.any(positions >= len(ordered)) or not np.array_equal(ordered[positions], values):
+            raise ValueError("Missing core row ID in compact history")
+        return order[positions]
+
+    @staticmethod
+    def _pop_history_payloads(frame, *, explanations):
+        signals = {}
+        explain = {}
+        if "chronosift_signals" in frame:
+            for pos, value in enumerate(frame.pop("chronosift_signals")):
+                if isinstance(value, dict) and value:
+                    signals[pos] = value
+        if "chronosift_explain" in frame:
+            values = frame.pop("chronosift_explain")
+            if explanations:
+                for pos, value in enumerate(values):
+                    if isinstance(value, (list, tuple, np.ndarray)) and len(value):
+                        explain[pos] = list(value)
+        return signals, explain
+
+    def _prepare_history_month(self, dataset_root, cache_root, year, month, plan, telemetry,
+                               *, row_id_col, profile_manifest, file_hit_manifest, nsrl_cache_df,
+                               retain_zero_weight_lifecycle_signals, enrichment):
+        """Generate short-window features once; persist only the core month.
+
+        Atomic/non-temporal execution remains month-sized. Nested payload
+        materialisation and persistence are bounded to 65,536 rows. Long
+        temporal history is never substituted for this feature window.
+        """
+        start, end = _month_window_utc(year, month)
+        deferred_fields = self._deferred_atomic_evidence_fields(
+            set(_duckdb_dataset_columns(dataset_root)), row_id_col)
+        fields = sorted((set(self._atomic_required_columns()) - deferred_fields) | {row_id_col})
+        feature_overlap = timedelta(seconds=plan["feature_seconds"])
+        evidence_source = (_ParquetEvidenceSource(dataset_root, deferred_fields, row_id_col,
+                           start - feature_overlap, end + feature_overlap) if deferred_fields else None)
+        with telemetry.stage("prepare_history_features", year=year, month=month):
+            frame = load_plaso_parquet_timerange(dataset_root, start=start, end=end,
+                overlap=f'{plan["feature_seconds"]}s', columns=fields)
+            loaded = len(frame)
+            atomic = self.apply_atomic(frame, apply_profiling=True, enforce_required_fields=True,
+                materialise_event_columns=False, profile_manifest=profile_manifest,
+                nsrl_cache_df=nsrl_cache_df, evidence_source=evidence_source, **enrichment)
+            del frame
+            sparse = atomic.attrs.pop("chronosift_sparse", {}) or {}
+            signals = sparse.get("signal_map", {}) or {}
+            explanations = sparse.get("explain_map", {}) or {}
+            self._release_sidecar_stage_inputs(atomic, row_id_col, temporal_only=False)
+            self._apply_non_temporal_contextual_sparse(atomic, signals, explanations,
+                file_hit_manifest=file_hit_manifest,
+                retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals)
+            self._release_sidecar_stage_inputs(atomic, row_id_col, temporal_only=True)
+            self._mark_compact_temporal_payload_candidates(atomic)
+            core, signals, explanations, _ = self._subset_sparse_state(
+                atomic, signals, explanations, (atomic.index >= start) & (atomic.index < end),
+                columns=list(atomic.columns), build_position_map=False)
+            del atomic, sparse, _
+            destination = Path(cache_root) / f"year={year}" / f"month={month:02d}"
+            destination.mkdir(parents=True, exist_ok=False)
+            files = []
+            # Keep schema-bearing empty partitions: they can be meaningful
+            # continuity checkpoints in the original monthly layout.
+            for lower in range(0, max(1, len(core)), 65_536):
+                upper = min(len(core), lower + 65_536)
+                batch = core.iloc[lower:upper]
+                batch["chronosift_signals"] = [signals.get(i) for i in range(lower, upper)]
+                batch["chronosift_explain"] = [explanations.get(i) for i in range(lower, upper)]
+                target = destination / f"part-{len(files):05d}.parquet"
+                _write_parquet_subchunk(batch, target, dict(compression="zstd", index=True),
+                                       nested_columns_encoding="arrow")
+                files.append(str(target))
+                del batch
+            receipt = dict(year=year, month=month, rows_loaded=loaded, rows=len(core), files=files,
+                           columns=list(core.columns), feature_seconds=plan["feature_seconds"])
+            with (destination / "complete.json").open("x") as handle:
+                json.dump(receipt, handle, indent=2)
+            _invalidate_dataset_columns_cache(str(cache_root))
+        return receipt
+
+    def _process_compact_history(self, dataset_root, output_root, plan, telemetry, *, row_id_col,
+                                 materialise_event_columns, materialise_explain_columns,
+                                 profile_manifest, profile_summary, file_hit_manifest, nsrl_cache_df,
+                                 retain_zero_weight_lifecycle_signals, enrichment):
+        """Two-level execution: short feature windows, narrow long history.
+
+        Only temporal inputs/signals occupy the long window. Full review
+        payloads are read, joined, scored and written a batch at a time after
+        temporal evaluation. All baseline observations, including zero-signal
+        rows, remain in the temporal frame. No live-frame defensive copies.
+        """
+        import pyarrow.parquet as pq
+
+        partitions = list(iter_hive_year_month_partitions(dataset_root))
+        history = timedelta(seconds=plan["history_seconds"])
+        cache_root = Path(tempfile.mkdtemp(prefix=Path(output_root).name + ".history-",
+                                         dir=Path(output_root).parent))
+        contract = dict(dataset_root=str(Path(dataset_root).resolve()), execution_plan=plan,
+                        rules_sha256=hashlib.sha256(json.dumps(self.rules_doc, sort_keys=True, default=str).encode()).hexdigest(),
+                        weights_sha256=hashlib.sha256(json.dumps(self.weights_doc, sort_keys=True, default=str).encode()).hexdigest(),
+                        cache_scope="fresh invocation only; no cross-run reuse", completed=False)
+        with (cache_root / "manifest.json").open("x") as handle:
+            json.dump(contract, handle, indent=2)
+        telemetry.emit("compact_history_cache", path=str(cache_root), **contract)
+        ready = {}
+        reports = []
+        geo_state, travel_state, ip_state = {}, {}, {}
+        temporal_columns = sorted(set(self._compact_temporal_columns()) | {row_id_col, "chronosift_signals"})
+        for part_index, (year, month, _) in enumerate(partitions):
+            start, end = _month_window_utc(year, month)
+            lower, upper = start - history, end + history
+            needed = [(y, m) for y, m, _ in partitions
+                      if (lower.year, lower.month) <= (y, m) <= (upper.year, upper.month)]
+            for y, m in needed:
+                if (y, m) not in ready:
+                    ready[y, m] = self._prepare_history_month(dataset_root, cache_root, y, m, plan, telemetry,
+                        row_id_col=row_id_col, profile_manifest=profile_manifest, file_hit_manifest=file_hit_manifest,
+                        nsrl_cache_df=nsrl_cache_df, retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals,
+                        enrichment=enrichment)
+            telemetry.emit("partition_start", year=year, month=month)
+            with telemetry.stage("load_compact_history", year=year, month=month):
+                temporal = load_plaso_parquet_timerange(str(cache_root), start=start, end=end,
+                    overlap=f'{plan["history_seconds"]}s', columns=temporal_columns)
+                signals, _ = self._pop_history_payloads(temporal, explanations=False)
+                key_index = self._history_key_index(temporal, row_id_col)
+            generated_explanations = {}
+            commit_before = (_month_window_utc(*partitions[part_index + 1][:2])[0] - history
+                             if part_index + 1 < len(partitions) else None)
+            with telemetry.stage("contextual_temporal_stage", year=year, month=month, rows_loaded=len(temporal)):
+                composite_source = _ParquetEvidenceSource(str(cache_root), self._temporal_required_columns(),
+                                                         row_id_col, lower, upper)
+                self._apply_temporal_contextual_sparse(temporal, signals, generated_explanations,
+                    geo_continuity_state=geo_state, impossible_travel_state=travel_state,
+                    ip_continuity_state=ip_state, continuity_commit_before=commit_before,
+                    composite_source=composite_source)
+                telemetry.emit("composite_history_payloads", year=year, month=month,
+                               rows_fetched=composite_source.rows_fetched, batches=composite_source.batches)
+            written = 0
+            file_count = 0
+            target_dir = Path(output_root) / f"year={year}" / f"month={month:02d}"
+            # Once per output month, never once per batch (which would erase
+            # earlier chunks). The public driver owns output-root cleanup.
+            _cleanup_partition_output_tree(Path(output_root), {(year, month)})
+            target_dir.mkdir(parents=True, exist_ok=True)
+            with telemetry.stage("write_output_partition", year=year, month=month):
+                for source_file in ready[year, month]["files"]:
+                    for arrow_batch in pq.ParquetFile(source_file).iter_batches(batch_size=65_536):
+                        # Arrow map extension metadata is not round-trippable
+                        # through pandas_dtype in every supported pandas build.
+                        # Physical datetime remains a column and is restored by
+                        # the same explicit path used for DuckDB batch reads.
+                        core = self._history_batch_to_frame(arrow_batch)
+                        _, old_explanations = self._pop_history_payloads(core, explanations=True)
+                        positions = self._history_key_positions(key_index, core[row_id_col])
+                        if not np.array_equal(temporal.index[positions], core.index):
+                            raise ValueError("Compact history timestamp mismatch for persistent row ID")
+                        for column in temporal.columns:
+                            if column != row_id_col:
+                                core[column] = temporal[column].iloc[positions].array
+                        core_signals = {i: signals[int(pos)] for i, pos in enumerate(positions) if signals.get(int(pos))}
+                        core_explanations = {}
+                        for i, pos in enumerate(positions):
+                            value = old_explanations.get(i, []) + generated_explanations.get(int(pos), [])
+                            if value:
+                                core_explanations[i] = value
+                        # Cache Parquets deliberately omit DataFrame attrs.
+                        # Restore exactly the global manifest fields consumed
+                        # by scoring/explanations, not a frame-local rebuild or
+                        # a copy of the full profile/provenance history.
+                        if self.profiling_policy.enabled:
+                            core.attrs["_chronosift_profile_manifest"] = {
+                                key: (profile_manifest or {}).get(key, {})
+                                for key in ("validation", "probabilities", "upper_probability_bounds")
+                            }
+                        self._apply_contextual_postprocessing_sparse(core, core_signals, core_explanations, apply_profiling=True)
+                        core["chronosift_score"] = self._score_signal_map_sparse(len(core), core_signals,
+                            index=core.index, score_multipliers=self._profile_score_amplifier_values(core))
+                        if materialise_event_columns:
+                            self._materialise_sparse_event_columns(core, core_signals, core_explanations,
+                                materialise_explain_columns=materialise_explain_columns)
+                        output = _prepare_sidecar_output_frame(core, row_id_col=row_id_col,
+                            configured_columns=self._configured_sidecar_output_columns())
+                        _write_parquet_subchunk(output, target_dir / f"part-{file_count:05d}.parquet",
+                            dict(compression="zstd", index=True), nested_columns_encoding="arrow")
+                        written += len(core)
+                        file_count += 1
+                        del core, output, core_signals, core_explanations, old_explanations, positions, arrow_batch, _
+            if written != ready[year, month]["rows"]:
+                raise ValueError("Compact history core output count mismatch")
+            report = dict(year=year, month=month, rows_loaded=len(temporal), candidate_rows=len(temporal),
+                rows_written=written, output=str(output_root), output_mode="sidecar",
+                raw_feature_rows_loaded=ready[year, month]["rows_loaded"],
+                history_columns=list(temporal.columns), history_cache=str(cache_root),
+                retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals,
+                profile_validation=dict(profile_summary), execution_plan=plan,
+                report=dict(parquet_files=file_count, materialisation_batch_rows=65_536))
+            reports.append(report)
+            telemetry.emit("partition_end", year=year, month=month, rows_loaded=len(temporal), rows_written=written,
+                           candidate_rows=len(temporal), raw_feature_rows_loaded=ready[year, month]["rows_loaded"])
+            del temporal, signals, generated_explanations, key_index
+        with (cache_root / "complete.json").open("x") as handle:
+            json.dump(dict(completed=True, rows_written=sum(r["rows_written"] for r in reports)), handle)
+        telemetry.emit("run_end", partitions=len(reports), rows_written=sum(r["rows_written"] for r in reports))
+        return reports
+
     def process_parquet_dataset_partitioned(
+        self, dataset_root: str, output_root: str, overlap: Optional[str] = None,
+        materialise_event_columns: bool = False, materialise_explain_columns: bool = True,
+        geoip_city_db: Optional[str] = None, geoip_asn_db: Optional[str] = None,
+        av_csv_path: Optional[str] = None, luhn_csv_path: Optional[str] = None,
+        nsrl_parquet_path: Optional[str] = None, candidate_threshold: float = 0.0,
+        candidate_window: str = "30m", profile_manifest: Optional[Dict[str, Any]] = None,
+        file_hit_manifest: Optional[Dict[str, Any]] = None, profile_manifest_path: Optional[str] = None,
+        file_hit_manifest_path: Optional[str] = None, output_mode: str = "full",
+        row_id_col: str = CHRONOSIFT_ROW_ID_COLUMN, clean_output_root: Optional[bool] = None,
+        telemetry_jsonl_path: Optional[str] = None, retain_zero_weight_lifecycle_signals: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Plan applicable history, then execute with exception-safe rule scope.
+
+        The engine instance is reusable after success or failure. The plan is
+        confined to this dataset invocation; public dataframe APIs are unchanged.
+        """
+        plan = self.plan_partition_execution(dataset_root, overlap)
+        previous_rules = self.temporal_rules
+        try:
+            if plan is not None:
+                excluded = set(plan["omitted_rule_ids"])
+                self.temporal_rules = [tr for tr in previous_rules if tr.rule_id not in excluded]
+                overlap = f'{plan["history_seconds"]}s'
+                if output_mode != "sidecar":
+                    plan = {**plan, "compact_history": False, "full_output_uses_eager_history": True}
+            return self._process_partitioned_with_plan(
+                dataset_root, output_root, overlap, materialise_event_columns, materialise_explain_columns,
+                geoip_city_db, geoip_asn_db, av_csv_path, luhn_csv_path, nsrl_parquet_path,
+                candidate_threshold, candidate_window, profile_manifest, file_hit_manifest,
+                profile_manifest_path, file_hit_manifest_path, output_mode, row_id_col,
+                clean_output_root, telemetry_jsonl_path, retain_zero_weight_lifecycle_signals,
+                _execution_plan=plan,
+            )
+        finally:
+            self.temporal_rules = previous_rules
+
+    def _process_partitioned_with_plan(
         self,
         dataset_root: str,
         output_root: str,
-        overlap: str = "24h",
+        overlap: Optional[str] = None,
         materialise_event_columns: bool = False,
         materialise_explain_columns: bool = True,
         geoip_city_db: Optional[str] = None,
@@ -22662,6 +24401,7 @@ class ChronoSiftEngine:
         clean_output_root: Optional[bool] = None,
         telemetry_jsonl_path: Optional[str] = None,
         retain_zero_weight_lifecycle_signals: bool = False,
+        _execution_plan=None,
     ) -> List[Dict[str, Any]]:
         """
         Process a Hive-partitioned parquet dataset month-by-month using a staged pipeline:
@@ -22684,7 +24424,8 @@ class ChronoSiftEngine:
         if output_mode not in {"full", "sidecar"}:
             raise ValueError(f"Unsupported output_mode: {output_mode!r}")
 
-        overlap_window = parse_lookback(overlap)
+        minimum_overlap = self.minimum_partition_overlap()
+        overlap_window = parse_lookback(overlap) if overlap is not None else max(timedelta(hours=24), minimum_overlap)
         enabled_temporal_policies = self._enabled_temporal_policy_detectors()
         if enabled_temporal_policies:
             longest_name, longest_policy = max(
@@ -22697,6 +24438,15 @@ class ChronoSiftEngine:
                     f"detector_policy.detectors.{longest_name}.lookback: "
                     f"overlap={overlap!r}, lookback={longest_policy.lookback}"
                 )
+
+        if overlap_window < minimum_overlap:
+            raise ValueError(
+                "Partition overlap must cover the configured temporal dependencies: "
+                f"overlap={overlap!r}, required={minimum_overlap}"
+            )
+        logger.info("Partition overlap resolved to %s (policy minimum %s)", overlap_window, minimum_overlap)
+        # Lower loaders take duration strings, not the optional API default.
+        overlap = f"{int(overlap_window.total_seconds())}s"
 
         if clean_output_root is None:
             clean_output_root = True
@@ -22712,6 +24462,8 @@ class ChronoSiftEngine:
             retain_zero_weight_lifecycle_signals=bool(retain_zero_weight_lifecycle_signals),
         )
         try:
+            if _execution_plan is not None:
+                telemetry.emit("partition_execution_plan", **_execution_plan)
             output_root_path = Path(output_root)
             if clean_output_root and output_root_path.exists():
                 if output_root_path.is_dir():
@@ -22724,6 +24476,10 @@ class ChronoSiftEngine:
 
             if not output_root_path.exists():
                 output_root_path.mkdir(parents=True, exist_ok=True)
+
+            self.attack_metadata.write_run_metadata(output_root_path)
+            if self.attack_metadata.enabled:
+                telemetry.emit("attack_metadata", **self.attack_metadata.provenance)
 
             base_dataset_columns = set(_duckdb_dataset_columns(dataset_root))
 
@@ -22892,19 +24648,50 @@ class ChronoSiftEngine:
                     nsrl_parquet_path=nsrl_parquet_path,
                 )
 
+            if _execution_plan is not None and _execution_plan["compact_history"]:
+                return self._process_compact_history(
+                    dataset_root, output_root, _execution_plan, telemetry,
+                    row_id_col=row_id_col, materialise_event_columns=materialise_event_columns,
+                    materialise_explain_columns=materialise_explain_columns,
+                    profile_manifest=profile_manifest, profile_summary=profile_summary,
+                    file_hit_manifest=file_hit_manifest, nsrl_cache_df=nsrl_cache_df,
+                    retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals,
+                    enrichment=dict(geoip_city_db=geoip_city_db, geoip_asn_db=geoip_asn_db,
+                        av_csv_path=av_csv_path, luhn_csv_path=luhn_csv_path, nsrl_parquet_path=nsrl_parquet_path),
+                )
+
             geo_continuity_state: Dict[tuple, Dict[str, Any]] = {}
             impossible_travel_state: Dict[tuple, Dict[str, Any]] = {}
             ip_continuity_state: Dict[tuple, Dict[str, Any]] = {}
 
-            for year, month, _part_path in iter_hive_year_month_partitions(dataset_root):
+            partitions = list(iter_hive_year_month_partitions(dataset_root))
+            full_atomic_columns = set(self._atomic_required_columns())
+            deferred_fields = set()
+            if output_mode == "sidecar":
+                deferred_fields = self._deferred_atomic_evidence_fields(base_dataset_columns, row_id_col)
+            for partition_index, (year, month, _part_path) in enumerate(partitions):
                 logger.info("Pipeline stage: processing partition %04d-%02d", year, month)
                 month_start, month_end = _month_window_utc(year, month)
+                # Checkpoint at the NEXT INPUT window's lower bound, not the
+                # current output month end. Both forward and backward overlap
+                # are replayed from that strictly earlier state on the next
+                # iteration. Missing months and exact-boundary ties are safe.
+                continuity_commit_before = (
+                    _month_window_utc(*partitions[partition_index + 1][:2])[0] - overlap_window
+                    if partition_index + 1 < len(partitions) else None
+                )
 
                 partition_fields = {"year": int(year), "month": int(month)}
                 telemetry.emit("partition_start", **partition_fields)
 
                 logger.info("Pipeline stage: loading partition window")
-                atomic_columns = self._atomic_required_columns()
+                atomic_columns = sorted(full_atomic_columns - deferred_fields)
+                evidence_source = (_ParquetEvidenceSource(dataset_root, deferred_fields, row_id_col,
+                                   month_start - overlap_window, month_end + overlap_window)
+                                   if deferred_fields else None)
+                candidate_df = candidate_signal_map = candidate_explain_map = old_to_new = None
+                candidate_mask = temporal_base_mask = None
+                core_signal_map = core_explain_map = None
                 if output_mode == "sidecar":
                     # Sidecar mode still needs the stable join key during the
                     # atomic/contextual pipeline even though the original base
@@ -22924,6 +24711,7 @@ class ChronoSiftEngine:
                     telemetry.emit("partition_end", rows_loaded=0, rows_written=0, candidate_rows=0, **partition_fields)
                     continue
 
+                rows_loaded = len(df)
                 logger.info("Pipeline stage: running atomic stage for partition %04d-%02d", year, month)
                 with telemetry.stage("atomic_stage", rows_loaded=int(len(df)), **partition_fields):
                     # Atomic processing is the single-event rule layer. Keeping
@@ -22941,11 +24729,21 @@ class ChronoSiftEngine:
                         nsrl_cache_df=nsrl_cache_df,
                         materialise_event_columns=False,
                         profile_manifest=profile_manifest,
+                        evidence_source=evidence_source,
                     )
+                # The original input wrapper can retain pre-normalisation
+                # buffers even after atomic returns a replacement frame.
+                del df
 
-                sparse = atomic.attrs.get("chronosift_sparse", {}) or {}
+                # Internal partition processing passes maps explicitly. Keep
+                # them detached through candidate selection, scoring and output
+                # preparation as well as the detector loops themselves.
+                sparse = atomic.attrs.pop("chronosift_sparse", {}) or {}
                 signal_map = sparse.get("signal_map", {}) or {}
                 explain_map = sparse.get("explain_map", {}) or {}
+                if output_mode == "sidecar":
+                    removed = self._release_sidecar_stage_inputs(atomic, row_id_col, temporal_only=False)
+                    telemetry.emit("fields_released", before_stage="contextual", columns=removed, **partition_fields)
 
                 logger.info("Pipeline stage: running contextual stage for partition %04d-%02d", year, month)
                 with telemetry.stage("contextual_non_temporal_stage", rows_loaded=int(len(atomic)), **partition_fields):
@@ -22957,6 +24755,9 @@ class ChronoSiftEngine:
                         file_hit_manifest=file_hit_manifest,
                         retain_zero_weight_lifecycle_signals=retain_zero_weight_lifecycle_signals,
                     )
+                if output_mode == "sidecar":
+                    removed = self._release_sidecar_stage_inputs(atomic, row_id_col, temporal_only=True)
+                    telemetry.emit("fields_released", before_stage="temporal", columns=removed, **partition_fields)
 
                 candidate_rows = 0
                 if (
@@ -22991,6 +24792,7 @@ class ChronoSiftEngine:
                                     geo_continuity_state=geo_continuity_state,
                                     impossible_travel_state=impossible_travel_state,
                                     ip_continuity_state=ip_continuity_state,
+                                    continuity_commit_before=continuity_commit_before,
                                 )
                             elif candidate_rows > 0:
                                 temporal_columns = self._temporal_required_columns()
@@ -23008,10 +24810,12 @@ class ChronoSiftEngine:
                                     geo_continuity_state=geo_continuity_state,
                                     impossible_travel_state=impossible_travel_state,
                                     ip_continuity_state=ip_continuity_state,
+                                    continuity_commit_before=continuity_commit_before,
                                 )
                                 atomic = self._merge_sparse_contextual_updates(
                                     atomic, signal_map, explain_map, candidate_df, old_to_new
                                 )
+                                atomic.attrs.pop("chronosift_sparse", None)
                         else:
                             candidate_rows = int(len(atomic))
                             logger.info(
@@ -23026,6 +24830,7 @@ class ChronoSiftEngine:
                                 geo_continuity_state=geo_continuity_state,
                                 impossible_travel_state=impossible_travel_state,
                                 ip_continuity_state=ip_continuity_state,
+                                continuity_commit_before=continuity_commit_before,
                             )
 
                 self._apply_contextual_postprocessing_sparse(
@@ -23049,7 +24854,6 @@ class ChronoSiftEngine:
                 with telemetry.stage("prepare_output_partition", candidate_rows=int(candidate_rows), **partition_fields):
                     if materialise_event_columns:
                         logger.info("Pipeline stage: materialising review columns for partition %04d-%02d", year, month)
-                        sparse = atomic.attrs.get("chronosift_sparse", {}) or {}
                         core_columns = list(atomic.columns)
                         if output_mode == "sidecar":
                             # Sidecar mode does not need the full event-width core
@@ -23065,11 +24869,13 @@ class ChronoSiftEngine:
                             )
                         core, core_signal_map, core_explain_map, _ = self._subset_sparse_state(
                             atomic,
-                            sparse.get("signal_map", {}) or {},
-                            sparse.get("explain_map", {}) or {},
+                            signal_map,
+                            explain_map,
                             core_mask,
                             columns=core_columns,
+                            build_position_map=False,
                         )
+                        del _
                         self._materialise_sparse_event_columns(
                             core,
                             core_signal_map,
@@ -23109,7 +24915,7 @@ class ChronoSiftEngine:
                 reports.append({
                     "year": year,
                     "month": month,
-                    "rows_loaded": int(len(df)),
+                    "rows_loaded": int(rows_loaded),
                     "candidate_rows": int(candidate_rows),
                     "rows_written": int(len(core_to_write)),
                     "output": out_path,
@@ -23117,14 +24923,25 @@ class ChronoSiftEngine:
                     "retain_zero_weight_lifecycle_signals": bool(retain_zero_weight_lifecycle_signals),
                     "profile_validation": dict(profile_summary),
                     "report": report,
+                    **({"execution_plan": _execution_plan} if _execution_plan is not None else {}),
                 })
                 telemetry.emit(
                     "partition_end",
-                    rows_loaded=int(len(df)),
+                    rows_loaded=int(rows_loaded),
                     rows_written=int(len(core_to_write)),
                     candidate_rows=int(candidate_rows),
                     **partition_fields,
                 )
+                if evidence_source is not None:
+                    telemetry.emit("deferred_evidence", fields=sorted(deferred_fields),
+                                   batches=evidence_source.batches, rows_fetched=evidence_source.rows_fetched, **partition_fields)
+                # No completed month should remain referenced while the next
+                # large input window is loaded. Persistent continuity state is
+                # held separately above; it is not discarded here.
+                del atomic, sparse, signal_map, explain_map, core, core_to_write
+                del candidate_df, candidate_signal_map, candidate_explain_map, old_to_new
+                del core_signal_map, core_explain_map, evidence_source
+                del candidate_mask, temporal_base_mask, core_mask
 
             telemetry.emit("run_end", partitions=len(reports), rows_written=int(sum(int(r.get("rows_written", 0)) for r in reports)))
             return reports
@@ -23398,6 +25215,63 @@ def _restore_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
 
     raise ValueError("Parquet dataset must already include a datetime index or recoverable datetime column")
 
+
+
+class _ParquetEvidenceSource:
+    """Batched late loading of fields used exclusively in rule explanations.
+
+    IDs, never timestamps or row positions, join back to immutable evidence.
+    The planner excludes every condition, normalisation, enrichment, detector
+    and output dependency. An unavailable or ambiguous row is an error, not
+    silently missing evidence. Each caller supplies at most 65,536 IDs.
+    """
+    def __init__(self, path: str, fields: Iterable[str], row_id_col: str,
+                 start: pd.Timestamp, end: pd.Timestamp):
+        self.path = path
+        self.fields = frozenset(fields)
+        self.row_id_col = row_id_col
+        self.start, self.end = start, end
+        self.datetime_col = _dataset_datetime_column(path)
+        self.batches = self.rows_fetched = 0
+
+    def fetch(self, ids: pd.Series, columns: Iterable[str]) -> pd.DataFrame:
+        columns = list(dict.fromkeys(columns))
+        if not columns:
+            return pd.DataFrame(index=pd.RangeIndex(len(ids)))
+        if not set(columns) <= self.fields:
+            raise ValueError("Deferred evidence request includes an unplanned field")
+        if len(ids) > 65_536 or not pd.api.types.is_integer_dtype(ids.dtype) or ids.isna().any() or ids.duplicated().any():
+            raise ValueError("Deferred evidence requires a bounded batch of unique non-null integer row IDs")
+        requested = pd.DataFrame({"row_id": ids.to_numpy(copy=False), "ordinal": np.arange(len(ids), dtype=np.int64)})
+        con = _get_duckdb_connection()
+        relation = f"__chronosift_payload_{id(requested):x}"
+        quote = _duckdb_quote_ident
+        params: List[Any] = [_parquet_dataset_glob(self.path)]
+        predicates = []
+        if self.datetime_col:
+            predicates.append(f"b.{quote(self.datetime_col)} >= ? AND b.{quote(self.datetime_col)} <= ?")
+            params.extend((_duckdb_timestamp_param(self.start), _duckdb_timestamp_param(self.end)))
+        months = _iter_year_months(self.start, self.end)
+        if months:
+            predicates.append("(" + " OR ".join("(b.year = ? AND b.month = ?)" for _ in months) + ")")
+            params.extend(value for pair in months for value in pair)
+        condition = (" AND " + " AND ".join(predicates)) if predicates else ""
+        selections = ", ".join(f"b.{quote(c)}" for c in columns)
+        con.register(relation, requested)
+        try:
+            result = con.execute(
+                f"SELECT b.{quote(self.row_id_col)} AS __matched_id, {selections} "
+                f"FROM {quote(relation)} r LEFT JOIN read_parquet(?, union_by_name=true, hive_partitioning=true) b "
+                f"ON b.{quote(self.row_id_col)} = r.row_id{condition} ORDER BY r.ordinal", params,
+            ).fetch_df()
+        finally:
+            con.unregister(relation)
+        if len(result) != len(ids) or result["__matched_id"].isna().any() or not np.array_equal(result["__matched_id"].to_numpy(), ids.to_numpy()):
+            raise ValueError("Deferred evidence row IDs are missing, duplicated or mismatched")
+        del result["__matched_id"]
+        self.batches += 1
+        self.rows_fetched += len(ids)
+        return _restore_stable_nested_payloads(result)
 
 
 def _duckdb_read_parquet_df(
@@ -24018,6 +25892,8 @@ def _web_relevant_yara_rule_evidence(
         seen_names.add(normalised_rule_name)
         meta = metadata_index.get(rule_name)
         if meta is None:
+            if classifier_policy.metadata_on_incomplete_rule == "fail":
+                raise ValueError(f"YARA match {rule_name!r} has no indexed score/quality metadata; check extraction corpus provenance")
             category = (
                 _classify_yara_rule(rule_name, classifier_policy)
                 if classifier_policy.unindexed_rule == "name_only"
@@ -24040,6 +25916,62 @@ def _web_relevant_yara_rule_evidence(
                 "quality": int(meta.quality),
             })
     return evidence
+
+
+_FILE_IDENTITY_SET_FIELDS = (
+    "hit_types", "av_signatures", "av_categories", "av_families",
+    "yara_rules", "yara_categories",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _FileIdentitySnapshot:
+    sets: Tuple[frozenset[str], ...]
+    metadata: Tuple[Tuple[str, str, int, int], ...]
+
+
+class _FileIdentityCache:
+    """Bounded, call-local snapshots of read-only manifest identity objects."""
+
+    def __init__(self, max_entries: int = 1024):
+        self.max_entries = max_entries
+        self._entries: Dict[int, Tuple[dict, _FileIdentitySnapshot]] = {}
+
+    def merge_into(self, target: Dict[str, Any], source: Any) -> None:
+        if not isinstance(source, dict):
+            return
+        entry = self._entries.get(id(source))
+        if entry is not None and entry[0] is source:
+            snapshot = entry[1]
+        else:
+            normalised = _normalise_file_identity(source)
+            snapshot = _FileIdentitySnapshot(
+                tuple(frozenset(normalised[key]) for key in _FILE_IDENTITY_SET_FIELDS),
+                tuple((rule, meta["category"], meta["score"], meta["quality"])
+                      for rule, meta in normalised["yara_rule_metadata"].items()),
+            )
+            # Bound both the entry count and admitted identity size. Large or
+            # high-cardinality manifests still work without retained snapshots.
+            items = sum(len(values) for values in snapshot.sets) + len(snapshot.metadata)
+            if len(self._entries) < self.max_entries and items <= 256:
+                characters = sum(len(value) for values in snapshot.sets for value in values)
+                characters += sum(len(rule) + len(category) for rule, category, _, _ in snapshot.metadata)
+                if characters <= 16384:
+                    self._entries[id(source)] = (source, snapshot)
+        for key, values in zip(_FILE_IDENTITY_SET_FIELDS, snapshot.sets):
+            target[key].update(values)
+        for rule, category, score, quality in snapshot.metadata:
+            target["yara_rule_metadata"][rule] = {
+                "category": category, "score": score, "quality": quality,
+            }
+
+
+def _merge_normalised_file_identity(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Merge known-normalised row state, retaining independent mutable metadata."""
+    for key in _FILE_IDENTITY_SET_FIELDS:
+        target[key].update(source[key])
+    for rule, meta in source["yara_rule_metadata"].items():
+        target["yara_rule_metadata"][rule] = dict(meta)
 
 
 def _empty_file_identity() -> Dict[str, Any]:
@@ -24317,6 +26249,12 @@ def _finalise_referenced_file_hit_manifest(
     web_basename_identity_map: Dict[str, Dict[str, Any]] = {}
     web_path_sources: Dict[str, Set[str]] = {}
     web_basename_sources: Dict[str, Set[str]] = {}
+    web_casefold_path_map: Dict[str, Set[str]] = {}
+    web_casefold_basename_map: Dict[str, Set[str]] = {}
+    web_casefold_identity_map: Dict[str, Dict[str, Any]] = {}
+    web_casefold_basename_identity_map: Dict[str, Dict[str, Any]] = {}
+    web_casefold_path_sources: Dict[str, Set[str]] = {}
+    web_casefold_basename_sources: Dict[str, Set[str]] = {}
     normalised_file_identity_map = {
         str(path): _normalise_file_identity(identity)
         for path, identity in (file_identity_map or {}).items()
@@ -24373,33 +26311,55 @@ def _finalise_referenced_file_hit_manifest(
             web_tags.add("yara")
         if not web_tags:
             continue
+        case_insensitive = _web_filesystem_path_is_case_insensitive(filesystem_path)
+        if case_insensitive:
+            path_map, name_map = web_casefold_path_map, web_casefold_basename_map
+            path_identities, name_identities = web_casefold_identity_map, web_casefold_basename_identity_map
+            path_sources, name_sources = web_casefold_path_sources, web_casefold_basename_sources
+        else:
+            path_map, name_map = web_path_map, web_basename_map
+            path_identities, name_identities = web_identity_map, web_basename_identity_map
+            path_sources, name_sources = web_path_sources, web_basename_sources
         for alias in _web_path_aliases_for_filesystem_path(filesystem_path, document_roots):
-            alias_key = alias.casefold()
-            web_path_sources.setdefault(alias_key, set()).add(filesystem_path)
-            web_path_map.setdefault(alias_key, set()).update(web_tags)
-            basename = _basename_from_reference_path(alias).casefold()
+            alias_key = alias.casefold() if case_insensitive else alias
+            path_sources.setdefault(alias_key, set()).add(filesystem_path)
+            path_map.setdefault(alias_key, set()).update(web_tags)
+            basename = _basename_from_reference_path(alias)
+            if case_insensitive:
+                basename = basename.casefold()
             if basename:
-                web_basename_sources.setdefault(basename, set()).add(filesystem_path)
-                web_basename_map.setdefault(basename, set()).update(web_tags)
+                name_sources.setdefault(basename, set()).add(filesystem_path)
+                name_map.setdefault(basename, set()).update(web_tags)
             identity = web_identity(filesystem_path, web_tags)
-            _merge_file_identity(web_identity_map.setdefault(alias_key, _empty_file_identity()), identity)
+            _merge_file_identity(path_identities.setdefault(alias_key, _empty_file_identity()), identity)
             if basename:
                 _merge_file_identity(
-                    web_basename_identity_map.setdefault(basename, _empty_file_identity()),
+                    name_identities.setdefault(basename, _empty_file_identity()),
                     identity,
                 )
     # A URL alias or upload basename that resolves to more than one distinct
     # hit-bearing filesystem path has no defensible single identity. Drop the
     # ambiguous lookup rather than unioning unrelated AV/YARA evidence across
     # document roots or directories. Exact SHA-256 lookups remain available.
-    for alias_key, source_paths in web_path_sources.items():
-        if len(source_paths) > 1:
-            web_path_map.pop(alias_key, None)
-            web_identity_map.pop(alias_key, None)
-    for basename, source_paths in web_basename_sources.items():
-        if len(source_paths) > 1:
-            web_basename_map.pop(basename, None)
-            web_basename_identity_map.pop(basename, None)
+    for sources, folded_sources, tags_map, identities, folded_tags, folded_identities in (
+        (web_path_sources, web_casefold_path_sources, web_path_map, web_identity_map,
+         web_casefold_path_map, web_casefold_identity_map),
+        (web_basename_sources, web_casefold_basename_sources, web_basename_map,
+         web_basename_identity_map, web_casefold_basename_map, web_casefold_basename_identity_map),
+    ):
+        for key, source_paths in sources.items():
+            folded_key = key.casefold()
+            cross_mode_ambiguous = folded_key in folded_sources
+            if len(source_paths) > 1 or cross_mode_ambiguous:
+                tags_map.pop(key, None)
+                identities.pop(key, None)
+            if cross_mode_ambiguous:
+                folded_tags.pop(folded_key, None)
+                folded_identities.pop(folded_key, None)
+        for key, source_paths in folded_sources.items():
+            if len(source_paths) > 1:
+                folded_tags.pop(key, None)
+                folded_identities.pop(key, None)
     return {
         "schema_version": REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION,
         "clamav_policy_digest": str(clamav_policy_digest or ""),
@@ -24413,6 +26373,10 @@ def _finalise_referenced_file_hit_manifest(
         "file_identity_map": normalised_file_identity_map,
         "web_identity_map": web_identity_map,
         "web_basename_identity_map": web_basename_identity_map,
+        "web_casefold_path_map": web_casefold_path_map,
+        "web_casefold_basename_map": web_casefold_basename_map,
+        "web_casefold_identity_map": web_casefold_identity_map,
+        "web_casefold_basename_identity_map": web_casefold_basename_identity_map,
         "hash_hit_map": hash_hit_map,
         "hash_identity_map": hash_identity_map,
     }
@@ -24454,9 +26418,11 @@ def build_global_referenced_file_hit_manifest(
     # bytes.
     _invalidate_hash_enrichment_cache(av_csv_path)
     _invalidate_hash_enrichment_cache(luhn_csv_path)
+    behaviour_policy = clamav_classifier_policy.behaviour if clamav_classifier_policy.enabled else None
+    behaviour_catalog = _av_behaviour.load_catalog(av_csv_path, behaviour_policy)
 
     def finalise() -> Dict[str, Any]:
-        return _finalise_referenced_file_hit_manifest(
+        manifest = _finalise_referenced_file_hit_manifest(
             hit_map,
             basename_map,
             strong_yara_paths,
@@ -24471,6 +26437,33 @@ def build_global_referenced_file_hit_manifest(
             yara_policy_digest=yara_classifier_policy.policy_digest,
             source_digest=source_digest,
         )
+        if behaviour_policy is not None and behaviour_policy.enabled:
+            profiles = {key: value for key, value in behaviour_catalog.items()
+                        if "av" in hash_source_hit_map.get(key, ()) and value["capabilities"]}
+            paths: Dict[str, Set[str]] = {}
+            for key in profiles:
+                for filename in hash_path_map.get(key, ()):
+                    paths.setdefault(filename, set()).add(key)
+            payload: Dict[str, Any] = {"schema_version": _av_behaviour.SCHEMA_VERSION,
+                "policy_sha256": behaviour_policy.policy_digest, "profiles": profiles,
+                "paths": {key: sorted(value) for key, value in paths.items()},
+                "web_paths": {}, "web_casefold_paths": {}, "web_names": {}, "web_casefold_names": {}}
+            for filename, hashes in paths.items():
+                folded = _web_filesystem_path_is_case_insensitive(filename)
+                path_name = "web_casefold_paths" if folded else "web_paths"
+                name_name = "web_casefold_names" if folded else "web_names"
+                admitted_paths = manifest["web_casefold_path_map" if folded else "web_path_map"]
+                admitted_names = manifest["web_casefold_basename_map" if folded else "web_basename_map"]
+                for alias in _web_path_aliases_for_filesystem_path(filename, referenced_file_policy.document_roots):
+                    alias = alias.casefold() if folded else alias
+                    basename = _basename_from_reference_path(alias)
+                    if alias in admitted_paths:
+                        payload[path_name][alias] = sorted(hashes)
+                    if basename in admitted_names:
+                        payload[name_name][basename] = sorted(hashes)
+            _av_behaviour.validate_payload(payload, behaviour_policy)
+            manifest["av_behaviour"] = payload
+        return manifest
 
     available = set(_duckdb_dataset_columns(dataset_root))
     current_path_field = referenced_file_policy.current_path_field
@@ -24964,6 +26957,14 @@ def load_profile_manifest(path: str) -> Dict[str, Any]:
 
 
 def _serialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    casefold_maps = {
+        field: {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get(field, {}).items()}
+        for field in ("web_casefold_path_map", "web_casefold_basename_map")
+    }
+    casefold_maps.update({
+        field: {str(k): _serialise_file_identity(v) for k, v in (manifest or {}).get(field, {}).items()}
+        for field in ("web_casefold_identity_map", "web_casefold_basename_identity_map")
+    })
     hit_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("hit_map", {}).items()}
     basename_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("basename_map", {}).items()}
     web_path_map = {str(k): sorted(str(x) for x in v) for k, v in (manifest or {}).get("web_path_map", {}).items()}
@@ -24986,7 +26987,9 @@ def _serialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in (manifest or {}).get("hash_identity_map", {}).items()
     }
     return {
-        "schema_version": int((manifest or {}).get("schema_version", 1) or 1),
+        **casefold_maps,
+        **({"av_behaviour": manifest["av_behaviour"]} if "av_behaviour" in (manifest or {}) else {}),
+        "schema_version": (manifest or {}).get("schema_version", 1),
         "clamav_policy_digest": _safe_str(
             (manifest or {}).get("clamav_policy_digest")
         ).strip(),
@@ -25012,6 +27015,14 @@ def _serialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _deserialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    casefold_maps = {
+        field: {str(k): set(v or []) for k, v in (manifest or {}).get(field, {}).items()}
+        for field in ("web_casefold_path_map", "web_casefold_basename_map")
+    }
+    casefold_maps.update({
+        field: {str(k): _normalise_file_identity(v) for k, v in (manifest or {}).get(field, {}).items()}
+        for field in ("web_casefold_identity_map", "web_casefold_basename_identity_map")
+    })
     hit_map = {str(k): set(v or []) for k, v in (manifest or {}).get("hit_map", {}).items()}
     basename_map = {str(k): set(v or []) for k, v in (manifest or {}).get("basename_map", {}).items()}
     web_path_map = {str(k): set(v or []) for k, v in (manifest or {}).get("web_path_map", {}).items()}
@@ -25034,7 +27045,9 @@ def _deserialise_file_hit_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in (manifest or {}).get("hash_identity_map", {}).items()
     }
     return {
-        "schema_version": int((manifest or {}).get("schema_version", 1) or 1),
+        **casefold_maps,
+        **({"av_behaviour": manifest["av_behaviour"]} if "av_behaviour" in (manifest or {}) else {}),
+        "schema_version": (manifest or {}).get("schema_version", 1),
         "clamav_policy_digest": _safe_str(
             (manifest or {}).get("clamav_policy_digest")
         ).strip(),

@@ -9067,11 +9067,11 @@ class ChronoSiftV231DetectorPolicyTest(unittest.TestCase):
                     ),
                     expected_source_digest=manifest["source_digest"],
                 ),
-                r"schema 8 != 7",
+                rf"schema {MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION + 1} != {MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION}",
             )
 
             non_integer_schema = deepcopy(manifest)
-            non_integer_schema["schema_version"] = 7.0
+            non_integer_schema["schema_version"] = float(MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION)
             self.assertRegex(
                 MODULE._file_hit_manifest_stale_reason(
                     non_integer_schema,
@@ -9081,7 +9081,7 @@ class ChronoSiftV231DetectorPolicyTest(unittest.TestCase):
                         referenced_file_policy.policy_digest
                     ),
                 ),
-                r"schema 7\.0 != 7",
+                rf"schema {MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION}\.0 != {MODULE.REFERENCED_FILE_HIT_MANIFEST_SCHEMA_VERSION}",
             )
 
             original_csv_stat = av_csv.stat()

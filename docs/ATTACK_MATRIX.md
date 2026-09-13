@@ -1,6 +1,39 @@
 # ChronoSift v2.31 Dead-Box ATT&CK Matrix
 
+This is the historical implementation matrix, not a guarantee that every
+Plaso representation of a technique is recognised or adequately weighted.
+See [Windows scoring policy](WINDOWS_SCORING_DESIGN.md) for corrected source
+coverage, new contextual scoring and current MITRE cross-references in the
+isolated v13/v12 candidate. Its version note distinguishes those references
+from this historical matrix; no runtime taxonomy migration is implied.
+
 Status key:
+
+The v22/v20 [ranking refinements](RANKING_REFINEMENTS.md) distinguish ordinary
+cron observations (T1053.003), bare Linux unit changes (T1543.002) and weak script
+names (T1505.003) from qualified behaviour. Supported payload invocation keeps
+its priority. AV-family promotion and T1486 interpretation are diagnostic only;
+classification and weights are not changed by this policy.
+
+The v21/v19 [behavioural policy](BEHAVIOURAL_SCORING.md) adds outcome-aware
+sudo (T1548.003), FTP archive-transfer candidates (T1048.003; incoming direction
+kept distinct), preload-control changes (T1574.006), and web administrative-edit
+attempts/direct classified shell context (T1505.003). These are investigator
+priorities, not confirmed technique outcomes. Credential-tool evidence (T1003)
+is no longer classified as a database export merely by a `dump` substring.
+
+The v19/v16 [Linux tool policy](LINUX_TOOL_SCORING.md) adds qualified scheduled
+invocation context (T1053.003/T1059) and distinguishes keylogger support (T1056.001)
+from proved input capture. Failed-only T1110 evidence receives low priority, with
+successful access/follow-on escalation retained. These are contextual candidates,
+not additional claims of confirmed payload effects.
+
+The v20/v18 [Linux account policy](LINUX_ACCOUNT_SCORING.md) adds root-owned
+SUID executable staging artefacts (T1548.001), explicit UID-0 creation severity
+(T1136.001), and creation-anchored successful account use (T1078.003). File mode
+is not execution proof, and same-host privileged-access chronology is not a
+creator/session/IP attribution. These qualified additions do not rewrite the
+historical matrix's broader coverage claims.
 
 - `Covered` = implemented explicitly in ChronoSift v2.31
 - `Plaso-possible` = realistically derivable from dead-box Plaso artifacts but not yet modeled deeply enough

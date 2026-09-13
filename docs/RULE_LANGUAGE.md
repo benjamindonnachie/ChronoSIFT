@@ -1,11 +1,38 @@
 # ChronoSIFT -- Rule Language and Detector Policy
 
+Rules v24 add optional top-level `attack_metadata` and per-producer `attack_ids`,
+`attack_basis`, `attack_note`, and optional `attack_source`. Once enabled, every
+common detector emission and ordinary atomic/temporal rule must be explicitly
+mapped or unmapped. See [ATT&CK metadata](ATTACK_METADATA.md) for strict validation,
+external-ID handling, provenance and the scoring-neutral contract.
+
 This document describes the executable configuration accepted by ChronoSIFT.
 The shipped [v2.31 rules](../rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml)
 are the complete baseline and the reference for fields specific to an individual
 detector.
 
+The optional top-level `partition_execution` contract in candidate v18 controls
+dataset applicability and raw-feature versus temporal-history windows. It is
+validated separately from scoring rules; missing means legacy execution, not
+implicit defaults. See [partition execution](PARTITION_EXECUTION.md) for the
+complete contract, conservative admission proof, retained baseline observations
+and frame-scoped result differences.
+
 ## Purpose
+
+Candidate v22/v20 uses existing atomic rules, grouped signal gates, temporal
+projections and phase-35 adjustments to separate low-information cron/systemd
+observations and weak web-shell names from qualified evidence. No parser or
+engine changes are required. See [ranking refinements](RANKING_REFINEMENTS.md)
+for unique producer ownership, phase ordering, exact weights and AV diagnostic scope.
+
+Candidate v21 adds `posix_path_resolve` normalisation (`from`, `base_field`),
+a lexical, case-preserving path reference with no PATH/filesystem/shell access.
+Lifecycle derived predicates can reference earlier declarations only; forward
+references and cycles fail validation. Ordinary rules still own sudo/FTP/control
+path vocabulary and weights. The configuration-only `configure_web_roots.py`
+helper emits a new effective YAML without modifying the input. See
+[behavioural scoring](BEHAVIOURAL_SCORING.md) for exact semantics and controls.
 
 ChronoSIFT uses YAML for ordinary rules and for detectors that have been moved
 onto the typed policy surface. The configuration has three rule surfaces:
@@ -25,9 +52,13 @@ The language is designed to be:
 
 Rules and detectors emit **signals**, which are later combined into behavioural
 scores. For these three surfaces, YAML owns the declared policy and Python owns
-the reusable executor mechanics needed to evaluate it efficiently. The shipped
-thirty-five-detector registry is authoritative: incomplete policy fails startup
-instead of falling back to code-owned detector judgement.
+the reusable executor mechanics needed to evaluate it efficiently. Python also
+defines a deliberately closed interface: required baseline IDs, typed schemas,
+executor bindings and allowed execution ordering. YAML is authoritative within
+that interface, not an unrestricted detector/plugin language. The published,
+machine-checked [detector-policy v1 contract](DETECTOR_POLICY_CONTRACT.md) names
+all 35 required IDs and the four permitted additional-executor families.
+Incomplete policy fails startup instead of falling back to code-owned judgement.
 Rules and weights are loaded with duplicate-key rejection at every mapping
 depth. Repeating a key is an error rather than silently replacing its earlier
 value; both documents must also have a mapping at their top level.
@@ -232,6 +263,8 @@ temporal_rules:
 | `emit_on` | Mandatory mode-specific anchor. Sequences allow `sequence_completion` or `sequence_start`; co-occurrences allow `current_input` or `window_start`; first-seen conditions use `condition_match`; change conditions allow `condition_match` or `reference_observation`. |
 | `minimum_signal_value_exclusive` | Mandatory non-negative admission threshold shared by every configured input signal; a value must be strictly greater. |
 | `sequence` | Ordered signal requirements. |
+| `include_supporting_rows` | Optional boolean, default false. Sequence explanations include witness `supporting_row_ids` and `supporting_timestamps` in order; IDs come from `chronosift_row_id`, never timestamp joins. |
+| `reset_signals` | Optional non-empty list of unique declared lowercase signals, sequence mode only. An admitted reset clears the current key's sequence before processing that row; the row may then seed a new lifetime. Resets share the input threshold and temporal eligibility guards and are retained as replay/candidate dependencies. Omitted means no reset. |
 | `cooccur.all` | Signal requirements that may occur in any order. |
 | `condition.kind` / `condition.field` | Value-state rule: `first_seen_value` or `change_detected`, and the field to observe. |
 | `condition.empty_value_behavior` | Mandatory `ignore` or `observe` treatment of normalised empty/placeholder values. |
@@ -529,20 +562,84 @@ As a parser primitive, the engine also treats the common source sentinels `-`,
 is not detector vocabulary. The Windows policy can add source-specific
 placeholders for its canonical extraction.
 
-`normalisation` is a non-empty ordered list with unique output names. Four
+`normalisation` is a non-empty ordered list with unique output names. Eleven
 methods are accepted:
 
 | Method | Exact keys |
 |---|---|
-| `coalesce` | `name`, `method`, non-empty ordered `fields` |
-| `regex_first` | `name`, `method`, `from`, `pattern`, `group`; optional integer `flags` |
+| `coalesce` | `name`, `method`, non-empty ordered `fields`; optional boolean `overwrite_existing` (default false) |
+| `select_coalesce` | `name`, `method`, non-empty ordered `cases: [{field, pattern, fields}]`, explicit `default_fields`; field lists may be empty |
+| `regex_first` | `name`, `method`, `from`, `pattern`, `group`; optional integer `flags` and `selector: {field, pattern}` |
 | `ipv4_first` | `name`, `method`, `from` |
 | `file_extension` | `name`, `method`, `from` |
+| `identity_lookup` | `name`, `method`, `from`, `key_field`, `value_field`; optional boolean `case_sensitive` (default false) |
+| `join_fields` | `name`, `method`, non-empty `fields`, `separator` |
+| `bitmask_any` | `name`, `method`, `from`, non-zero non-negative integer `mask`; optional `number_format: legacy_decimal_hex` (default) or `strict_integer` |
+| `path_separators` | `name`, `method`, `from` |
+| `casefold` | `name`, `method`, `from` |
+| `canonical_web_path` | `name`, `method`, `from` |
+
+Every entry also accepts `stage: pre` (default) or `stage: post_web`. Pre
+normalisations retain their two existing passes; post-web entries run once
+after HTTP field materialisation, in declaration order. This enables aliases
+from observed web requests without moving detection vocabulary into Python.
+`select_coalesce` recomputes its output from the first matching case, including
+a null value when that case's fields are absent or empty. It never falls through
+to a different evidential role because the selected account is unknown. Only
+unmatched rows use `default_fields`. See [event-role identities](IDENTITY_ROLES.md).
+`join_fields` requires every meaningful component; incomplete identities stay
+null. `bitmask_any` defaults to the original decimal/hex text parser, emits `1`
+or `0`, and leaves malformed/negative input null. Opt-in `strict_integer` also
+accepts integral decimal floats such as `2541.0` and prefixed octal/binary
+integers, using exact text conversion rather than float rounding. Fractions,
+scientific notation, malformed strings and symbolic permission text stay null;
+unprefixed numbers remain decimal. See [Linux account policy](LINUX_ACCOUNT_SCORING.md)
+for a mode-mask and lifecycle-reset application. `path_separators` only converts slashes;
+it does not change case or prove volume equivalence. `canonical_web_path`
+uses the existing canonical URL-path mechanic, not a filesystem lookup.
 
 Unknown methods do not create empty placeholder columns. Regex syntax and the
 selected capture group are checked during construction. After configured IP
 recovery, the same declarative list is reapplied so downstream coalesces can
 consume a recovered value without a code-owned list of canonical field names.
+
+`regex_first` selectors prefilter source rows by regex and only fill missing
+outputs. `identity_lookup` builds casefolded/trimmed key-to-value aliases from
+meaningful rows in the current frame; a key with conflicting values never
+resolves. Set `case_sensitive: true` for case-sensitive filesystem aliases.
+It recomputes its output each pass, including revoking ambiguity.
+Use `coalesce.overwrite_existing: true` only for derived fields that must also
+be recomputed when their inputs change. The default retains existing canonical
+data. This is local alias resolution, not a global identity store or actor
+attribution heuristic.
+
+Partitioned processing with omitted overlap chooses at least 24 hours and the
+largest configured temporal requirement. Generic sequences/co-occurrences
+include upstream generic emitted-signal horizons in evaluation order; enabled
+typed detectors also contribute their individual lookbacks. This is not a
+general dependency solver for arbitrary cross-executor chains. Explicit shorter
+overlap fails before output; policy authors must still validate boundaries and
+any additional typed-detector dependencies. The Windows/web v14 policy needs 174
+hours, not the prior 24-hour default.
+The v16 creator-provenance chain requires 199 hours. Carried continuity state
+is checkpointed strictly before the next overlapping input window begins;
+future-suffix state is isolated per affected identity, without dataframe or
+recursive state copying. See [context provenance](CONTEXT_PROVENANCE.md).
+
+Value-state `condition` definitions optionally admit observations through
+`signals_any`, using the rule's positive-value threshold. Ineligible rows
+neither seed nor refresh the history; their later expiry cannot decrement an
+admitted observation's count. The filter participates in signal validation
+and composed overlap calculation. Absence of the option preserves unfiltered
+historical policies.
+
+Lifecycle `conditions.row_emissions.<semantic>` optionally accepts
+`excluded_parser_prefixes`; matching is case-insensitive and excludes only
+that emission branch. Travel `state.rejected_observation_update` additionally
+accepts `update_if_nearby`: refresh a later below-distance-threshold observation,
+but retain the reference for a distant observation below the time threshold.
+`casefold` strips and Unicode-casefolds a configured input; it is opt-in, not
+global identity or filesystem normalisation.
 
 ### GeoIP enrichment outputs
 
@@ -586,7 +683,8 @@ it may intentionally consume another upstream infrastructure classification.
 in YAML are the complete policy for the thirty-five required detectors. The
 engine does not fill missing detector policy from Python defaults.
 
-The shipped thirty-five-detector section has this outer shape:
+The required baseline section has this outer shape; current policies may also
+configure additional IDs using the published extension families:
 
 ```yaml
 detector_policy:
@@ -790,7 +888,14 @@ with 27 token keys and 28 ordered override patterns. See the
 `yara_classifier` has fixed raw inputs (`yara_match` and derived
 `yara_match_count`) but no code-owned classification or emission table.
 `metadata` owns the resource path, missing/parse-error behaviour, indexed
-defaults, and unindexed-rule treatment. `classification.ordered_rules` uses
+defaults, and unindexed-rule treatment. Optional `metadata.on_incomplete_rule`
+is `defaults` (historical behaviour) or `fail`. The latter rejects missing or
+non-numeric rule score/quality, duplicate names, unknown matched names and
+unnamed positive matches. Actual signed numeric values retain existing 0–100
+normalization. Under strict policy, `chronosift_yara_qualified_categories`
+contains only categories supported by one rule meeting both configured
+referenced-file score and quality thresholds; separate rules cannot donate
+one threshold each. `classification.ordered_rules` uses
 first-match semantics over `rule_name`, combined `tags`, metadata `category`,
 and `tc_detection_type`; supported operators are `equals_any`,
 `contains_any`, `contains_none`, and `regex`. `categories` is the non-empty
@@ -805,7 +910,10 @@ gate are mandatory. See the
 `web_request_classifier` has no fallback detection policy in Python. Its
 `inputs` bind the raw Plaso fields and source-IP precedence; `outputs` bind the
 configurable `chronosift_` aliases while the canonical sidecar columns remain
-available. `matching`, `indicators`, and `upload` own parser qualification,
+available. Optional `matching.allowed_url_schemes` restricts standalone URLs
+and outer request-target schemes; v14 admits HTTP/HTTPS. A nested `file://`
+inside an HTTP query is not rejected as the outer scheme. `matching`,
+`indicators`, and `upload` own parser qualification,
 bounded decoding, ordered SQLi regexes, traversal/LFI/RFI/command/probe and
 web-shell-parameter patterns, upload methods, accepted query-parameter names,
 the mandatory `filename_extension_admission` mode, nameless-target handling,
@@ -1273,7 +1381,8 @@ inputs, projections, branches or sequence, bounds, outputs, and explanation
 policy. This keeps implementation details in code without hiding detection
 judgement there.
 Additional detector IDs may select only `signal_gate` (atomic or contextual),
-`signal_sequence` (temporal), or `signal_projection` (contextual or temporal)
+`signal_sequence` (temporal), `signal_projection` (contextual or temporal), or
+`qualified_artifact_command` (contextual)
 without adding a detector-specific Python policy branch. `ordered_row_rules`,
 `ordered_signal_adjustments`, and `grouped_signal_window` are reusable
 implementations bound to required baseline definitions and fixed schedule
@@ -1285,6 +1394,15 @@ specialised executor types, including `temporal_context_branches`,
 definitions.
 
 ## Signal weighting
+
+The optional contextual `qualified_artifact_command` executor (phase 38) is
+specified in [Linux tool scoring](LINUX_TOOL_SCORING.md#bounded-linkage-contract).
+It accepts YAML-owned `fields` (path, parser, type, scope, command, row_id, hash),
+`file_parser`, `file_type`, `marker_pattern` (named root capture), `references`
+(named target and optional directory captures), `source_signals`, `target_signals`,
+positive `lookback`, `unlabelled_file_scope` (`isolated` or `current_dataset`),
+and named `exact_path`/`repository` emissions. Its lookback
+participates in raw-feature planning; alternative links are never double-counted.
 
 Signals contribute to event scores using the shipped
 [`weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml`](../rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml).

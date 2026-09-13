@@ -8,6 +8,34 @@ The engine is part of a research pipeline tied to the [MITRE ATT&CK framework](h
 
 ## What it detects
 
+The isolated runner defaults to rules v24 / weights v21. V24 adds scoring-neutral,
+evidence-qualified [ATT&CK attribution](docs/ATTACK_METADATA.md) and a generated
+[current mapping inventory](docs/ATTACK_MATRIX_CURRENT.md). Outcome-aware sudo,
+FTP transfers, loader-control changes and web-code edits are prioritised for
+human investigation without demanding proof of compromise. Explicit evidence
+document-root configuration reuses the existing web-shell rules. See
+[behavioural scoring](docs/BEHAVIOURAL_SCORING.md) for MITRE ATT&CK rationale,
+weights, configuration and validation boundaries.
+
+Large-window execution uses compact missing fields, bounded evidence construction
+and dependency-aware sidecar loading. These storage optimisations preserve the
+configured scoring and temporal window; they do not guarantee a fixed memory cap.
+See [the performance notes](docs/PERFORMANCE.md).
+
+Candidate rules v18 additionally separate short raw-feature windows from long
+contextual history and conservatively omit Windows-only temporal dependencies
+for proven Linux input. See [partition execution](docs/PARTITION_EXECUTION.md)
+for applicability, cache locations and frame-scoped result differences.
+
+Candidate v19/v16 adds bounded qualified Linux tool-to-cron linkage and reduces
+failed-only SSH priority while preserving success/follow-on escalation. See
+[Linux tool scoring](docs/LINUX_TOOL_SCORING.md) for weights, provenance and limits.
+The previous v20/v18 policy adds SUID staging
+artefacts and bounded Linux account context. See [Linux account scoring](docs/LINUX_ACCOUNT_SCORING.md)
+for lifecycle resets, weak host-association limits and legitimate controls.
+It retains v17's classified AV severity and lower PUA/dual-use tool weights.
+See [antivirus scoring](docs/AV_SCORING.md) for the additive accounting and limits.
+
 ChronoSIFT combines atomic artefact rules, typed detector policy, temporal relationships, behavioural continuity, and contextual enrichment. Its configurable YAML rules, detector policy, and weights support behaviours including:
 
 - authentication failures, success-after-failure, account pivots, privileged activity, and newly observed users or IPs through first-seen/change rules;
@@ -20,6 +48,11 @@ ChronoSIFT combines atomic artefact rules, typed detector policy, temporal relat
 Rules and detector policy define what constitutes a signal; weights define how strongly each signal contributes to a capped event score. They are ordinary YAML and are intended to be adjusted for the investigated environment and research question. See [the rule-language reference](docs/RULE_LANGUAGE.md) and the [dead-box ATT&CK matrix](docs/ATTACK_MATRIX.md).
 
 ### Configuration model
+
+The detector interface is intentionally bounded: Python fixes baseline IDs,
+typed executor schemas and scheduling; YAML owns the supported detection policy.
+See the [published detector-policy contract](docs/DETECTOR_POLICY_CONTRACT.md)
+for all required bindings, optional extension families and compatibility limits.
 
 ChronoSIFT separates research policy from reusable execution mechanics:
 
@@ -40,9 +73,9 @@ ChronoSIFT separates research policy from reusable execution mechanics:
   prerequisites, and trust adjustment and the validated score amplifier run
   only after the complete signal set exists.
 
-The shipped policy contains complete definitions for thirty-five detectors.
-Additional detector IDs can use the reusable signal-gate, signal-sequence, or
-signal-projection shapes without a new Python branch; a genuinely new detector
+The shipped policies contain complete, explicit detector definitions.
+Additional detector IDs can use the reusable signal-gate, signal-sequence,
+signal-projection, or qualified-artifact-command shapes without a new Python branch; a genuinely new detector
 shape still requires an executor implementation. Exact schemas, detector IDs,
 execution ordering, temporal state semantics, and extension limits are in the
 [rule-language reference](docs/RULE_LANGUAGE.md#detector-policy-v1) and
@@ -183,7 +216,11 @@ mix the two selection semantics in one results series. Report:
 
 ## Installation
 
-ChronoSIFT requires Python 3.11 or newer.
+ChronoSIFT requires Python 3.11 or newer and **pandas 3.0.3 or newer**.
+Older pandas versions are rejected at import by both the engine and standalone
+JSONL converter: pandas 2.x can silently turn valid epoch-microsecond forensic
+timestamps outside 1677–2262 into `NaT`, causing those events to be dropped.
+The higher dependency floor preserves the existing timestamp and scoring code.
 
 ```bash
 export UV_CACHE_DIR="$HOME/.cache/uv"
@@ -208,6 +245,10 @@ The current unreleased baseline passes 418 tests, with 8 expected skips when
 that external corpus is unavailable.
 
 ## Usage
+
+For an already loaded timeline, see the [whole-frame Python API](docs/PUBLIC_API.md)
+for `ChronoSiftEngine.apply()` options, mutation and failure contracts. Large-corpus
+sidecars use the partitioned runner below.
 
 ChronoSIFT does not read a Plaso storage file directly. The research workflow first uses `psort.py` from the pinned Plaso Docker image to export the storage file in JSON Lines format. With the input storage file at `plaso/timeline.plaso`, run:
 
@@ -237,7 +278,8 @@ Process a partitioned Parquet timeline and write a sidecar dataset containing Ch
 ```bash
 uv run python run_chronosift_sidecar_cli.py \
   /path/to/plaso.parquet \
-  /path/to/chronosift-sidecar.parquet
+  /path/to/chronosift-sidecar.parquet \
+  --yara-metadata-path /path/to/extraction-rules.yar
 ```
 
 Partition runs omit the score-neutral generic lifecycle payloads by default to
@@ -246,12 +288,33 @@ control whole-partition memory use. Add
 `file_created`, `file_modified`, and `file_deleted` entries despite their zero
 weights. Scored and specialised lifecycle signals are always retained.
 
-Rules and weights can be replaced at run time:
+The isolated candidate defaults to rules v24 / weights v21 and checks its required
+YARA metadata before processing evidence. See the
+[calibration and signal-migration notes](docs/EVIDENCE_CALIBRATION.md).
+The [event-role identity policy](docs/IDENTITY_ROLES.md) separates reporting,
+authenticated, acting and affected accounts without changing numerical weights.
+Its [Windows behavioural policy](docs/WINDOWS_SCORING_DESIGN.md) scores account,
+task, malware-use and attempted/inferred FTP-transfer evidence with explicit
+attribution limits. Omitted overlap follows the dataset-applicable configured
+history requirement; explicit insufficient overlap fails before output.
+The [Windows/web evidence-linkage update](docs/DATASET_IMPROVEMENTS.md) adds
+strict per-rule metadata checks, corrected HTTP/executable semantics, qualified
+malware-use linkage, GPO operations and same-file web context. Full-corpus
+validation is separate from the bounded development checks. The
+[account-removal update](docs/ACCOUNT_REMOVAL_SCORING.md) adds a documented
+six-point affected-group privilege increment to the two-point removal base;
+overlapping base evidence is counted once, using existing YAML executors.
+The [context-provenance update](docs/CONTEXT_PROVENANCE.md) corrects overlapping
+continuity state, distinguishes evidence containers from sensitive operations,
+and adds bounded creator-risk and qualified PsExec-family novelty context.
+Rules and weights can be replaced at run time, for example to reproduce the
+earlier v10/v8 configuration:
 
 ```bash
 uv run python run_chronosift_sidecar_cli.py INPUT OUTPUT \
   --rules-yaml rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml \
-  --weights-yaml rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml
+  --weights-yaml rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml \
+  --yara-metadata-path /path/to/extraction-rules.yar
 ```
 
 Use `--help` for output modes, overlap windows, telemetry, manifests, and optional enrichment paths. ChronoSIFT does not run Plaso or scan evidence itself; it consumes timeline fields and hash-indexed enrichment produced by the surrounding forensic pipeline.
@@ -308,11 +371,11 @@ offending path (and line for malformed JSON). Run this command as the telemetry
 preflight before downstream table generation; it reads the compact telemetry
 files rather than the source timelines.
 
-## Optional enrichment data
+## External enrichment data
 
 External databases and generated scan results are intentionally not bundled:
 
-- [YARA Forge](https://github.com/YARAHQ/yara-forge) rule metadata can refine YARA matches into categories such as offensive tooling, ransomware, web shells, APT, exploits, and malware. The shipped detector policy authoritatively defines classification, scoring, emissions, evidence, and the web/hash qualification gate. Supply the downloaded `.yar` file with `--yara-metadata-path`; ChronoSIFT does not redistribute the upstream corpus.
+- [YARA Forge](https://github.com/YARAHQ/yara-forge) rule metadata refines YARA matches into categories such as offensive tooling, ransomware, web shells, APT, exploits, and malware. The current candidate policy requires this resource. Supply the exact extraction `.yar` file with `--yara-metadata-path`, not an arbitrarily newer corpus; ChronoSIFT does not redistribute it. The detector policy owns classification, scoring, evidence and the unchanged web/hash qualification gate.
 - [ClamAV](https://www.clamav.net/) scan results can be supplied as a hash-keyed CSV with `--av-csv-path`. The shipped detector policy authoritatively maps signature names into malware and tooling categories; see the [ClamAV classification reference](docs/CLAMAV_ENRICHMENT.md).
 - The [NIST National Software Reference Library](https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl) (NSRL) can be supplied with `--nsrl-parquet-path` to identify known software and reduce routine operating-system noise. ChronoSIFT does not consume the original NSRL RDS distribution directly: prepare a SHA-256-indexed Parquet lookup first.
 - [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) City and ASN databases can be supplied with `--geoip-city-db` and `--geoip-asn-db` for country, city, ASN, boundary-crossing, novelty, and impossible-travel features. Output names and continuity bindings are owned and cross-validated by the rules YAML.

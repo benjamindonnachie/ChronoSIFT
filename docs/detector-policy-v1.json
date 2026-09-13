@@ -1,0 +1,245 @@
+{
+  "contract_version": 1,
+  "kind": "published_interface_not_runtime_policy",
+  "detector_policy_version": 1,
+  "required_detectors": {
+    "automated_collection": {
+      "executor": "signal_gate",
+      "stage": "contextual",
+      "binding": "required_generic"
+    },
+    "automated_exfiltration": {
+      "executor": "counted_signal_window",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "canonical_authentication": {
+      "executor": "canonical_authentication",
+      "stage": "atomic",
+      "binding": "reserved_baseline"
+    },
+    "canonical_persistence_projection": {
+      "executor": "signal_projection",
+      "stage": "contextual",
+      "binding": "required_generic"
+    },
+    "canonical_transfer_post_temporal_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal",
+      "binding": "required_generic"
+    },
+    "canonical_transfer_projection": {
+      "executor": "signal_projection",
+      "stage": "contextual",
+      "binding": "required_generic"
+    },
+    "clamav_classification": {
+      "executor": "clamav_classifier",
+      "stage": "atomic",
+      "binding": "reserved_baseline"
+    },
+    "contextual_signal_adjustments": {
+      "executor": "ordered_signal_adjustments",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "credential_dump_collection": {
+      "executor": "artifact_follow_on_sequence",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "direct_attack_semantics": {
+      "executor": "ordered_row_rules",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "download_to_execution": {
+      "executor": "signal_sequence_by_artifact",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "execution_context_classifier": {
+      "executor": "execution_context_classifier",
+      "stage": "atomic",
+      "binding": "reserved_baseline"
+    },
+    "execution_interpreter": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "execution_lolbin": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "execution_lolbin_suspicious_args": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "execution_privileged_scheduled": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "execution_scheduled": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "file_lifecycle": {
+      "executor": "file_lifecycle",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "geographic_continuity": {
+      "executor": "geographic_continuity",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "impossible_travel": {
+      "executor": "impossible_travel",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "ip_scope_continuity": {
+      "executor": "ip_scope_continuity",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "masquerading": {
+      "executor": "signal_gate",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "mft_timestomping": {
+      "executor": "mft_timestomping",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "password_store_exfil_chain": {
+      "executor": "artifact_follow_on_sequence",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "persistence_configuration": {
+      "executor": "ordered_row_rules",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "ransomware_impact": {
+      "executor": "temporal_context_branches",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "referenced_file_correlation": {
+      "executor": "referenced_file_correlation",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "repeated_scheduled_execution": {
+      "executor": "grouped_signal_window",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "suspicious_execution": {
+      "executor": "signal_gate",
+      "stage": "atomic",
+      "binding": "required_generic"
+    },
+    "systemd_service_persistence": {
+      "executor": "systemd_service_persistence",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "web_request_classification": {
+      "executor": "web_request_classifier",
+      "stage": "atomic",
+      "binding": "reserved_baseline"
+    },
+    "web_upload_execution_chain": {
+      "executor": "signal_sequence",
+      "stage": "temporal",
+      "binding": "required_generic"
+    },
+    "webshell_activity": {
+      "executor": "signal_sequence",
+      "stage": "temporal",
+      "binding": "reserved_baseline"
+    },
+    "webshell_artifact": {
+      "executor": "webshell_artifact",
+      "stage": "contextual",
+      "binding": "reserved_baseline"
+    },
+    "yara_classification": {
+      "executor": "yara_classifier",
+      "stage": "atomic",
+      "binding": "reserved_baseline"
+    }
+  },
+  "additional_executor_families": {
+    "qualified_artifact_command": {
+      "stages": [
+        "contextual"
+      ]
+    },
+    "signal_gate": {
+      "stages": [
+        "atomic",
+        "contextual"
+      ]
+    },
+    "signal_projection": {
+      "stages": [
+        "contextual",
+        "temporal"
+      ]
+    },
+    "signal_sequence": {
+      "stages": [
+        "temporal"
+      ]
+    }
+  },
+  "example_policy": "rules_evidence_calibrated_v24.yaml",
+  "example_additional_detectors": {
+    "category_qualified_webshell_artifact": {
+      "executor": "signal_gate",
+      "stage": "contextual"
+    },
+    "linux_qualified_schedule_priority": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "linux_qualified_tool_invocation": {
+      "executor": "qualified_artifact_command",
+      "stage": "contextual"
+    },
+    "web_content_followon": {
+      "executor": "signal_sequence",
+      "stage": "temporal"
+    },
+    "web_recent_geo_download_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "windows_archive_ftp_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "windows_creator_risk_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "windows_malware_use_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "windows_privileged_context_projection": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    }
+  }
+}

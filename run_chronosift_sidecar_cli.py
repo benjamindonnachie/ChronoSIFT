@@ -18,9 +18,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run ChronoSift against a parquet base dataset and write full or sidecar output.")
     p.add_argument("dataset_root", help="Input parquet dataset root")
     p.add_argument("output_root", help="Output parquet dataset root")
-    p.add_argument("--rules-yaml", default="rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml")
-    p.add_argument("--weights-yaml", default="rules/weights_profiled_audited_nsrl_updates_baseline_yara_fixed_v8.yaml")
-    p.add_argument("--overlap", default="24h")
+    bundled_rules = Path(__file__).resolve().parent / "rules"
+    p.add_argument("--rules-yaml", default=str(bundled_rules / "rules_evidence_calibrated_v24.yaml"))
+    p.add_argument("--weights-yaml", default=str(bundled_rules / "weights_evidence_calibrated_v21.yaml"))
+    p.add_argument("--overlap", default=None, help="Temporal history overlap; omitted selects the dataset-applicable dependency horizon (at least 24h). This is distinct from YAML feature_overlap. Explicit insufficient history fails.")
     p.add_argument("--output-mode", default="sidecar", choices=["full", "sidecar"])
     p.add_argument("--reports-json", default=None, help="Optional path for the run reports JSON")
     p.add_argument("--telemetry-jsonl", default=None, help="Optional path for JSONL stage telemetry")
@@ -30,7 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--yara-metadata-path",
         default=None,
-        help="Run-specific override for detector_policy YARA metadata.path",
+        help="Exact YARA corpus used for extraction; overrides detector_policy metadata.path (required when the configured resource is absent)",
     )
     p.add_argument("--geoip-city-db", default=None, help="Optional MaxMind GeoLite2 City .mmdb")
     p.add_argument("--geoip-asn-db", default=None, help="Optional MaxMind GeoLite2 ASN .mmdb")
@@ -99,6 +100,15 @@ def main() -> int:
         args.weights_yaml,
         yara_metadata_path=args.yara_metadata_path,
     )
+    # Resolve the configured resource before loading evidence or writing any
+    # outputs. Missing/parse-error behaviour remains owned by the rules YAML.
+    yara_policy = engine.detector_policy.yara_classification
+    yara_index = engine.yara_metadata_index
+    if yara_policy.enabled and not yara_index and yara_policy.metadata_on_parse_error == "fail":
+        raise ValueError(
+            "No YARA rule metadata parsed; supply the extraction corpus with "
+            "--yara-metadata-path before processing evidence."
+        )
     if _is_compiled_chronosift_module():
         with warnings.catch_warnings():
             # This suppression is intentionally narrow. We still want all other

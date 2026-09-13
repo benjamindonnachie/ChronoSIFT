@@ -1,0 +1,20 @@
+# Sparse-attrs penalty on scalar df.iat access (pandas 2.3.3)
+# Large payload: 20,000-row frame, 20,000-row sparse signal+explain maps
+
+pandas 2.3.3
+attrs attached=False  best=    70.8 ms   (8000 scalar .iat writes)
+attrs attached=True   best=    70.5 ms   (8000 scalar .iat writes)
+
+READ attrs attached=False best=    48.1 ms   (4000 scalar .iat reads)
+READ attrs attached=True  best=529533.7 ms   (4000 scalar .iat reads)
+
+[exited with code 0]
+
+# Small payload: 3,000-row frame, 3,000-row maps (200 reads)
+  attrs detached :      2.66 ms
+  attrs attached :   3769.08 ms  ->  1417x
+
+# Conclusion: READS scale catastrophically with sparse payload size
+#   3k payload  ->  ~1,417x
+#  20k payload  -> ~11,009x  (48.1 ms vs 529,533.7 ms)
+# WRITES are unaffected at both scales (~1.0x).
