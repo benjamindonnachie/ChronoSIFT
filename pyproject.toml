@@ -39,6 +39,7 @@ dev = ["Cython>=3.0"]
 py-modules = [
   "attack_metadata",
   "av_behaviour",
+  "command_evidence",
   "chronoSIFT_v2_31",
   "jsonl_to_parquet_cli_logging",
   "run_chronosift_sidecar_cli",

@@ -8,7 +8,7 @@ The Python registry is intentionally closed for baseline IDs, typed schemas, exe
 
 YAML owns enablement, supported predicates/vocabulary, input and correlation fields, windows, thresholds, signal names/values, confidence, evidence and ATT&CK attribution. Weights own contributions. Python also retains structural invariants such as typed-emission maximum merge and dependency ordering. This contract does not move behavioural defaults back into code.
 
-There are **35 required baseline IDs**. `rules_evidence_calibrated_v24.yaml` configures **44 detectors**, including **9 optional additional IDs**. These counts are not numbers of ATT&CK techniques or behavioural rules. The audit's “36 required” count is not the current parser contract.
+There are **35 required baseline IDs**. `rules_evidence_calibrated_v26.yaml` configures **44 detectors**, including **9 optional additional IDs**. These counts are not numbers of ATT&CK techniques or behavioural rules. The audit's “36 required” count is not the current parser contract.
 
 ## Required baseline bindings
 

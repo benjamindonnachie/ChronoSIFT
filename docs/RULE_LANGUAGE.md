@@ -1,5 +1,12 @@
 # ChronoSIFT -- Rule Language and Detector Policy
 
+Rules v25 additionally support source-qualified literal `command_invocations`
+normalisation, executable-head classification, anchored lifecycle `path_regex`
+and `identity_mode: full_path` for follow-on sequences. See
+[semantic evidence gates](SEMANTIC_EVIDENCE.md) for syntax, compatibility,
+explanation contribution ownership and limits. Vocabulary remains YAML-owned;
+the helper never executes or expands a command.
+
 Rules v24 add optional top-level `attack_metadata` and per-producer `attack_ids`,
 `attack_basis`, `attack_note`, and optional `attack_source`. Once enabled, every
 common detector emission and ordinary atomic/temporal rule must be explicitly
@@ -1311,11 +1318,16 @@ using its configured host field.
 
 `temporal_context_branches` backs the required `ransomware_impact` definition.
 It emits on a configured ransomware-source row when a closed dead-box-global
-lookback contains configured prior support, or when a later row has a basename
-containing a configured ransom-note token. YAML owns the source/support signal
-sets, note path fields and tokens, lookback, branch descriptions, emission, and
+lookback contains configured prior support, or when a same-or-later row supplies
+configured note support. The note branch chooses exactly one of `any_signals`
+(v26) or historical `basename_contains`. Signal mode accepts
+`minimum_signal_value_exclusive` (default 0) and `exclude_same_artifact`
+(default false; v26 true). Exclusion covers the source row and repeated rows of
+the same normalised path; POSIX case is preserved, Windows case is folded.
+YAML owns the source/support signal sets, note path fields, lookback, branch descriptions, emission, and
 evidence resolver mapping. `row_field` binds row evidence such as hostname;
-`matched_source_signals`, `support_timestamp`, and `ransom_note_timestamp`
+`matched_source_signals`, `support_timestamp`, `ransom_note_timestamp`,
+`ransom_note_path`, and `ransom_note_signals`
 bind derived context. Python retains timestamp indexing, typed branch evaluation, path
 normalisation, and sparse max-merge mechanics.
 
@@ -1369,9 +1381,13 @@ are rejected. The obsolete `short_lived_file_window`,
 `mass_file_modification_window`, `mass_file_modification_threshold`,
 `ransom_extension_burst_window`, and `ransom_extension_burst_threshold` keys
 are also rejected in favour of `detector_policy.detectors.file_lifecycle`.
-Ransom-note vocabulary now lives at
-`ransomware_impact.branches.ransom_note.basename_contains`; the former
-`ransom_note_name_tokens` vocabulary key is also rejected.
+Current ransom-note admission lives at
+`ransomware_impact.branches.ransom_note.any_signals` and uses qualified YARA
+content. Historical `basename_contains` remains available only when explicitly
+selected; `ransom_note_name_tokens` is still rejected. Each YARA category may
+optionally specify `qualification: {minimum_score: ..., minimum_quality: ...}`
+in 0..100. Both must be met by the same rule before category emission; defaults
+are 0/0 for historical compatibility. General match strength remains independent.
 
 The executor name selects a registered Python implementation; it is not an
 arbitrary function name. Python performs mechanics such as cached field

@@ -6,7 +6,7 @@ the rule's score, quality, tags, category, or detection type, so ChronoSIFT can
 parse the same YARA Forge corpus to recover that metadata.
 
 The mandatory
-[`detector_policy.detectors.yara_classification`](../rules/rules_profiled_audited_nsrl_updates_baseline_yara_fixed_v10.yaml)
+[`detector_policy.detectors.yara_classification`](../rules/rules_evidence_calibrated_v26.yaml)
 definition is authoritative. YAML owns enablement, metadata-resource handling,
 ordered classification, the ordered category registry, strength calculation,
 category emissions, confidence,
@@ -14,13 +14,24 @@ evidence, and referenced-file qualification. Python retains only YARA syntax
 parsing, fixed `yara_match` access, typed predicate evaluation, sparse emission,
 and manifest-index mechanics.
 
-## Validated corpus
+## Current note-content policy
+
+Rules v26 separate the `ransom_note` category from ransomware payload capability.
+The FULL 20260927 bundle is validated alongside the existing extended extraction
+corpus; this does **not** change the pipeline's extraction resource. See
+[note/web evidence](NOTE_WEB_EVIDENCE.md) for reviewed rule identities, checksums,
+qualification, scores, ATT&CK limits and adoption requirements.
+
+Private helpers terminate the preceding public metadata record but are not
+indexed as reportable hits. Public `global rule` declarations are indexed.
+
+## Historical validated corpus (before v26 role separation)
 
 The surrounding Snakemake pipeline currently pins
 `yara-rules-extended_20260719.yar`, SHA-256
 `b3a09382f3e5a6c73f6b697bf5c61179640876ae85b05c41a2be14bdcb6788bd`.
 The corpus is independently licensed and is not redistributed in this
-repository. Parsing it with the shipped policy produces 10,735 indexed rules:
+repository. The pre-v26 classification recorded 10,735 indexed public rules:
 
 | Category | Rules |
 |---|---:|

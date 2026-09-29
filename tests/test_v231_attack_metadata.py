@@ -70,7 +70,7 @@ class AttackMetadataTest(unittest.TestCase):
 
     def test_review_and_matrix_are_deterministic(self):
         self.assertEqual(build(ROOT),self.doc)
-        self.assertEqual(matrix(self.doc),(ROOT/'docs/ATTACK_MATRIX_CURRENT.md').read_text())
+        self.assertEqual(matrix(self.doc),(ROOT/'docs/ATTACK_MATRIX_V24.md').read_text())
         self.assertEqual(len(self.registry.entries),285)
         self.assertIn('not validated detection coverage',matrix(self.doc))
 

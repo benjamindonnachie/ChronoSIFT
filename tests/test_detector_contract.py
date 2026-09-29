@@ -6,6 +6,7 @@ import unittest
 
 import chronoSIFT_v2_31 as c
 from benchmarks import build_detector_contract as contract
+from run_chronosift_sidecar_cli import build_arg_parser
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -15,7 +16,8 @@ class DetectorContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.published=json.loads((ROOT/'docs/detector-policy-v1.json').read_text())
         cls.rules=c._load_unique_yaml_mapping(ROOT/'rules'/cls.published['example_policy'],'rules')
-        cls.weights=c._load_unique_yaml_mapping(ROOT/'rules/weights_evidence_calibrated_v21.yaml','weights')
+        args=build_arg_parser().parse_args(['input','output'])
+        cls.weights=c._load_unique_yaml_mapping(Path(args.weights_yaml),'weights')
 
     def parse(self,rules):return c._parse_detector_policy(rules,self.weights)
 

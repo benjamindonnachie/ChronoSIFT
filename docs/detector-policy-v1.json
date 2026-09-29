@@ -203,7 +203,7 @@
       ]
     }
   },
-  "example_policy": "rules_evidence_calibrated_v24.yaml",
+  "example_policy": "rules_evidence_calibrated_v26.yaml",
   "example_additional_detectors": {
     "category_qualified_webshell_artifact": {
       "executor": "signal_gate",

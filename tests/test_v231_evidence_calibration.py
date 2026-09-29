@@ -59,8 +59,8 @@ class EvidenceCalibrationTest(unittest.TestCase):
 
     def test_candidate_defaults_and_neutral_taxonomy(self):
         args = cli.build_arg_parser().parse_args(["input", "output"])
-        self.assertEqual(Path(args.rules_yaml).name, "rules_evidence_calibrated_v24.yaml")
-        self.assertEqual(Path(args.weights_yaml).name, "weights_evidence_calibrated_v21.yaml")
+        self.assertEqual(Path(args.rules_yaml).name, "rules_evidence_calibrated_v26.yaml")
+        self.assertEqual(Path(args.weights_yaml).name, "weights_evidence_calibrated_v22.yaml")
         self.assertIsNone(args.overlap)
         self.assertEqual(self.engine.max_event_score, 50)
         for signal in ("mitre_t1190", "mitre_t1505_003", "mitre_t1105",

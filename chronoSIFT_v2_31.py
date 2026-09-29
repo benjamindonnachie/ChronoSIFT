@@ -133,6 +133,7 @@ from pathlib import Path
 import ast
 from collections import Counter
 import bisect
+from command_evidence import command_invocations, literal_path_references
 import hashlib
 import json
 import logging
@@ -1751,6 +1752,17 @@ def parse_yara_forge_metadata(
         for line in fh:
             stripped = line.strip()
 
+            if stripped.startswith(("private ", "global ")):
+                declaration = re.match(r"^((?:(?:private|global)\s+)+)rule\s+", stripped)
+                if declaration:
+                    # Private helper matches are not reported by YARA. They
+                    # still terminate the preceding public metadata block;
+                    # never attach their score/quality to that public rule.
+                    _finalise()
+                    if "private" in declaration.group(1).split():
+                        continue
+                    stripped = "rule " + stripped[declaration.end():]
+
             if stripped.startswith("rule "):
                 _finalise()
                 # Parse: "rule NAME" or "rule NAME : TAG1 TAG2"
@@ -2893,6 +2905,8 @@ class NormalisationSpec:
     number_format: str = "legacy_decimal_hex"
     base_field: Optional[str] = None
     cases: Tuple[Tuple[str, re.Pattern[str], Tuple[str, ...]], ...] = ()
+    wrappers: Tuple[re.Pattern[str], ...] = ()
+    scripts: Tuple[re.Pattern[str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3203,6 +3217,8 @@ class YaraCategoryPolicy:
     score_confidence: YaraScoreConfidencePolicy
     evidence: Tuple[str, ...]
     max_rule_names: int
+    minimum_score: int = 0
+    minimum_quality: int = 0
 
 
 @dataclass(frozen=True)
@@ -3914,6 +3930,7 @@ class ExecutionContextClassifierPolicy:
     emissions_by_semantic: Dict[str, DetectorEmissionPolicy]
     evidence: Tuple[str, ...]
     evidence_type: str
+    command_match_mode: str = "tokens"
 
     @property
     def emissions(self) -> Tuple[DetectorEmissionPolicy, ...]:
@@ -4041,6 +4058,7 @@ class FileLifecyclePolicy:
     emissions_by_semantic: Dict[str, DetectorEmissionPolicy]
     evidence_by_semantic: Dict[str, Tuple[str, ...]]
     evidence_type: str
+    path_patterns: Optional[Dict[str, re.Pattern[str]]] = None
 
     @property
     def emissions(self) -> Tuple[DetectorEmissionPolicy, ...]:
@@ -4372,10 +4390,13 @@ class RansomwareImpactPolicy:
     emission: DetectorEmissionPolicy
     evidence: Tuple[PolicyEvidenceValue, ...]
     evidence_type: str
+    note_signals: frozenset[str] = frozenset()
+    note_minimum_signal_value_exclusive: float = 0.0
+    note_exclude_same_artifact: bool = False
 
     @property
     def target_signals(self) -> frozenset[str]:
-        return self.support_signals
+        return self.support_signals | self.note_signals
 
 
 @dataclass(frozen=True)
@@ -4423,6 +4444,7 @@ class ArtifactFollowOnPolicy:
     emission: DetectorEmissionPolicy
     evidence: Tuple[PolicyEvidenceValue, ...]
     evidence_type: str
+    identity_mode: str = "labels"
 
     @property
     def target_signals(self) -> frozenset[str]:
@@ -4914,12 +4936,25 @@ def _parse_normalisation_policy(raw: Any, path: str) -> Tuple[NormalisationSpec,
         method = _policy_enum(
             cfg.get("method"),
             f"{spec_path}.method",
-            {"coalesce", "select_coalesce", "regex_first", "ipv4_first", "file_extension", "identity_lookup", "canonical_web_path", "join_fields", "bitmask_any", "path_separators", "casefold", "posix_path_resolve"},
+            {"coalesce", "select_coalesce", "regex_first", "ipv4_first", "file_extension", "identity_lookup", "canonical_web_path", "join_fields", "bitmask_any", "path_separators", "casefold", "posix_path_resolve", "command_invocations"},
         )
         name = _policy_string(cfg.get("name"), f"{spec_path}.name")
         if name in seen_names:
             raise ValueError(f"{spec_path}.name: duplicate output field {name!r}")
         seen_names.add(name)
+
+        if method == "command_invocations":
+            _policy_keys(cfg, spec_path, required={"name", "method", "from", "wrappers", "scripts"})
+            grammars = {}
+            for kind in ("wrappers", "scripts"):
+                patterns = _policy_string_list_or_empty(cfg[kind], f"{spec_path}.{kind}")
+                compiled = tuple(_compile_canonicalisation_regex(pattern, f"{spec_path}.{kind}", 0) for pattern in patterns)
+                if any("command" not in pattern.groupindex for pattern in compiled):
+                    raise ValueError(f"{spec_path}.{kind}: each pattern requires a named command group")
+                grammars[kind] = compiled
+            parsed.append(NormalisationSpec(name=name, method=method, stage=stage,
+                source=_policy_string(cfg["from"], f"{spec_path}.from"), **grammars))
+            continue
 
         if method == "select_coalesce":
             _policy_keys(cfg, spec_path, required={"name", "method", "cases", "default_fields"})
@@ -6355,7 +6390,14 @@ def _parse_yara_classifier_policy(
                 "contributes_to_strength", "emission", "score_confidence",
                 "evidence", "max_rule_names",
             },
+            optional={"qualification"},
         )
+        qualification_path = f"{category_path}.qualification"
+        qualification = _policy_mapping(category_cfg.get("qualification", {
+            "minimum_score": 0, "minimum_quality": 0,
+        }), qualification_path)
+        _policy_keys(qualification, qualification_path,
+                     required={"minimum_score", "minimum_quality"})
         categories[category] = YaraCategoryPolicy(
             category=category,
             contributes_to_strength=_policy_bool(
@@ -6380,6 +6422,10 @@ def _parse_yara_classifier_policy(
                 category_cfg["max_rule_names"],
                 f"{category_path}.max_rule_names",
             ),
+            minimum_score=_policy_percentage_int(
+                qualification["minimum_score"], f"{qualification_path}.minimum_score"),
+            minimum_quality=_policy_percentage_int(
+                qualification["minimum_quality"], f"{qualification_path}.minimum_quality"),
         )
     if not any(
         category.contributes_to_strength for category in categories.values()
@@ -9048,7 +9094,7 @@ def _parse_execution_context_classifier_policy(
         "suspicious_path_contains", "system_binary_names", "command_names",
         "privileged_actors", "suid_regex",
     )
-    _policy_keys(classification_cfg, classification_path, required=set(class_names))
+    _policy_keys(classification_cfg, classification_path, required=set(class_names), optional={"command_match_mode"})
     command_path = f"{classification_path}.command_names"
     command_cfg = _policy_mapping(
         classification_cfg["command_names"], command_path
@@ -9141,6 +9187,8 @@ def _parse_execution_context_classifier_policy(
             f"{classification_path}.privileged_actors", lower=True,
         )),
         suid_pattern=suid_pattern,
+        command_match_mode=_policy_enum(classification_cfg.get("command_match_mode", "tokens"),
+            f"{classification_path}.command_match_mode", {"tokens", "invocation_heads"}),
         decisions_by_semantic=decisions,
         emissions_by_semantic=_parse_named_policy_emissions(
             cfg["emissions"], f"{path}.emissions", emission_semantics
@@ -9903,7 +9951,12 @@ def _parse_file_lifecycle_policy(
             "suspicious_temp_basename_contains",
             "ransomware_extension_suffixes", "derived_predicates",
         },
+        optional={"path_regex"},
     )
+    path_regex_cfg = _policy_mapping(classification_cfg.get("path_regex", {}), f"{classification_path}.path_regex")
+    _policy_keys(path_regex_cfg, f"{classification_path}.path_regex", required=set(), optional={"web_root", "sensitive"})
+    path_patterns = {name: _compile_canonicalisation_regex(pattern, f"{classification_path}.path_regex.{name}", 0)
+        for name, pattern in path_regex_cfg.items()}
     kinds_path = f"{classification_path}.timestamp_kinds"
     kinds_cfg = _policy_mapping(classification_cfg["timestamp_kinds"], kinds_path)
     _policy_keys(kinds_cfg, kinds_path, required={"priority", "contains"})
@@ -10354,6 +10407,7 @@ def _parse_file_lifecycle_policy(
             for name in kind_semantics
         },
         web_root_tokens=path_tokens("web_root"),
+        path_patterns=path_patterns,
         sensitive_path_tokens=path_tokens("sensitive"),
         database_dump_name_tokens=path_tokens("database_dump_name"),
         excluded_update_path_tokens=path_tokens("excluded_update"),
@@ -10894,16 +10948,22 @@ def _parse_ransomware_impact_policy(raw: Any, path: str) -> RansomwareImpactPoli
 
     note_path = f"{branches_path}.ransom_note"
     note_cfg = _policy_mapping(branches_cfg["ransom_note"], note_path)
-    _policy_keys(note_cfg, note_path, required={"direction", "path", "basename_contains", "description"})
+    _policy_keys(note_cfg, note_path, required={"direction", "path", "description"},
+                 optional={"basename_contains", "any_signals", "minimum_signal_value_exclusive", "exclude_same_artifact"})
+    signal_note = "any_signals" in note_cfg
+    if signal_note == ("basename_contains" in note_cfg):
+        raise ValueError(f"{note_path}: require exactly one of any_signals or basename_contains")
+    if not signal_note and ({"minimum_signal_value_exclusive", "exclude_same_artifact"} & set(note_cfg)):
+        raise ValueError(f"{note_path}: signal options require any_signals")
     _policy_enum(note_cfg["direction"], f"{note_path}.direction", {"same_or_after"})
     note_input_path = f"{note_path}.path"
     note_input = _policy_mapping(note_cfg["path"], note_input_path)
     _policy_keys(note_input, note_input_path, required={"resolver", "fields"})
     _policy_enum(note_input["resolver"], f"{note_input_path}.resolver", {"best_effort_file_path"})
     note_path_fields = _policy_string_list(note_input["fields"], f"{note_input_path}.fields")
-    note_basename_tokens = _policy_string_list(
-        note_cfg["basename_contains"], f"{note_path}.basename_contains", lower=True
-    )
+    note_basename_tokens = () if signal_note else _policy_string_list(
+        note_cfg["basename_contains"], f"{note_path}.basename_contains", lower=True)
+    note_signals = frozenset(_policy_signal_list(note_cfg["any_signals"], f"{note_path}.any_signals")) if signal_note else frozenset()
     note_description = _policy_string(note_cfg["description"], f"{note_path}.description")
     evidence = _parse_policy_evidence(
         cfg["evidence"],
@@ -10913,6 +10973,8 @@ def _parse_ransomware_impact_policy(raw: Any, path: str) -> RansomwareImpactPoli
             "matched_source_signals",
             "support_timestamp",
             "ransom_note_timestamp",
+            "ransom_note_path",
+            "ransom_note_signals",
         },
     )
     return RansomwareImpactPolicy(
@@ -10936,6 +10998,11 @@ def _parse_ransomware_impact_policy(raw: Any, path: str) -> RansomwareImpactPoli
         emission=_parse_single_policy_emission(cfg["emissions"], f"{path}.emissions"),
         evidence=evidence,
         evidence_type=evidence_type,
+        note_signals=note_signals,
+        note_minimum_signal_value_exclusive=_policy_nonnegative_number(
+            note_cfg.get("minimum_signal_value_exclusive", 0), f"{note_path}.minimum_signal_value_exclusive"),
+        note_exclude_same_artifact=_policy_bool(
+            note_cfg.get("exclude_same_artifact", False), f"{note_path}.exclude_same_artifact"),
     )
 
 
@@ -11032,6 +11099,7 @@ def _parse_artifact_follow_on_policy(raw: Any, path: str) -> ArtifactFollowOnPol
             "source", "inputs", "labels", "copy_stage", "follow_on",
             "follow_on_qualification", "emissions", "evidence",
         },
+        optional={"identity_mode"},
     )
     _policy_enum(cfg["stage"], f"{path}.stage", {"temporal"})
     _policy_enum(cfg["executor"], f"{path}.executor", {"artifact_follow_on_sequence"})
@@ -11139,6 +11207,7 @@ def _parse_artifact_follow_on_policy(raw: Any, path: str) -> ArtifactFollowOnPol
     )
     return ArtifactFollowOnPolicy(
         enabled=enabled,
+        identity_mode=_policy_enum(cfg.get("identity_mode", "labels"), f"{path}.identity_mode", {"labels", "full_path"}),
         lookback=lookback,
         key_scope=key_scope,
         source_signals=source_signals,
@@ -13004,7 +13073,7 @@ def _parse_detector_policy(
         }:
             inputs = definition.payload.input_signals
         elif definition.executor == "temporal_context_branches":
-            inputs = definition.payload.source_signals | definition.payload.support_signals
+            inputs = definition.payload.source_signals | definition.payload.target_signals
             disabled_source = (
                 definition.payload.source_signals & disabled_policy_output_names
             )
@@ -16172,8 +16241,8 @@ class ChronoSiftEngine:
                 policy.network_tool_names,
                 policy.archive_tool_names,
             )
-            for match in _COMMAND_TOKEN_RE.finditer(command):
-                token = match.group(0)
+            tokens = (line.split(None, 1)[0] for line in command.splitlines() if line.strip()) if policy.command_match_mode == "invocation_heads" else (match.group(0) for match in _COMMAND_TOKEN_RE.finditer(command))
+            for token in tokens:
                 base = (
                     _basename_from_reference_path(token)
                     if "/" in token or "\\" in token
@@ -17250,7 +17319,7 @@ class ChronoSiftEngine:
         for lower in range(0, len(df), 65_536):
             upper = min(len(df), lower + 65_536)
             batch = df.iloc[lower:upper]
-            if note.enabled:
+            if note.enabled and not note.note_signals:
                 paths = _best_effort_file_path_vectorised(batch, note.note_path_fields)
                 for i, value in enumerate(paths):
                     basename = os.path.basename(_safe_str(value).strip().lower().replace("\\", "/"))
@@ -18002,6 +18071,7 @@ class ChronoSiftEngine:
         signal_map: Dict[int, Dict[str, Any]],
         canonical_actor_values: Any = None,
         canonical_src_ip_values: Any = None,
+        contribution_owners: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         # Explain items are materialised late in the pipeline and can be numerous
         # on hot partitions. A shallow copy of the top-level item plus any
@@ -18063,12 +18133,18 @@ class ChronoSiftEngine:
                 continue
             weight = float(self.weights.get(sig_key.lower(), 0.0))
             value = float(sig_val)
-            contribution = value * weight
+            owner = str(out.get("rule_id", ""))
+            supporting = contribution_owners is not None and sig_key in contribution_owners
+            if contribution_owners is not None:
+                owner = contribution_owners.setdefault(sig_key, owner)
+            contribution = 0.0 if supporting else value * weight
             signal_details.append({
                 "name": sig_key,
                 "signal_weight": weight,
                 "signal_value": value,
                 "score_contribution": contribution,
+                "contribution_role": "supporting" if supporting else "owner",
+                "contribution_owner": owner,
             })
             total_weight += weight
             total_value += value
@@ -18135,6 +18211,7 @@ class ChronoSiftEngine:
                 explain_col: List[Optional[List[Dict[str, Any]]]] = [None] * n
                 for i, expl in explain_map.items():
                     if 0 <= i < n:
+                        contribution_owners: Dict[str, str] = {}
                         explain_col[i] = [
                             self._normalise_explain_item(
                                 item,
@@ -18143,6 +18220,7 @@ class ChronoSiftEngine:
                                 signal_map,
                                 canonical_actor_values=canonical_actor_values,
                                 canonical_src_ip_values=canonical_src_ip_values,
+                                contribution_owners=contribution_owners,
                             )
                             for item in expl
                         ]
@@ -19371,6 +19449,12 @@ class ChronoSiftEngine:
         web_content_flags[:] = np.isin(file_exts, tuple(web_content_exts))
         archive_flags[:] = np.isin(file_exts, tuple(archive_extensions))
         sensitive_flags[:] = _text_array_contains_any(path_lower, sensitive_path_patterns)
+        # New policies can replace broad substrings with anchored effective
+        # locations. Historical policies retain their original matching.
+        for semantic, flags in (("web_root", web_root_flags), ("sensitive", sensitive_flags)):
+            pattern = (policy.path_patterns or {}).get(semantic)
+            if pattern is not None:
+                flags[:] = np.fromiter((bool(pattern.search(_safe_str(path).replace("\\", "/"))) for path in file_paths), dtype=bool, count=nrows)
         database_dump_extension_flags = np.isin(
             file_exts, tuple(database_dump_extensions)
         )
@@ -20371,11 +20455,18 @@ class ChronoSiftEngine:
                 support_events.append((row_i, ts))
             path = _safe_str(paths[row_i]).strip().lower().replace("\\", "/")
             basename = os.path.basename(path) if path else ""
-            if path and any(token in basename for token in policy.note_basename_tokens):
+            if (any(float(signals.get(name, 0.0) or 0.0) > policy.note_minimum_signal_value_exclusive
+                    for name in policy.note_signals) if policy.note_signals else
+                    path and any(token in basename for token in policy.note_basename_tokens)):
                 note_events.append((row_i, ts))
         support_times = [ts for _, ts in support_events]
         note_times = [ts for _, ts in note_events]
         window = pd.Timedelta(policy.lookback)
+
+        def artifact_identity(value):
+            path = (_normalise_reference_path(value) or "").replace("\\", "/")
+            return path.casefold() if _web_filesystem_path_is_case_insensitive(path) else path
+
         for row_i, ts in enumerate(timestamps):
             signals = signal_map.get(row_i) or {}
             matched_sources = tuple(
@@ -20389,6 +20480,8 @@ class ChronoSiftEngine:
                 "matched_source_signals": ",".join(sorted(matched_sources)),
                 "support_timestamp": "",
                 "ransom_note_timestamp": "",
+                "ransom_note_path": "",
+                "ransom_note_signals": "",
             }
             lo = bisect.bisect_left(support_times, ts - window)
             hi = bisect.bisect_right(support_times, ts)
@@ -20398,9 +20491,28 @@ class ChronoSiftEngine:
             else:
                 lo = bisect.bisect_left(note_times, ts)
                 hi = bisect.bisect_right(note_times, ts + window)
-                if lo >= hi:
+                # A single artefact with several hits is not independent
+                # temporal corroboration. Repeated MAC-time rows of that path
+                # must not manufacture it either. Policy keeps old behaviour
+                # only for explicitly selected historical filename branches.
+                note_row = None
+                source_path = artifact_identity(paths[row_i])
+                for event_index in range(lo, hi):
+                    candidate = note_events[event_index][0]
+                    candidate_path = artifact_identity(paths[candidate])
+                    if policy.note_exclude_same_artifact and (
+                        candidate == row_i or (source_path and source_path == candidate_path)
+                    ):
+                        continue
+                    note_row = candidate
+                    break
+                if note_row is None:
                     continue
-                derived_evidence["ransom_note_timestamp"] = note_events[lo][1].isoformat()
+                derived_evidence["ransom_note_timestamp"] = timestamps[note_row].isoformat()
+                derived_evidence["ransom_note_path"] = _safe_str(paths[note_row])
+                derived_evidence["ransom_note_signals"] = ",".join(sorted(
+                    name for name in policy.note_signals
+                    if float((signal_map.get(note_row) or {}).get(name, 0) or 0) > policy.note_minimum_signal_value_exclusive))
                 description = policy.note_description
             evidence: Dict[str, Any] = {}
             for item in policy.evidence:
@@ -20536,13 +20648,22 @@ class ChronoSiftEngine:
                 df, policy.path_fields
             ).to_numpy(copy=False)
             text_arrays = tuple(
-                _normalised_text_array(df, field, lower=True)
+                _normalised_text_array(df, field, lower=policy.identity_mode != "full_path")
                 for field in policy.text_fields
             )
-            combined_text: List[str] = []
             labels_by_row: List[Set[str]] = []
             follow_events: List[Tuple[int, pd.Timestamp, Set[str]]] = []
+
+            def file_identity(value: str) -> str:
+                value = value.strip().replace("\\", "/")
+                return value.casefold() if re.match(r"^(?:[A-Za-z]:/|//)", value) else value
+
             for row_i, ts in enumerate(timestamps):
+                if policy.identity_mode == "full_path" and not any(values[row_i] for values in text_arrays):
+                    # No collection/upload operand on this row. Source-file
+                    # eligibility is evaluated separately below; do not retain
+                    # millions of empty nested label sets on mega-months.
+                    continue
                 path = _safe_str(paths[row_i]).strip().lower().replace("\\", "/")
                 basename = os.path.basename(path) if path else ""
                 combined = " ".join(
@@ -20552,11 +20673,18 @@ class ChronoSiftEngine:
                         basename,
                     ) if part
                 ).replace("\\ ", " ")
-                combined_text.append(combined)
                 labels = {
                     token for token in policy.source_label_tokens if token in combined
                 }
-                labels_by_row.append(labels)
+                if policy.identity_mode == "full_path":
+                    # Only literal full references in admitted invocation fields
+                    # link a later operation. Generic basename overlap cannot.
+                    references = set()
+                    for values in text_arrays:
+                        references.update(file_identity(value) for value in literal_path_references(values[row_i]))
+                    labels = references
+                else:
+                    labels_by_row.append(labels)
                 signals = signal_map.get(row_i) or {}
                 qualification_facts = {
                     "copy_command": any(
@@ -20577,6 +20705,11 @@ class ChronoSiftEngine:
                         for name in policy.follow_on_signals
                     ),
                 }
+                if policy.identity_mode == "full_path":
+                    heads = {line.split(None, 1)[0].casefold() for values in text_arrays
+                        for line in values[row_i].splitlines() if line.strip()}
+                    qualification_facts["copy_command"] = bool(heads.intersection(token.strip().casefold() for token in policy.copy_tokens))
+                    qualification_facts["copy_text_support"] = any(token in combined.casefold() for token in policy.copy_text_support_tokens)
                 if policy.follow_on_qualification.matches(qualification_facts):
                     follow_events.append((row_i, ts, labels))
             follow_times = [ts for _, ts, _ in follow_events]
@@ -20589,11 +20722,19 @@ class ChronoSiftEngine:
                     for name in policy.source_signals
                 ):
                     continue
-                source_labels = labels_by_row[row_i]
+                if policy.identity_mode == "full_path":
+                    source_path = file_identity(_safe_str(paths[row_i]))
+                    if not (source_path.startswith("/") or re.match(r"^[A-Za-z]:/", source_path)):
+                        continue
+                    source_labels = {source_path}
+                else:
+                    source_labels = labels_by_row[row_i]
                 lo = bisect.bisect_left(follow_times, ts)
                 hi = bisect.bisect_right(follow_times, ts + window)
                 matched = False
                 for event_index in range(lo, hi):
+                    if policy.identity_mode == "full_path" and follow_events[event_index][0] == row_i:
+                        continue
                     follow_labels = follow_events[event_index][2]
                     if source_labels:
                         if source_labels.intersection(follow_labels):
@@ -20619,6 +20760,11 @@ class ChronoSiftEngine:
                     if item.max_chars is not None:
                         value = _safe_str(value)[:item.max_chars]
                     evidence[item.name] = value
+                if policy.identity_mode == "full_path":
+                    evidence["linked_file_path"] = source_path
+                    evidence["follow_on_timestamp"] = follow_events[event_index][1].isoformat()
+                    evidence["reference_basis"] = "literal_full_path"
+                    evidence["file_version_verified"] = False
                 self._emit_temporal_policy_signal(
                     signal_map,
                     explain_map,
@@ -21214,6 +21360,13 @@ class ChronoSiftEngine:
                 if not rule_metadata:
                     continue
                 category_policy = classifier_policy.categories[category]
+                # Keep general match strength, but qualify this category from
+                # one rule's own score AND quality (never mix two weak hits).
+                rule_metadata = [(name, meta) for name, meta in rule_metadata
+                                 if meta.score >= category_policy.minimum_score
+                                 and meta.quality >= category_policy.minimum_quality]
+                if not rule_metadata:
+                    continue
                 emission = category_policy.emission
                 category_best_score = max(
                     int(meta.score) for _, meta in rule_metadata
@@ -22689,7 +22842,7 @@ class ChronoSiftEngine:
             # Do not expand missing inputs into dense strings/objects merely
             # to rediscover that a derived column is entirely missing.
             empty_result = (
-                method in {"bitmask_any", "casefold", "path_separators", "canonical_web_path", "file_extension", "ipv4_first", "posix_path_resolve"}
+                method in {"bitmask_any", "casefold", "path_separators", "canonical_web_path", "file_extension", "ipv4_first", "posix_path_resolve", "command_invocations"}
                 and absent(spec.source)
             ) or (method == "join_fields" and any(absent(field) for field in spec.fields)) or (
                 method == "identity_lookup" and any(absent(field) for field in (spec.source, spec.key_field, spec.value_field))
@@ -22699,6 +22852,15 @@ class ChronoSiftEngine:
             )
             if empty_result:
                 out[name] = _compact_null_series(out.index)
+                continue
+
+            if method == "command_invocations":
+                values = np.full(len(out), None, dtype=object)
+                source_values = out[spec.source].to_numpy(copy=False)
+                positions = np.flatnonzero(~_missing_meaningful_value_mask(out[spec.source]).to_numpy(dtype=bool, copy=False))
+                for pos in positions:
+                    values[pos] = command_invocations(_safe_str(source_values[pos]), spec.wrappers, spec.scripts)
+                out[name] = values
                 continue
 
             if method == "select_coalesce":

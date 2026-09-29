@@ -8,8 +8,11 @@ The engine is part of a research pipeline tied to the [MITRE ATT&CK framework](h
 
 ## What it detects
 
-The isolated runner defaults to rules v24 / weights v21. V24 adds scoring-neutral,
-evidence-qualified [ATT&CK attribution](docs/ATTACK_METADATA.md) and a generated
+The isolated runner defaults to rules v26 / weights v22. V26 adds
+[content-qualified ransom notes and weak web-name leads](docs/NOTE_WEB_EVIDENCE.md).
+V25 added
+[semantic evidence gates](docs/SEMANTIC_EVIDENCE.md), retaining evidence-qualified
+[ATT&CK attribution](docs/ATTACK_METADATA.md) and a generated
 [current mapping inventory](docs/ATTACK_MATRIX_CURRENT.md). Outcome-aware sudo,
 FTP transfers, loader-control changes and web-code edits are prioritised for
 human investigation without demanding proof of compromise. Explicit evidence
@@ -288,7 +291,7 @@ control whole-partition memory use. Add
 `file_created`, `file_modified`, and `file_deleted` entries despite their zero
 weights. Scored and specialised lifecycle signals are always retained.
 
-The isolated candidate defaults to rules v24 / weights v21 and checks its required
+The isolated candidate defaults to rules v26 / weights v22 and checks its required
 YARA metadata before processing evidence. See the
 [calibration and signal-migration notes](docs/EVIDENCE_CALIBRATION.md).
 The [event-role identity policy](docs/IDENTITY_ROLES.md) separates reporting,

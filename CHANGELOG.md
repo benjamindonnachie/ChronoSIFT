@@ -4,6 +4,24 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Rules v26 / weights v22 separate one-point shell-like HTTP name probes from
+  attempted exploit syntax, including HTTP 404. Ransom-note corroboration now
+  requires specific YARA content classification, including reviewed Forge FULL
+  rules, not README/decrypt basenames. Notes are separate from encryptor
+  capability; same-row/path self-corroboration is excluded. Windows creation
+  context also requires note content. Existing weights are unchanged; the two
+  new signals are 1 and 8 points. Metadata parsing now terminates public rules
+  at private helpers and supports public global rules without metadata leakage.
+  Historical policies and saved sidecars remain unchanged. See
+  `docs/NOTE_WEB_EVIDENCE.md` for full-set provenance and limits.
+
+- Rules v25 / unchanged weights v21 correct unqualified filename/message-to-behaviour
+  inference, executable positions, account outcomes, authentication provenance,
+  effective paths and full-file follow-on linkage. Remove filename-only benign
+  backup suppression. Shared-signal explanations retain every producer but count
+  the final merged contribution once. Historical rules and saved sidecars remain
+  unchanged. See `docs/SEMANTIC_EVIDENCE.md` for scope and coverage trade-offs.
+
 - Audit hardening (unchanged rules v24 / weights v21): require pandas >=3.0.3
   for wide forensic timestamps; publish the detector-policy interface; prepare
   genuine text once in Arrow storage with bounded memory measurements; distinguish

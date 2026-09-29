@@ -1,8 +1,14 @@
 # Rules, weights, and enrichment inputs
 
-V24 is scoring-identical to v23 and adds [structured ATT&CK attribution](../docs/ATTACK_METADATA.md).
+V26 / weights v22 separates one-point HTTP shell-name probes from exploitation
+syntax and uses YARA content-qualified ransom notes, including the reviewed
+Forge FULL rules. See [note/web evidence](../docs/NOTE_WEB_EVIDENCE.md).
+
+V25 tightens source, invocation, outcome and file-identity gates, with unchanged
+weights v21. See [semantic evidence](../docs/SEMANTIC_EVIDENCE.md).
+Historical v24 is scoring-identical to v23 and adds [structured ATT&CK attribution](../docs/ATTACK_METADATA.md).
 `attack_mapping_review_v24.yaml` is the version-bound review source; the builder
-generates both runtime v24 and the current mapping inventory. PCI DSS references
+generates both runtime v24 and its versioned mapping inventory. PCI DSS references
 for potential plaintext PAN stay separate from ATT&CK IDs.
 
 See [behavioural scoring](../docs/BEHAVIOURAL_SCORING.md) for v21/v19 sudo,
@@ -11,8 +17,8 @@ database-export classification and explicit document-root configuration.
 All preceding policies remain available for reproducible comparisons.
 
 The v10/v8 YAML pair in this directory preserves the ChronoSIFT v2.31 baseline.
-The isolated candidate runner defaults to `rules_evidence_calibrated_v24.yaml`
-and `weights_evidence_calibrated_v21.yaml`; supply the extraction corpus with
+The isolated candidate runner defaults to `rules_evidence_calibrated_v26.yaml`
+and `weights_evidence_calibrated_v22.yaml`; supply the extraction corpus with
 `--yara-metadata-path`. Its strict resource preflight, signal-name migration,
 weight rationale and validation limits are described in
 [`EVIDENCE_CALIBRATION.md`](../docs/EVIDENCE_CALIBRATION.md).

@@ -35,6 +35,9 @@ def configure_web_roots(document, additional_roots):
         patterns.append(re.escape(root) if root.startswith('/') else r'(?i:(?:(?:[a-zA-Z]|NTFS):)?/'+re.escape(root)+')')
     relative=next(spec for spec in document['normalisation'] if spec['name']=='evidence_web_file_relative')
     relative['pattern']=r'^(?:'+'|'.join(patterns)+r')(/.+)$'
+    path_regex=detectors['file_lifecycle']['classification'].get('path_regex')
+    if path_regex is not None:
+        path_regex['web_root']=relative['pattern']
     roots[:]=all_roots
     # These are the existing detector policy surfaces sharing root vocabulary.
     targets=[detectors['webshell_artifact']['conditions']['path_contains'],

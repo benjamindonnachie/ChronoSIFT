@@ -2,7 +2,9 @@
 
 Audit F-02 is addressed with metadata, not detector or scoring changes. Rules v24
 have the same scoring configuration as v23; weights v21 remain unchanged. The CLI
-defaults to v24/v21. Existing explicitly selected policies remain supported.
+defaults to v26/v22, which adds [note-content and web-name qualification](NOTE_WEB_EVIDENCE.md)
+to the previously documented [semantic gates](SEMANTIC_EVIDENCE.md).
+Existing explicitly selected policies remain supported.
 
 ## Interpretation
 
@@ -73,7 +75,10 @@ python benchmarks/build_attack_metadata_policy.py --check
 ```
 
 The review is bound to the exact v23 source hash. A changed base requires a new
-review, not automatic carry-forward. Generated v24 is the runtime policy; the
-[current inventory](ATTACK_MATRIX_CURRENT.md) is derived from that same policy.
+review, not automatic carry-forward. Generated v24 and its
+[versioned inventory](ATTACK_MATRIX_V24.md) are retained. V25's reviewed changes
+are in `build_semantic_evidence_policy.py`: narrower admission retains qualified
+source mappings; changed outcome/dump claims explicitly update their basis and
+rationale. The [current inventory](ATTACK_MATRIX_CURRENT.md) is derived from v26.
 The [historical matrix](ATTACK_MATRIX.md) remains historical. New policy semantics
 must remain YAML-owned and require tests; technique labels confer no score.
