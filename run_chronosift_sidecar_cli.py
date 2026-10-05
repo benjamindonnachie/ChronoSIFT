@@ -19,8 +19,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("dataset_root", help="Input parquet dataset root")
     p.add_argument("output_root", help="Output parquet dataset root")
     bundled_rules = Path(__file__).resolve().parent / "rules"
-    p.add_argument("--rules-yaml", default=str(bundled_rules / "rules_evidence_calibrated_v26.yaml"))
-    p.add_argument("--weights-yaml", default=str(bundled_rules / "weights_evidence_calibrated_v22.yaml"))
+    p.add_argument("--rules-yaml", default=str(bundled_rules / "rules_evidence_calibrated_v27.yaml"))
+    p.add_argument("--weights-yaml", default=str(bundled_rules / "weights_evidence_calibrated_v23.yaml"))
     p.add_argument("--overlap", default=None, help="Temporal history overlap; omitted selects the dataset-applicable dependency horizon (at least 24h). This is distinct from YAML feature_overlap. Explicit insufficient history fails.")
     p.add_argument("--output-mode", default="sidecar", choices=["full", "sidecar"])
     p.add_argument("--reports-json", default=None, help="Optional path for the run reports JSON")

@@ -4,6 +4,13 @@ This changelog captures the work completed so far on the `v2.31` dead-box ATT&CK
 
 ## Unreleased
 
+- Rules v27 / weights v23 reuse successful SID/IP history and combine authentication
+  evidence without six unconditional votes for one privileged network logon.
+  Execution context requires a qualified command/path; SMB inference is separate
+  from observed shares and NTLM alone is not alternate credential abuse. Bounded
+  failure/success episodes and corroborated impossible travel retain high priority.
+  Known-IP status is not a trust whitelist. See `docs/AUTHENTICATION_CONTEXT.md`.
+
 - Rules v26 / weights v22 separate one-point shell-like HTTP name probes from
   attempted exploit syntax, including HTTP 404. Ransom-note corroboration now
   requires specific YARA content classification, including reviewed Forge FULL

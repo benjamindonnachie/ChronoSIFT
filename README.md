@@ -8,7 +8,9 @@ The engine is part of a research pipeline tied to the [MITRE ATT&CK framework](h
 
 ## What it detects
 
-The isolated runner defaults to rules v26 / weights v22. V26 adds
+The isolated runner defaults to rules v27 / weights v23. V27 reuses existing
+account/IP history and scores qualified [authentication anomalies](docs/AUTHENTICATION_CONTEXT.md)
+instead of stacking ordinary privileged-login labels. V26 adds
 [content-qualified ransom notes and weak web-name leads](docs/NOTE_WEB_EVIDENCE.md).
 V25 added
 [semantic evidence gates](docs/SEMANTIC_EVIDENCE.md), retaining evidence-qualified
@@ -291,7 +293,7 @@ control whole-partition memory use. Add
 `file_created`, `file_modified`, and `file_deleted` entries despite their zero
 weights. Scored and specialised lifecycle signals are always retained.
 
-The isolated candidate defaults to rules v26 / weights v22 and checks its required
+The isolated candidate defaults to rules v27 / weights v23 and checks its required
 YARA metadata before processing evidence. See the
 [calibration and signal-migration notes](docs/EVIDENCE_CALIBRATION.md).
 The [event-role identity policy](docs/IDENTITY_ROLES.md) separates reporting,

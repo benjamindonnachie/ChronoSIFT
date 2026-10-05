@@ -1265,6 +1265,18 @@ qualified. Projection is row-local and has no correlation key or lookback;
 Python retains numeric coercion, sparse row traversal, max merge, and explain
 materialisation.
 
+Projection `conditions` may additionally declare `all_of_any` (a list of nonempty
+signal groups, requiring a positive member of every group) and `none` (a nonempty
+signal list, no member positive). Both use `minimum_value_exclusive`, participate
+in producer/phase validation, and default to no additional restriction. Required
+supporting signals appear in `matched_signals`; they do not multiply the projected
+strength. These gates allow row-local context qualification without another
+history store or admitting same/later-phase dependencies.
+
+The execution classifier's `execution_evidence` boolean fact means at least one
+configured execution path or command is present. V27 requires this alongside
+`privileged_actor`; historical decision tables remain unchanged.
+
 The required `canonical_persistence_projection` and
 `canonical_transfer_projection` definitions run contextually at phase 29, so
 their canonical outputs can feed phase-30 gates and phase-40 temporal policy.

@@ -3817,6 +3817,8 @@ class SignalProjectionRulePolicy:
     minimum_value_exclusive: float
     strength: str
     emission: DetectorEmissionPolicy
+    all_of_any: Tuple[frozenset[str], ...] = ()
+    excluded_signals: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -3835,7 +3837,8 @@ class SignalProjectionPolicy:
         return frozenset(
             signal
             for projection in self.projections
-            for signal in projection.input_signals
+            for signal in (projection.input_signals | projection.excluded_signals
+                           | frozenset().union(*projection.all_of_any))
         )
 
     @property
@@ -9123,7 +9126,7 @@ def _parse_execution_context_classifier_policy(
         "temporary_path", "user_writable_path", "suspicious_path",
         "system_binary_name", "compiler_command", "shell_command",
         "network_command", "archive_command", "privileged_actor",
-        "suid_command",
+        "suid_command", "execution_evidence",
     }
     decisions = _parse_boolean_fact_decisions(
         cfg["decisions"],
@@ -10640,7 +10643,15 @@ def _parse_signal_projection_policy(
             conditions_cfg,
             conditions_path,
             required={"match", "minimum_value_exclusive"},
+            optional={"all_of_any", "none"},
         )
+        raw_groups = conditions_cfg.get("all_of_any", [])
+        if not isinstance(raw_groups, list):
+            raise ValueError(f"{conditions_path}.all_of_any: expected a list of signal groups")
+        all_of_any = tuple(frozenset(_policy_signal_list(group,
+            f"{conditions_path}.all_of_any[{i}]")) for i, group in enumerate(raw_groups))
+        excluded_signals = (frozenset(_policy_signal_list(conditions_cfg["none"],
+            f"{conditions_path}.none")) if "none" in conditions_cfg else frozenset())
         match = _policy_enum(
             conditions_cfg["match"], f"{conditions_path}.match", {"any", "all"}
         )
@@ -10663,6 +10674,8 @@ def _parse_signal_projection_policy(
                     projection_cfg["emissions"],
                     f"{projection_path}.emissions",
                 ),
+                all_of_any=all_of_any,
+                excluded_signals=excluded_signals,
             )
         )
     evidence = _parse_policy_evidence(
@@ -13016,6 +13029,10 @@ def _parse_detector_policy(
             for projection_index, projection in enumerate(
                 definition.payload.projections
             ):
+                for group in projection.all_of_any:
+                    if group <= disabled_policy_output_names:
+                        raise ValueError(f"{input_path}.projections[{projection_index}]: "
+                            "input signal(s) have no enabled policy producer path: " + ", ".join(sorted(group)))
                 disabled_projection_inputs = (
                     projection.input_signals & disabled_policy_output_names
                 )
@@ -16280,6 +16297,7 @@ class ChronoSiftEngine:
             suid_hit = bool(cmd_l and policy.suid_pattern.search(cmd_l))
 
             facts = {
+                "execution_evidence": bool(path or cmd),
                 "temporary_path": tmp_path,
                 "user_writable_path": user_writable,
                 "suspicious_path": suspicious_path,
@@ -16292,6 +16310,7 @@ class ChronoSiftEngine:
                 "suid_command": suid_hit,
             }
             fact_evidence = {
+                "execution_evidence": cmd or path,
                 "temporary_path": path,
                 "user_writable_path": path,
                 "suspicious_path": path,
@@ -19869,6 +19888,12 @@ class ChronoSiftEngine:
                 if not isinstance(existing, dict) or not existing:
                     continue
                 for projection in policy.projections:
+                    def positive(name: str) -> bool:
+                        value = _safe_num(existing.get(name, 0))
+                        return value is not None and value > projection.minimum_value_exclusive
+                    if (any(not any(positive(name) for name in group) for group in projection.all_of_any)
+                            or any(positive(name) for name in projection.excluded_signals)):
+                        continue
                     matched: List[Tuple[str, float]] = []
                     input_matches: List[bool] = []
                     for signal_name in projection.input_signals:
@@ -19897,7 +19922,8 @@ class ChronoSiftEngine:
                     if projected_value <= prior:
                         continue
                     existing[projection.emission.name] = projected_value
-                    matched_names = ",".join(sorted(name for name, _ in matched))
+                    matched_names = ",".join(sorted({name for name, _ in matched} | {
+                        name for group in projection.all_of_any for name in group if positive(name)}))
                     evidence = {
                         evidence_value.name: matched_names
                         for evidence_value in policy.evidence

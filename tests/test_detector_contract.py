@@ -27,8 +27,8 @@ class DetectorContractTest(unittest.TestCase):
 
     def test_current_counts_and_four_extension_families(self):
         self.assertEqual(len(self.published['required_detectors']),35)
-        self.assertEqual(len(self.published['example_additional_detectors']),9)
-        self.assertEqual(len(self.parse(self.rules).detectors),44)
+        self.assertEqual(len(self.published['example_additional_detectors']),10)
+        self.assertEqual(len(self.parse(self.rules).detectors),45)
         self.assertEqual(self.published['additional_executor_families'],{
             'signal_gate':{'stages':['atomic','contextual']},
             'signal_sequence':{'stages':['temporal']},

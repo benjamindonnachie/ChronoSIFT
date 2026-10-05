@@ -1,5 +1,10 @@
 # Rules, weights, and enrichment inputs
 
+V27 / weights v23 prioritises source-linked failure/success episodes and anomalous
+geography, reusing the existing successful-account/IP history. Ordinary privileged
+authentication is context, not execution or six separate suspicious behaviours.
+See [authentication context](../docs/AUTHENTICATION_CONTEXT.md).
+
 V26 / weights v22 separates one-point HTTP shell-name probes from exploitation
 syntax and uses YARA content-qualified ransom notes, including the reviewed
 Forge FULL rules. See [note/web evidence](../docs/NOTE_WEB_EVIDENCE.md).
@@ -17,8 +22,8 @@ database-export classification and explicit document-root configuration.
 All preceding policies remain available for reproducible comparisons.
 
 The v10/v8 YAML pair in this directory preserves the ChronoSIFT v2.31 baseline.
-The isolated candidate runner defaults to `rules_evidence_calibrated_v26.yaml`
-and `weights_evidence_calibrated_v22.yaml`; supply the extraction corpus with
+The isolated candidate runner defaults to `rules_evidence_calibrated_v27.yaml`
+and `weights_evidence_calibrated_v23.yaml`; supply the extraction corpus with
 `--yara-metadata-path`. Its strict resource preflight, signal-name migration,
 weight rationale and validation limits are described in
 [`EVIDENCE_CALIBRATION.md`](../docs/EVIDENCE_CALIBRATION.md).

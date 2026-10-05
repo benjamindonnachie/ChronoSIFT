@@ -203,8 +203,12 @@
       ]
     }
   },
-  "example_policy": "rules_evidence_calibrated_v26.yaml",
+  "example_policy": "rules_evidence_calibrated_v27.yaml",
   "example_additional_detectors": {
+    "authentication_context_priority": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
     "category_qualified_webshell_artifact": {
       "executor": "signal_gate",
       "stage": "contextual"
