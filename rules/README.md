@@ -456,3 +456,9 @@ Referenced-file manifests use schema v7 and record
 any expected digest differs, so changing correlation fields, matching,
 emissions, web branches, or mappings cannot silently reuse stale derived
 identity or aliases.
+
+Hour-of-week uncertainty uses whole-week jackknife scales and a joint
+standardized bootstrap maximum, with a Bonferroni Student-t small-block guard.
+`simultaneous_upper_radius` reports the largest resulting hour-specific margin;
+it is not added to all bins. See `docs/RULE_LANGUAGE.md` for assumptions,
+calibration diagnostics and small-sample limitations.

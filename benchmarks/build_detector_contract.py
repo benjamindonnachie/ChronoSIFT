@@ -82,7 +82,7 @@ def render(data):
         '| Executor family | Supported stages |','|---|---|']
     for family,item in data['additional_executor_families'].items():lines.append(f'| `{family}` | {", ".join(item["stages"])} |')
     lines+=['',
-        'Gates run at phase10/30 (atomic/contextual), projections at29/45 (contextual/temporal), sequences at40 and qualified artefact commands at38. Same-phase, backward and unavailable-producer dependencies are rejected. See [the rule language](RULE_LANGUAGE.md) for full schemas and [Linux tool scoring](LINUX_TOOL_SCORING.md#bounded-linkage-contract) for qualified artefact commands.', '',
+        'Gates run at phase10/30 (atomic/contextual), projections at29/45 (contextual/temporal), sequences at40 and qualified artefact commands at38. Rate-change windows run at40 over complete observation buckets, including unscored denominator rows. Same-phase, backward and unavailable-producer dependencies are rejected. See [the rule language](RULE_LANGUAGE.md) for full schemas and [Linux tool scoring](LINUX_TOOL_SCORING.md#bounded-linkage-contract) for qualified artefact commands.', '',
         '`ordered_row_rules`, `ordered_signal_adjustments` and `grouped_signal_window` are reusable internally but not open additional-ID families. Existing policy can add supported branches/emissions within their required owning definitions; this does not permit a second executor instance under a new ID.', '',
         '### Current policy examples (not required interface IDs)','',
         '| Optional ID | Executor | Stage |','|---|---|---|']

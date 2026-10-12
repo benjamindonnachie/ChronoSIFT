@@ -1468,9 +1468,11 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
 
     def test_predictively_valid_but_inert_profile_is_rejected(self):
         engine = self._engine()
-        rng = np.random.default_rng(13)
-        counts = rng.poisson(2, size=(3, 168)).astype(float)
-        counts[:, :40] += 2.0
+        # Predictive but weak contrast, with appreciable block uncertainty.
+        # The former sparse Poisson fixture contained genuinely quiet cells;
+        # only the old shared absolute margin prevented their amplification.
+        counts = np.full((3, 168), 10.0)
+        counts[:, :40] += np.array([1.0, 2.0, 4.0])[:, None]
         weekly_counts = pd.DataFrame(
             counts,
             index=pd.date_range("2024-01-01", periods=3, freq="7D"),
@@ -1699,7 +1701,7 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
             profiled.attrs["_chronosift_profile_manifest"]["profile"][2], 0.0
         )
 
-    def test_shipped_profile_does_not_replace_inert_filtered_activity_with_automation(self):
+    def test_shipped_profile_does_not_replace_filtered_activity_with_automation(self):
         engine = self._engine()
         self.assertEqual(
             engine.profiling_policy.insufficient_filtered_events,
@@ -1748,17 +1750,15 @@ class ChronoSiftV231ProfileTrustGeoPolicyTest(unittest.TestCase):
 
         self.assertEqual(manifest["selection_mode"], "filtered")
         self.assertTrue(manifest["used_filtered_subset"])
-        self.assertFalse(manifest["validation"]["accepted"])
-        self.assertEqual(
-            manifest["validation"]["reason"],
-            "no_confidently_low_activity_hours",
-        )
+        self.assertTrue(manifest["validation"]["accepted"])
+        self.assertEqual(manifest["selected_event_count"], 8 * 200)
+        self.assertGreater(manifest["validation"]["amplifiable_hour_count"], 0)
         self.assertGreater(
             manifest["validation"]["lower_confidence_bound"], 0.0
         )
-        self.assertEqual(manifest["profile"], {})
-        self.assertEqual(manifest["amplifiers"], {})
-        self.assertEqual(
+        self.assertTrue(manifest["profile"])
+        self.assertTrue(manifest["amplifiers"])
+        self.assertGreater(
             profiled[engine.profiling_policy.activity_deficit_signal].max(),
             0.0,
         )

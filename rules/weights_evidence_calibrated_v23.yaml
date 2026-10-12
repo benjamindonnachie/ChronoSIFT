@@ -280,6 +280,7 @@ weights:
   av_behaviour_webshell: 8
   web_shell_name_probe: 1
   yara_ransom_note: 8
+  web_service_disruption: 8
   smb_network_logon_candidate: 0
   auth_failure_success_episode: 0
   auth_failure_context: 2
@@ -288,3 +289,25 @@ weights:
   auth_anomalous_travel: 8
   auth_takeover_candidate: 20
   auth_privileged_takeover: 4
+  windows_risky_creator_travel_account_use: 0
+  windows_risky_creator_travel_privileged_account_use: 0
+  windows_risky_creator_authentication_account_use: 0
+  windows_risky_creator_authentication_privileged_account_use: 0
+  auth_suspected_compromise_priority: 8
+  webshell_created_artifact: 0
+  evidence_web_file_deleted: 0
+  webshell_activity_recent: 0
+  webshell_created_file_context: 0
+  auth_sustained_bruteforce_success: 0
+  auth_corroborated_bruteforce_success: 0
+  auth_account_compromise_context: 0
+  auth_suspected_compromise_source_use: 0
+  auth_suspected_compromise_novel_use: 0
+  auth_corroborated_compromise_source_use: 0
+  auth_corroborated_compromise_novel_use: 0
+  auth_corroborated_compromise_sensitive_action: 0
+  windows_created_by_compromised_account: 0
+  windows_compromised_creator_privileged_account: 0
+  windows_compromised_creator_account_use: 0
+  windows_compromised_creator_privileged_account_use: 0
+  windows_compromised_creator_action: 0

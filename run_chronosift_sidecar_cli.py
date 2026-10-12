@@ -5,6 +5,8 @@ import argparse
 import json
 import logging
 import warnings
+import yaml
+import av_behaviour
 from pathlib import Path
 
 import chronoSIFT_v2_31 as chronosift_module
@@ -36,6 +38,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--geoip-city-db", default=None, help="Optional MaxMind GeoLite2 City .mmdb")
     p.add_argument("--geoip-asn-db", default=None, help="Optional MaxMind GeoLite2 ASN .mmdb")
     p.add_argument("--av-csv-path", default=None, help="Optional hash-keyed ClamAV results CSV")
+    p.add_argument("--require-av-behaviour-context", action="store_true",
+                   help="Require and verify the enriched AV resource before loading evidence")
+    p.add_argument("--web-document-root", action="append", default=[],
+                   help="Explicit POSIX document root in the analysed filesystem; repeat for multiple sites")
+    p.add_argument("--effective-rules-yaml", default=None,
+                   help="Destination for the validated deployment-specific policy (default: beside output)")
     p.add_argument("--luhn-csv-path", default=None, help="Optional hash-keyed Luhn results CSV")
     p.add_argument("--nsrl-parquet-path", default=None, help="Optional locally prepared NSRL Parquet lookup")
     p.add_argument(
@@ -99,7 +107,13 @@ def main() -> int:
         args.rules_yaml,
         args.weights_yaml,
         yara_metadata_path=args.yara_metadata_path,
+        web_document_roots=args.web_document_root or None,
+        require_av_behaviour_context=args.require_av_behaviour_context,
     )
+    if args.require_av_behaviour_context:
+        # The existing typed loader verifies CSV schema, hash identity and raw
+        # report digests. A header-only pipeline check is not sufficient.
+        av_behaviour.load_catalog(args.av_csv_path, engine.detector_policy.clamav_classification.behaviour)
     # Resolve the configured resource before loading evidence or writing any
     # outputs. Missing/parse-error behaviour remains owned by the rules YAML.
     yara_policy = engine.detector_policy.yara_classification
@@ -109,6 +123,10 @@ def main() -> int:
             "No YARA rule metadata parsed; supply the extraction corpus with "
             "--yara-metadata-path before processing evidence."
         )
+    prefix = _artifact_prefix(args.output_root)
+    effective_rules = Path(args.effective_rules_yaml) if args.effective_rules_yaml else prefix.with_name(prefix.name + ".effective-rules.yaml")
+    effective_rules.parent.mkdir(parents=True, exist_ok=True)
+    effective_rules.write_text(yaml.safe_dump(engine.rules_doc, sort_keys=False, width=120), encoding="utf-8")
     if _is_compiled_chronosift_module():
         with warnings.catch_warnings():
             # This suppression is intentionally narrow. We still want all other

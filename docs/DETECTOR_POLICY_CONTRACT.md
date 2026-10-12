@@ -8,7 +8,7 @@ The Python registry is intentionally closed for baseline IDs, typed schemas, exe
 
 YAML owns enablement, supported predicates/vocabulary, input and correlation fields, windows, thresholds, signal names/values, confidence, evidence and ATT&CK attribution. Weights own contributions. Python also retains structural invariants such as typed-emission maximum merge and dependency ordering. This contract does not move behavioural defaults back into code.
 
-There are **35 required baseline IDs**. `rules_evidence_calibrated_v27.yaml` configures **45 detectors**, including **10 optional additional IDs**. These counts are not numbers of ATT&CK techniques or behavioural rules. The audit's “36 required” count is not the current parser contract.
+There are **35 required baseline IDs**. `rules_evidence_calibrated_v27.yaml` configures **49 detectors**, including **14 optional additional IDs**. These counts are not numbers of ATT&CK techniques or behavioural rules. The audit's “36 required” count is not the current parser contract.
 
 ## Required baseline bindings
 
@@ -61,11 +61,12 @@ A new non-reserved ID may use only these families. Provide a complete typed defi
 | Executor family | Supported stages |
 |---|---|
 | `qualified_artifact_command` | contextual |
+| `rate_change_window` | temporal |
 | `signal_gate` | atomic, contextual |
 | `signal_projection` | contextual, temporal |
 | `signal_sequence` | temporal |
 
-Gates run at phase10/30 (atomic/contextual), projections at29/45 (contextual/temporal), sequences at40 and qualified artefact commands at38. Same-phase, backward and unavailable-producer dependencies are rejected. See [the rule language](RULE_LANGUAGE.md) for full schemas and [Linux tool scoring](LINUX_TOOL_SCORING.md#bounded-linkage-contract) for qualified artefact commands.
+Gates run at phase10/30 (atomic/contextual), projections at29/45 (contextual/temporal), sequences at40 and qualified artefact commands at38. Rate-change windows run at40 over complete observation buckets, including unscored denominator rows. Same-phase, backward and unavailable-producer dependencies are rejected. See [the rule language](RULE_LANGUAGE.md) for full schemas and [Linux tool scoring](LINUX_TOOL_SCORING.md#bounded-linkage-contract) for qualified artefact commands.
 
 `ordered_row_rules`, `ordered_signal_adjustments` and `grouped_signal_window` are reusable internally but not open additional-ID families. Existing policy can add supported branches/emissions within their required owning definitions; this does not permit a second executor instance under a new ID.
 
@@ -79,6 +80,10 @@ Gates run at phase10/30 (atomic/contextual), projections at29/45 (contextual/tem
 | `linux_qualified_tool_invocation` | `qualified_artifact_command` | contextual |
 | `web_content_followon` | `signal_sequence` | temporal |
 | `web_recent_geo_download_projection` | `signal_projection` | temporal |
+| `web_service_disruption` | `rate_change_window` | temporal |
+| `webshell_activity_priority` | `signal_projection` | temporal |
+| `webshell_created_artifact` | `signal_gate` | contextual |
+| `webshell_created_file_activity` | `signal_sequence` | temporal |
 | `windows_archive_ftp_projection` | `signal_projection` | temporal |
 | `windows_creator_risk_projection` | `signal_projection` | temporal |
 | `windows_malware_use_projection` | `signal_projection` | temporal |

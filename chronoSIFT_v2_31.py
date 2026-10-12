@@ -131,7 +131,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import ast
-from collections import Counter
+from collections import Counter, deque
 import bisect
 from command_evidence import command_invocations, literal_path_references
 import hashlib
@@ -486,15 +486,17 @@ def _safe_num(x: Any) -> Optional[float]:
         return None
 
 
-def _normalise_integral_metadata_value(x: Any) -> Optional[int]:
+def _normalise_integral_metadata_value(x: Any, *, strict: bool = False) -> Optional[int]:
     """Normalise metadata values that should remain integral across explain payloads."""
-    if _is_null(x):
+    if _is_null(x) or (strict and isinstance(x, (bool, np.bool_))):
         return None
 
     if isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_)):
         return int(x)
 
     if isinstance(x, (float, np.floating)):
+        if strict and (not np.isfinite(x) or not float(x).is_integer()):
+            return None
         try:
             if bool(pd.isna(x)):
                 return None
@@ -510,7 +512,7 @@ def _normalise_integral_metadata_value(x: Any) -> Optional[int]:
             dec = Decimal(s)
         except InvalidOperation:
             return None
-        if not dec.is_finite():
+        if not dec.is_finite() or (strict and dec != dec.to_integral_value()):
             return None
         return int(dec)
 
@@ -2398,7 +2400,12 @@ def _select_profile_events(
 def _ensure_datetime_series(df: pd.DataFrame) -> pd.Series:
     """Return a timezone-aware datetime series for event timestamps."""
     if isinstance(df.index, pd.DatetimeIndex):
-        return df.index.to_series(index=df.index)
+        index_utc = (
+            df.index.tz_localize("UTC")
+            if df.index.tz is None
+            else df.index.tz_convert("UTC")
+        )
+        return index_utc.to_series(index=df.index)
     for col in ("date_time", "datetime", "timestamp", "date_time_iso"):
         if col in df.columns:
             return pd.to_datetime(df[col], errors="coerce", utc=True)
@@ -2458,6 +2465,85 @@ def _complete_week_hour_counts_from_frame(
     ).fillna(0.0)
 
 
+PROFILE_UNCERTAINTY_CALIBRATION = "hour_scaled_week_bootstrap_bonferroni_t_v1"
+
+
+@lru_cache(maxsize=64)
+def _student_t_upper_quantile(tail_probability: float, degrees_of_freedom: int) -> float:
+    """Upper t quantile without an additional scipy runtime dependency.
+
+    Integrate the t density after x=sqrt(df)*tan(theta). Computing the
+    survival integral directly avoids cancellation in the small tail used by
+    Bonferroni calibration. Gauss-Legendre quadrature and bisection are bounded.
+    """
+    if not (0.0 < tail_probability < 0.5) or degrees_of_freedom < 1:
+        raise ValueError("t quantile requires 0 < tail < .5 and positive df")
+    df = float(degrees_of_freedom)
+    nodes, weights = np.polynomial.legendre.leggauss(128)
+    normalizer = math.exp(math.lgamma((df + 1.0) / 2.0)
+                          - math.lgamma(df / 2.0)) / math.sqrt(math.pi)
+    lower, upper = 0.0, math.pi / 2.0
+    for _ in range(64):
+        theta = (lower + upper) / 2.0
+        half_width = (math.pi / 2.0 - theta) / 2.0
+        angles = theta + half_width * (nodes + 1.0)
+        survival = normalizer * half_width * float(np.dot(
+            weights, np.exp((df - 1.0) * np.log(np.cos(angles)))))
+        if survival > tail_probability:
+            lower = theta
+        else:
+            upper = theta
+    return math.sqrt(df) * math.tan((lower + upper) / 2.0)
+
+
+def _simultaneous_hour_probability_bounds(
+    counts: np.ndarray, probabilities: np.ndarray,
+    bootstrap_probabilities: np.ndarray, *, alpha: float,
+    confidence_level: float,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Hour-specific, jointly calibrated upper bounds from whole weeks.
+
+    Delete-one-week jackknife scales retain the pooled event-volume estimand.
+    A one-sided basic-bootstrap maximum calibrates all 168 standardized errors
+    together. A Bonferroni Student-t floor, df=weeks-1, guards small numbers of
+    blocks; neither component treats individual filesystem rows as iid trials.
+    Coverage is approximate for the ratio estimator, not a finite-sample theorem.
+    """
+    n = len(counts)
+    period_bins = counts.shape[1]
+    totals = counts.sum(axis=0)
+    leave_one_out = (totals[None, :] - counts + alpha) / (
+        totals.sum() - counts.sum(axis=1, keepdims=True) + period_bins * alpha)
+    centered = leave_one_out - leave_one_out.mean(axis=0)
+    scales = np.sqrt((n - 1.0) / n * np.sum(centered * centered, axis=0))
+    # Roundoff in a constant bin is not observed variability. A deterministic
+    # bootstrap/jackknife cell carries a zero empirical margin, explicitly
+    # reported below; no claim is made about activity absent from the sample.
+    active = scales > 32.0 * np.finfo(float).eps
+    standardized = np.zeros_like(bootstrap_probabilities)
+    np.divide(probabilities[None, :] - bootstrap_probabilities,
+              scales[None, :], out=standardized, where=active[None, :])
+    bootstrap_critical = max(0.0, float(np.quantile(
+        standardized.max(axis=1), confidence_level, method="higher")))
+    t_critical = _student_t_upper_quantile(
+        (1.0 - confidence_level) / period_bins, n - 1)
+    critical = max(bootstrap_critical, t_critical)
+    margins = critical * np.where(active, scales, 0.0)
+    upper = np.minimum(1.0, probabilities + margins)
+    metadata = {
+        "uncertainty_calibration": PROFILE_UNCERTAINTY_CALIBRATION,
+        "uncertainty_effective_blocks": n,
+        "uncertainty_degrees_of_freedom": n - 1,
+        "bootstrap_standardized_critical_value": bootstrap_critical,
+        "bonferroni_t_critical_value": t_critical,
+        "simultaneous_standardized_critical_value": critical,
+        "simultaneous_upper_radius": float(np.max(upper - probabilities)),
+        "hour_probability_standard_errors": [float(x) for x in scales],
+        "zero_empirical_variance_hour_count": int(np.count_nonzero(~active)),
+    }
+    return upper, metadata
+
+
 def _validate_weekly_hour_profile(
     weekly_counts: pd.DataFrame,
     *,
@@ -2467,11 +2553,15 @@ def _validate_weekly_hour_profile(
     bootstrap_resamples: int,
     random_seed: int,
     amplification_gate: str,
+    period_bins: int = 168,
 ) -> Dict[str, Any]:
     """Validate repeated hour-of-week structure against a uniform reference."""
     counts = np.asarray(weekly_counts, dtype=np.float64)
-    week_count = int(counts.shape[0]) if counts.ndim == 2 else 0
-    reference_probability = 1.0 / 168.0
+    if (counts.ndim != 2 or counts.shape[1] != period_bins
+            or not np.isfinite(counts).all() or (counts < 0).any()):
+        raise ValueError("Profile counts require finite nonnegative block-by-bin values")
+    week_count = int(counts.shape[0])
+    reference_probability = 1.0 / period_bins
     result: Dict[str, Any] = {
         "status": "inconclusive",
         "accepted": False,
@@ -2486,6 +2576,7 @@ def _validate_weekly_hour_profile(
         "random_seed": int(random_seed),
         "acceptance": "bootstrap_lower_bound_above_zero",
         "uncertainty_band": "simultaneous_bootstrap_upper_probability",
+        "uncertainty_calibration": PROFILE_UNCERTAINTY_CALIBRATION,
         "amplification_gate": str(amplification_gate),
     }
     if week_count < int(minimum_complete_weeks):
@@ -2506,7 +2597,7 @@ def _validate_weekly_hour_profile(
         training = total_counts - counts[week_i]
         training_total = float(training.sum())
         probabilities = (training + alpha) / (
-            training_total + 168.0 * alpha
+            training_total + period_bins * alpha
         )
         deltas[week_i] = float(
             np.dot(
@@ -2542,17 +2633,18 @@ def _validate_weekly_hour_profile(
         return result
 
     probabilities = (total_counts + alpha) / (
-        float(total_counts.sum()) + 168.0 * alpha
+        float(total_counts.sum()) + period_bins * alpha
     )
     boot_counts = multiplicities @ counts
     boot_probabilities = (boot_counts + alpha) / (
-        boot_counts.sum(axis=1, keepdims=True) + 168.0 * alpha
+        boot_counts.sum(axis=1, keepdims=True) + period_bins * alpha
     )
-    simultaneous_radius = float(np.quantile(
-        np.max(boot_probabilities - probabilities, axis=1),
-        confidence_level,
-    ))
-    upper_probability = np.minimum(1.0, probabilities + simultaneous_radius)
+    upper_probability, uncertainty_metadata = _simultaneous_hour_probability_bounds(
+        counts, probabilities, boot_probabilities,
+        alpha=alpha, confidence_level=confidence_level,
+    )
+    result.update(uncertainty_metadata)
+    simultaneous_radius = uncertainty_metadata["simultaneous_upper_radius"]
     activity_deficit = np.maximum(
         0.0,
         1.0 - (upper_probability / reference_probability),
@@ -2759,6 +2851,8 @@ def _collect_profiling_output_signals(rules_cfg: dict) -> set[str]:
 def _collect_temporal_input_signals(rules_cfg: dict) -> set[str]:
     needed: set[str] = set()
     for tr in (rules_cfg or {}).get("temporal_rules", []) or []:
+        for option in ("reset_signals", "match_signals_all", "match_signals_any"):
+            needed.update(str(sig).strip().lower() for sig in ((tr or {}).get(option, []) or []))
         for sig in ((tr or {}).get("condition", {}) or {}).get("signals_any", []) or []:
             needed.add(str(sig).strip().lower())
         for step in ((tr or {}).get("sequence", []) or []):
@@ -4366,6 +4460,8 @@ class SignalSequencePolicy:
     emissions: Tuple[DetectorEmissionPolicy, ...]
     evidence: Tuple[PolicyEvidenceValue, ...]
     evidence_type: str
+    key_case_sensitive: bool = False
+    reset_signals: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -4375,6 +4471,7 @@ class SignalSequenceTargetContextPolicy:
     path_contains: Tuple[str, ...]
     combined_text_fields: Tuple[str, ...]
     combined_text_contains: Tuple[str, ...]
+    integral_range: Optional[Tuple[str, int, int]] = None
 
 
 @dataclass(frozen=True)
@@ -4400,6 +4497,43 @@ class RansomwareImpactPolicy:
     @property
     def target_signals(self) -> frozenset[str]:
         return self.support_signals | self.note_signals
+
+
+@dataclass(frozen=True)
+class RateChangeWindowPolicy:
+    enabled: bool
+    bucket_period: timedelta
+    recent_window: timedelta
+    reference_window: timedelta
+    value_field: str
+    key_fields: Tuple[str, ...]
+    required_key_fields: Tuple[str, ...]
+    numerator_range: Tuple[int, int]
+    denominator_ranges: Tuple[Tuple[int, int], ...]
+    minimum_recent_count: int
+    minimum_reference_count: int
+    minimum_numerator_count: int
+    minimum_recent_buckets: int
+    minimum_rate_increase: float
+    emit_on: str
+    emission: DetectorEmissionPolicy
+    evidence_type: str
+
+    @property
+    def emissions(self) -> Tuple[DetectorEmissionPolicy, ...]:
+        return (self.emission,)
+
+    @property
+    def lookback(self) -> timedelta:
+        return self.recent_window + self.reference_window
+
+    @property
+    def source_signals(self) -> frozenset[str]:
+        return frozenset()
+
+    @property
+    def target_signals(self) -> frozenset[str]:
+        return frozenset()
 
 
 @dataclass(frozen=True)
@@ -4740,9 +4874,13 @@ def _detector_definition_required_fields(
         if policy.target_context is not None:
             fields.update(policy.target_context.path_fields)
             fields.update(policy.target_context.combined_text_fields)
+            if policy.target_context.integral_range is not None:
+                fields.add(policy.target_context.integral_range[0])
         return fields
     if definition.executor == "temporal_context_branches":
         return {*policy.note_path_fields, *_policy_evidence_fields(policy.evidence)}
+    if definition.executor == "rate_change_window":
+        return {policy.value_field, *policy.key_fields}
     if definition.executor == "counted_signal_window":
         return _policy_evidence_fields(policy.evidence)
     if definition.executor == "artifact_follow_on_sequence":
@@ -10704,6 +10842,7 @@ def _parse_signal_sequence_policy(
             "ordering", "window_bounds", "source_selection", "emit_on", "key",
             "source", "target", "emissions", "evidence",
         },
+        optional={"reset_signals"},
     )
     _policy_enum(cfg["stage"], f"{path}.stage", {"temporal"})
     _policy_enum(cfg["executor"], f"{path}.executor", {"signal_sequence"})
@@ -10738,7 +10877,8 @@ def _parse_signal_sequence_policy(
 
     key_path = f"{path}.key"
     key = _policy_mapping(cfg["key"], key_path)
-    _policy_keys(key, key_path, required={"scope"}, optional={"field"})
+    _policy_keys(key, key_path, required={"scope"}, optional={"field", "case_sensitive"})
+    key_case_sensitive = _policy_bool(key.get("case_sensitive", False), f"{key_path}.case_sensitive")
     key_scope = _policy_enum(
         key["scope"],
         f"{key_path}.scope",
@@ -10749,8 +10889,8 @@ def _parse_signal_sequence_policy(
             raise ValueError(f"{key_path}.field: required when scope is 'field'")
         key_field = _policy_string(key["field"], f"{key_path}.field")
     else:
-        if "field" in key:
-            raise ValueError(f"{key_path}.field: not allowed when scope is 'deadbox_global'")
+        if "field" in key or "case_sensitive" in key:
+            raise ValueError(f"{key_path}.field/case_sensitive: not allowed when scope is 'deadbox_global'")
         key_field = ""
 
     source_path = f"{path}.source"
@@ -10782,7 +10922,7 @@ def _parse_signal_sequence_policy(
             where_cfg,
             where_path,
             required={"match"},
-            optional={"path", "combined_text"},
+            optional={"path", "combined_text", "integral_range"},
         )
         where_match = _policy_enum(
             where_cfg["match"], f"{where_path}.match", {"any", "all"}
@@ -10838,9 +10978,23 @@ def _parse_signal_sequence_policy(
                 f"{context_path}.contains_any",
                 lower=True,
             )
-        if not path_contains and not combined_contains:
+        integral_range = None
+        if "integral_range" in where_cfg:
+            range_path = f"{where_path}.integral_range"
+            range_cfg = _policy_mapping(where_cfg["integral_range"], range_path)
+            _policy_keys(range_cfg, range_path, required={"field", "minimum", "maximum_exclusive"})
+            bounds = []
+            for bound in ("minimum", "maximum_exclusive"):
+                value = range_cfg[bound]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(f"{range_path}.{bound}: expected an integer")
+                bounds.append(value)
+            if bounds[0] >= bounds[1]:
+                raise ValueError(f"{range_path}: minimum must be below maximum_exclusive")
+            integral_range = (_policy_string(range_cfg["field"], f"{range_path}.field"), *bounds)
+        if not path_contains and not combined_contains and integral_range is None:
             raise ValueError(
-                f"{where_path}: expected path and/or combined_text conditions"
+                f"{where_path}: expected path, combined_text and/or integral_range conditions"
             )
         target_context = SignalSequenceTargetContextPolicy(
             match=where_match,
@@ -10848,6 +11002,7 @@ def _parse_signal_sequence_policy(
             path_contains=path_contains,
             combined_text_fields=combined_fields,
             combined_text_contains=combined_contains,
+            integral_range=integral_range,
         )
 
     emissions_path = f"{path}.emissions"
@@ -10874,6 +11029,8 @@ def _parse_signal_sequence_policy(
         source_selection=source_selection,
         key_scope=key_scope,
         key_field=key_field,
+        key_case_sensitive=key_case_sensitive,
+        reset_signals=frozenset(_policy_signal_list(cfg["reset_signals"], f"{path}.reset_signals")) if "reset_signals" in cfg else frozenset(),
         source_signals=source_signals,
         source_minimum_signal_value_exclusive=_policy_nonnegative_number(
             source["minimum_signal_value_exclusive"],
@@ -11017,6 +11174,142 @@ def _parse_ransomware_impact_policy(raw: Any, path: str) -> RansomwareImpactPoli
         note_exclude_same_artifact=_policy_bool(
             note_cfg.get("exclude_same_artifact", False), f"{note_path}.exclude_same_artifact"),
     )
+
+
+def _parse_rate_change_window_policy(raw: Any, path: str) -> RateChangeWindowPolicy:
+    cfg = _policy_mapping(raw, path)
+    _policy_keys(cfg, path, required={"stage", "executor", "enabled", "evidence_type",
+        "bucket_period", "recent_window", "reference_window", "value_field", "key",
+        "numerator_range", "denominator_ranges", "minimum_recent_count",
+        "minimum_reference_count", "minimum_numerator_count", "minimum_recent_buckets",
+        "minimum_rate_increase", "emit_on", "emissions"})
+    _policy_enum(cfg["stage"], path + ".stage", {"temporal"})
+    _policy_enum(cfg["executor"], path + ".executor", {"rate_change_window"})
+    period = _parse_policy_lookback(cfg["bucket_period"], path + ".bucket_period")
+    recent = _parse_policy_lookback(cfg["recent_window"], path + ".recent_window")
+    reference = _parse_policy_lookback(cfg["reference_window"], path + ".reference_window")
+    if any(x % period != timedelta(0) for x in (recent, reference)):
+        raise ValueError(path + ": windows must be positive whole multiples of bucket_period")
+    key = _policy_mapping(cfg["key"], path + ".key")
+    _policy_keys(key, path + ".key", required={"fields", "required_fields"})
+    fields = tuple(_policy_string_list(key["fields"], path + ".key.fields"))
+    required = tuple(_policy_string_list(key["required_fields"], path + ".key.required_fields"))
+    if not fields or len(set(fields)) != len(fields) or not required or not set(required) <= set(fields):
+        raise ValueError(path + ".key: unique fields and nonempty required subset expected")
+    def integral_range(value, where):
+        value = _policy_mapping(value, where)
+        _policy_keys(value, where, required={"minimum", "maximum_exclusive"})
+        lo, hi = value["minimum"], value["maximum_exclusive"]
+        if any(isinstance(x, bool) or not isinstance(x, int) for x in (lo, hi)) or lo >= hi:
+            raise ValueError(where + ": increasing integer bounds required")
+        return lo, hi
+    numerator = integral_range(cfg["numerator_range"], path + ".numerator_range")
+    if not isinstance(cfg["denominator_ranges"], list) or not cfg["denominator_ranges"]:
+        raise ValueError(path + ".denominator_ranges: nonempty list required")
+    ranges = tuple(sorted(integral_range(x, path + ".denominator_ranges") for x in cfg["denominator_ranges"]))
+    if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])) or not any(a <= numerator[0] and numerator[1] <= b for a, b in ranges):
+        raise ValueError(path + ": denominator ranges must be disjoint and contain numerator range")
+    increase = _policy_nonnegative_number(cfg["minimum_rate_increase"], path + ".minimum_rate_increase")
+    if increase >= 1:
+        raise ValueError(path + ".minimum_rate_increase: must be below1")
+    return RateChangeWindowPolicy(
+        enabled=_policy_bool(cfg["enabled"], path + ".enabled"), bucket_period=period,
+        recent_window=recent, reference_window=reference,
+        value_field=_policy_string(cfg["value_field"], path + ".value_field"),
+        key_fields=fields, required_key_fields=required, numerator_range=numerator,
+        denominator_ranges=ranges,
+        minimum_recent_count=_policy_positive_int(cfg["minimum_recent_count"], path + ".minimum_recent_count"),
+        minimum_reference_count=_policy_positive_int(cfg["minimum_reference_count"], path + ".minimum_reference_count"),
+        minimum_numerator_count=_policy_positive_int(cfg["minimum_numerator_count"], path + ".minimum_numerator_count"),
+        minimum_recent_buckets=_policy_positive_int(cfg["minimum_recent_buckets"], path + ".minimum_recent_buckets"),
+        minimum_rate_increase=increase,
+        emit_on=_policy_enum(cfg["emit_on"], path + ".emit_on", {"numerator", "denominator"}),
+        emission=_parse_single_policy_emission(cfg["emissions"], path + ".emissions"),
+        evidence_type=_policy_enum(cfg["evidence_type"], path + ".evidence_type", {"contextual"}))
+
+
+def _rate_window_admission(df: pd.DataFrame, policy: RateChangeWindowPolicy):
+    """Vectorized admission also preserves zero-score denominator observations."""
+    if policy.value_field not in df or any(k not in df for k in policy.required_key_fields):
+        return np.zeros(len(df), dtype=bool), np.zeros(len(df), dtype=bool)
+    raw = df[policy.value_field]
+    if not raw.notna().any():
+        return np.zeros(len(df), dtype=bool), np.zeros(len(df), dtype=bool)
+    values = pd.to_numeric(raw, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+    valid = np.isfinite(values) & (values == np.floor(values)) & ~df.index.isna()
+    if pd.api.types.is_bool_dtype(raw.dtype):
+        valid[:] = False
+    elif raw.dtype == object:
+        valid &= ~np.fromiter((isinstance(x, (bool, np.bool_)) for x in raw), bool, count=len(raw))
+    denominator = np.zeros(len(df), dtype=bool)
+    for lo, hi in policy.denominator_ranges:
+        denominator |= (values >= lo) & (values < hi)
+    for key in policy.required_key_fields:
+        valid &= df[key].astype("string").str.strip().ne("").fillna(False).to_numpy(dtype=bool)
+    lo, hi = policy.numerator_range
+    return valid & denominator, valid & (values >= lo) & (values < hi)
+
+
+def _rate_change_window_rows(df: pd.DataFrame, policy: RateChangeWindowPolicy):
+    """Aggregate occupied UTC buckets, then prefix-sum each key's two windows.
+
+    O(N) admission/grouping plus sorting occupied bins, no scans of individual
+    requests per target and no allocation of missing calendar buckets. Complete
+    current buckets are intentional retrospective evidence, never a streaming
+    per-request predictor. Windows use integer ticks, including extended dates.
+    """
+    admitted, numerator = _rate_window_admission(df, policy)
+    positions = np.flatnonzero(admitted)
+    if not len(positions) or np.count_nonzero(numerator) < policy.minimum_numerator_count:
+        return []
+    quantum = _timedelta_ticks_for_datetime_index(policy.bucket_period, df.index)
+    if quantum <= 0:
+        raise ValueError("bucket_period is below DatetimeIndex resolution")
+    recent_bins = policy.recent_window // policy.bucket_period
+    reference_bins = policy.reference_window // policy.bucket_period
+    arrays = [df[k].iloc[positions].astype("string").fillna("").to_numpy(dtype=object)
+              if k in df else np.full(len(positions), "", dtype=object) for k in policy.key_fields]
+    key_codes, keys = pd.factorize(pd.MultiIndex.from_arrays(arrays), sort=False)
+    observed = pd.DataFrame({"key":key_codes, "bucket":df.index.asi8[positions] // quantum,
+                             "numerator":numerator[positions].astype(np.int64)})
+    grouped = observed.groupby(["key", "bucket"], sort=False)
+    bin_ids = grouped.ngroup().to_numpy()
+    bins = grouped.numerator.agg(["size", "sum"]).reset_index()
+    stats = np.zeros((len(bins), 5), dtype=float)
+    bucket_values = bins.bucket.to_numpy()
+    count_values = bins[["size","sum"]].to_numpy()
+    for indices in bins.groupby("key", sort=False).indices.values():
+        order = indices[np.argsort(bucket_values[indices], kind="stable")]
+        ticks = bucket_values[order]
+        prefix = np.vstack([np.zeros(2, dtype=np.int64), np.cumsum(count_values[order], axis=0)])
+        left = np.searchsorted(ticks, ticks-recent_bins+1, side="left")
+        ref_left = np.searchsorted(ticks, ticks-recent_bins-reference_bins+1, side="left")
+        ref_right = np.searchsorted(ticks, ticks-recent_bins, side="right")
+        current = prefix[np.arange(len(order))+1] - prefix[left]
+        reference = prefix[ref_right] - prefix[ref_left]
+        support = (current[:,0]>=policy.minimum_recent_count) & (reference[:,0]>=policy.minimum_reference_count) & (current[:,1]>=policy.minimum_numerator_count) & (np.arange(len(order))+1-left>=policy.minimum_recent_buckets)
+        rate = np.divide(current[:,1], current[:,0], out=np.zeros(len(order)), where=current[:,0]>0)
+        prior = np.divide(reference[:,1], reference[:,0], out=np.zeros(len(order)), where=reference[:,0]>0)
+        excess = np.maximum(0., rate-prior)
+        excess[~support | (excess<=policy.minimum_rate_increase)] = 0.
+        stats[order,:4] = np.column_stack([current, reference])
+        stats[order,4] = excess
+    row_stats = stats[bin_ids]
+    emit = row_stats[:,4]>0
+    if policy.emit_on == "numerator":
+        emit &= numerator[positions]
+    result = []
+    for j in np.flatnonzero(emit):
+        row = int(positions[j]); b = int(observed.bucket.iat[j]); counts = row_stats[j]
+        result.append((row, float(counts[4]), dict(key=dict(zip(policy.key_fields, keys[int(key_codes[j])])),
+            bucket_start_utc=pd.Timestamp(b*quantum,unit=df.index.unit,tz="UTC").isoformat(),
+            bucket_period_seconds=int(policy.bucket_period.total_seconds()),
+            recent_window_seconds=int(policy.recent_window.total_seconds()),
+            reference_window_seconds=int(policy.reference_window.total_seconds()),
+            recent_count=int(counts[0]),recent_numerator=int(counts[1]),
+            reference_count=int(counts[2]),reference_numerator=int(counts[3]),
+            recent_rate=float(counts[1]/counts[0]),reference_rate=float(counts[3]/counts[2]),rate_increase=float(counts[4]))))
+    return result
 
 
 def _parse_counted_signal_window_policy(raw: Any, path: str) -> CountedSignalWindowPolicy:
@@ -12817,6 +13110,9 @@ def _parse_detector_policy(
                 raw_detector, detector_path
             )
             stage = "temporal"
+        elif executor == "rate_change_window":
+            payload = _parse_rate_change_window_policy(raw_detector, detector_path)
+            stage = "temporal"
         elif executor == "qualified_artifact_command":
             payload = _parse_qualified_artifact_command_policy(raw_detector, detector_path)
             stage = "contextual"
@@ -12838,7 +13134,7 @@ def _parse_detector_policy(
         else:
             raise ValueError(
                 f"{detector_path}.executor: additional detectors must use one of "
-                "signal_gate, signal_sequence, signal_projection, qualified_artifact_command"
+                "signal_gate, signal_sequence, signal_projection, qualified_artifact_command, rate_change_window"
             )
         definitions.append(
             DetectorDefinition(
@@ -13008,7 +13304,7 @@ def _parse_detector_policy(
                     + ", ".join(sorted(disabled_inputs))
                 )
         elif definition.executor in {"signal_sequence", "signal_sequence_by_artifact"}:
-            inputs = definition.payload.source_signals | definition.payload.target_signals
+            inputs = definition.payload.source_signals | definition.payload.target_signals | getattr(definition.payload, "reset_signals", frozenset())
             blocked_groups = [
                 signal_group & disabled_policy_output_names
                 for signal_group in (
@@ -13018,6 +13314,9 @@ def _parse_detector_policy(
                 if signal_group
                 and not (signal_group - disabled_policy_output_names)
             ]
+            disabled_resets = getattr(definition.payload, "reset_signals", frozenset()) & disabled_policy_output_names
+            if disabled_resets:
+                blocked_groups.append(disabled_resets)
             if blocked_groups:
                 disabled_inputs = set().union(*blocked_groups)
                 raise ValueError(
@@ -13101,6 +13400,8 @@ def _parse_detector_policy(
                     f"{input_path}: source signal(s) have no enabled policy producer path: "
                     + ", ".join(sorted(disabled_source))
                 )
+        elif definition.executor == "rate_change_window":
+            inputs = frozenset()
         elif definition.executor == "counted_signal_window":
             inputs = (
                 definition.payload.counted_signals
@@ -13394,6 +13695,11 @@ class TemporalRule:
     include_supporting_rows: bool = False
     condition_signals_any: Tuple[str, ...] = ()
     reset_signals: Tuple[str, ...] = ()
+    deduplicate_by: Tuple[str, ...] = ()
+    witness_match_fields: Tuple[str, ...] = ()
+    match_signals_all: Tuple[str, ...] = ()
+    match_signals_any: Tuple[str, ...] = ()
+    consume_on_completion: bool = False
     attack_ref: str = ""
 
 
@@ -14846,7 +15152,8 @@ class ChronoSiftEngine:
         )
 
         profiling_root = _policy_mapping(rules_doc["profiling"], "profiling")
-        _policy_keys(profiling_root, "profiling", required={"hour_of_week"})
+        _policy_keys(profiling_root, "profiling", required={"hour_of_week"}, optional={"monthly"})
+        self.monthly_profiling_policy = _parse_monthly_profiling_policy(profiling_root.get("monthly"))
         self.profiling_policy = _parse_hour_of_week_profiling_policy(
             profiling_root["hour_of_week"]
         )
@@ -14872,6 +15179,8 @@ class ChronoSiftEngine:
             self.profiling_policy.quiet_signal,
             self.profiling_policy.activity_deficit_score_field,
         }
+        if self.monthly_profiling_policy.enabled:
+            profile_output_names.update(MONTHLY_PROFILE_COLUMNS)
         other_configured_outputs = {
             *self.canonicalisation_policy.output_fields,
             *(spec.name for spec in self.normalisation),
@@ -14910,6 +15219,8 @@ class ChronoSiftEngine:
             self.profiling_policy.quiet_explanation.rule_id,
             self.profiling_policy.score_amplifier.explanation.rule_id,
         ]
+        if self.monthly_profiling_policy.web_enabled:
+            profile_rule_ids.append(self.monthly_profiling_policy.web_rule_id)
         duplicate_profile_rule_ids = sorted({
             rule_id
             for rule_id in profile_rule_ids
@@ -14969,10 +15280,11 @@ class ChronoSiftEngine:
                 step.signal for step in temporal_rule.sequence
             } | {
                 need.signal for need in temporal_rule.cooccur_all
-            } | set(temporal_rule.condition_signals_any) | set(temporal_rule.reset_signals)
-            unknown_reset = sorted(set(temporal_rule.reset_signals) - declared_signals)
-            if unknown_reset:
-                raise ValueError(f"temporal_rules[{index}].reset_signals: no declared producer: " + ", ".join(unknown_reset))
+            } | set(temporal_rule.condition_signals_any) | set(temporal_rule.reset_signals) | set(temporal_rule.match_signals_all) | set(temporal_rule.match_signals_any)
+            for option in ('reset_signals', 'match_signals_all', 'match_signals_any'):
+                unknown = sorted(set(getattr(temporal_rule, option)) - declared_signals)
+                if unknown:
+                    raise ValueError(f"temporal_rules[{index}].{option}: no declared producer: " + ", ".join(unknown))
             forbidden_inputs = sorted(
                 temporal_inputs & self.temporal_ineligible_signals
             )
@@ -15099,8 +15411,21 @@ class ChronoSiftEngine:
         )
 
     @classmethod
-    def from_yaml(cls, rules_path: str, weights_path: str, yara_metadata_path: Optional[str] = None) -> "ChronoSiftEngine":
+    def from_yaml(cls, rules_path: str, weights_path: str, yara_metadata_path: Optional[str] = None,
+                  *, web_document_roots: Optional[Iterable[str]] = None,
+                  require_av_behaviour_context: bool = False) -> "ChronoSiftEngine":
         rules_doc = _load_unique_yaml_mapping(rules_path, "rules configuration")
+        # Deployment configuration edits existing YAML-owned policy surfaces
+        # before typed parsing; it adds no detector or alternate identity store.
+        if web_document_roots is not None:
+            if isinstance(web_document_roots, (str, bytes)):
+                raise ValueError("web_document_roots must be a sequence of evidence paths")
+            from configure_web_roots import configure_web_roots
+            configure_web_roots(rules_doc, web_document_roots)
+        if type(require_av_behaviour_context) is not bool:
+            raise ValueError("require_av_behaviour_context must be boolean")
+        if require_av_behaviour_context:
+            rules_doc["detector_policy"]["detectors"]["clamav_classification"]["behaviour"]["require_enriched_csv"] = True
         weights_doc = _load_unique_yaml_mapping(
             weights_path, "weights configuration"
         )
@@ -15349,7 +15674,7 @@ class ChronoSiftEngine:
                         if content_type_value and content_type_value not in upload_content_types:
                             upload_content_types.append(content_type_value)
             upload_name = upload_names[0] if upload_names else ""
-            status_code = _normalise_integral_metadata_value(status_vals[row_i])
+            status_code = _normalise_integral_metadata_value(status_vals[row_i], strict=True)
             request_body_size = _normalise_integral_metadata_value(request_length_vals[row_i])
             if request_body_size is None:
                 request_body_size = _normalise_integral_metadata_value(
@@ -17257,6 +17582,8 @@ class ChronoSiftEngine:
             "yara_match_count",
         })
 
+        if apply_profiling and self.monthly_profiling_policy.enabled:
+            cols.update(MONTHLY_PROFILE_COLUMNS)
         if apply_profiling and self.profiling_policy.enabled:
             cols.update({
                 self.profiling_policy.activity_deficit_signal,
@@ -17300,6 +17627,7 @@ class ChronoSiftEngine:
             for k in tr.key_by:
                 if k:
                     cols.add(k)
+            cols.update((*tr.deduplicate_by, *tr.witness_match_fields))
             if tr.field:
                 cols.add(tr.field)
         for definition in self.detector_policy.definitions(
@@ -17314,6 +17642,7 @@ class ChronoSiftEngine:
         cols = {CHRONOSIFT_ROW_ID_COLUMN, "__chronosift_composite_payload_candidate"}
         for tr in self.temporal_rules:
             cols.update(tr.key_by)
+            cols.update((*tr.deduplicate_by, *tr.witness_match_fields))
             if tr.field:
                 cols.add(tr.field)
         for definition in self.detector_policy.definitions(stage="temporal", enabled_only=True):
@@ -17371,7 +17700,7 @@ class ChronoSiftEngine:
         definitions = [d for d in self.detector_policy.definitions(stage="temporal", enabled_only=True)
                        if d.executor in {"signal_sequence", "signal_sequence_by_artifact",
                                          "temporal_context_branches", "counted_signal_window", "artifact_follow_on_sequence"}]
-        names = {name for d in definitions for name in (*d.payload.source_signals, *d.payload.target_signals)}
+        names = {name for d in definitions for name in (*d.payload.source_signals, *d.payload.target_signals, *getattr(d.payload, "reset_signals", ()))}
         all_rows = any(value < 0 for d in definitions for key, value in vars(d.payload).items()
                        if key.endswith("minimum_signal_value_exclusive"))
         mask = np.ones(len(df), dtype=bool) if all_rows else np.zeros(len(df), dtype=bool)
@@ -17711,8 +18040,10 @@ class ChronoSiftEngine:
 
         logger.info("Contextual stage: applying dead-box temporal composites")
         if composite_source is None:
+            self._apply_rate_change_window_policies_sparse(df, signal_map, explain_map)
             self._apply_deadbox_temporal_composites_sparse(df, signal_map, explain_map)
         else:
+            self._apply_rate_change_window_policies_sparse(df, signal_map, explain_map)
             self._apply_compact_temporal_composites(df, signal_map, explain_map, composite_source)
         self._apply_policy_signal_projections_sparse(
             signal_map,
@@ -17754,6 +18085,7 @@ class ChronoSiftEngine:
             inputs = [item.signal for item in (*tr.sequence, *tr.cooccur_all)]
             inputs.extend(tr.condition_signals_any)
             inputs.extend(tr.reset_signals)
+            inputs.extend((*tr.match_signals_all, *tr.match_signals_any))
             required = tr.lookback + max((by_signal.get(s, timedelta(0)) for s in inputs), default=timedelta(0))
             horizon = max(horizon, required)
             for emission in tr.emit_signals:
@@ -17851,7 +18183,7 @@ class ChronoSiftEngine:
             # A group cannot leave another temporal rule dependent on a removed
             # producer. Keep the complete graph when the proof is incomplete.
             if any(removed_outputs.intersection(
-                    [need.signal for need in (*tr.sequence, *tr.cooccur_all)] + list(tr.condition_signals_any) + list(tr.reset_signals))
+                    [need.signal for need in (*tr.sequence, *tr.cooccur_all)] + list(tr.condition_signals_any) + list(tr.reset_signals) + list(tr.match_signals_all) + list(tr.match_signals_any))
                    for tr in self.temporal_rules if tr.rule_id not in proposed):
                 continue
             omitted.update(proposed)
@@ -17910,6 +18242,7 @@ class ChronoSiftEngine:
         needed_signals: Set[str] = set()
         for tr in self.temporal_rules:
             needed_signals.update(tr.reset_signals)
+            needed_signals.update((*tr.match_signals_all, *tr.match_signals_any))
             if tr.mode == "cooccur":
                 needed_signals.update(
                     need.signal for need in tr.cooccur_all if getattr(need, "signal", None)
@@ -17922,6 +18255,7 @@ class ChronoSiftEngine:
         for _, policy in self._enabled_temporal_policy_detectors():
             needed_signals.update(policy.source_signals)
             needed_signals.update(policy.target_signals)
+            needed_signals.update(getattr(policy, "reset_signals", ()))
 
         for pos, signals in signal_map.items():
             if not (0 <= pos < len(df)):
@@ -17945,6 +18279,8 @@ class ChronoSiftEngine:
             if include:
                 base.iat[pos] = True
 
+        for definition in self.detector_policy.definitions(executor="rate_change_window", enabled_only=True):
+            base |= _rate_window_admission(df, definition.payload)[0]
         return base
 
     def _temporal_candidate_window(self, base_window: Union[str, timedelta]) -> timedelta:
@@ -18273,6 +18609,15 @@ class ChronoSiftEngine:
         self, df: Optional[pd.DataFrame]
     ) -> Optional[Any]:
         policy = self.profiling_policy
+        if df is not None and df.attrs.get("_chronosift_monthly_profiles"):
+            general = (self._activity_deficit_values(df)
+                       if policy.enabled and policy.score_amplifier.enabled else None)
+            values = np.ones(len(df), dtype=float)
+            if general is not None:
+                values *= 1.0 + np.clip(np.nan_to_num(general), 0.0, 1.0)
+            if self.monthly_profiling_policy.web_enabled:
+                values *= df["chronosift_web_quiet_multiplier"].to_numpy(dtype=float)
+            return values
         if not policy.enabled or not policy.score_amplifier.enabled:
             return None
         manifest = (
@@ -18898,7 +19243,7 @@ class ChronoSiftEngine:
             common_evidence = {
                 "http_method": method,
                 "canonical_endpoint": _safe_str(endpoint_vals[row_i]).strip(),
-                "http_response_code": _normalise_integral_metadata_value(status_vals[row_i]),
+                "http_response_code": _normalise_integral_metadata_value(status_vals[row_i], strict=True),
                 "attack_indicators": "|".join(sorted(indicators)),
                 "file_categories": "|".join(sorted(categories)),
                 "source_ip": source_ip,
@@ -19083,7 +19428,7 @@ class ChronoSiftEngine:
                 for token in _safe_str(attack_indicator_vals[row_i]).split("|")
                 if token.strip()
             )
-            status_code = _normalise_integral_metadata_value(status_vals[row_i])
+            status_code = _normalise_integral_metadata_value(status_vals[row_i], strict=True)
             response_bytes = _normalise_integral_metadata_value(response_bytes_vals[row_i])
             successful_response = (
                 status_code is not None
@@ -20435,12 +20780,16 @@ class ChronoSiftEngine:
         evidence: Dict[str, Any],
         *,
         description: Optional[str] = None,
+        value: Optional[float] = None,
     ) -> None:
+        effective_value = emission.value if value is None else float(value)
+        if not math.isfinite(effective_value) or not 0 <= effective_value <= emission.value:
+            raise ValueError("Temporal emission strength must be finite and within configured maximum")
         signals = self._sparse_signal_dict(signal_map, row_i)
         prior = float(signals.get(emission.name, 0.0) or 0.0)
-        if prior >= emission.value:
+        if prior >= effective_value:
             return
-        signals[emission.name] = max(prior, emission.value)
+        signals[emission.name] = max(prior, effective_value)
         self._sparse_explain_list(explain_map, row_i).append({
             **_attack_metadata.reference_fields(emission.attack_ref),
             "rule_id": emission.rule_id,
@@ -20558,6 +20907,15 @@ class ChronoSiftEngine:
                 evidence,
                 description=description,
             )
+
+    def _apply_rate_change_window_policies_sparse(self, df, signal_map, explain_map):
+        for definition in self.detector_policy.definitions(executor="rate_change_window", enabled_only=True):
+            policy = definition.payload
+            for row_i, excess, evidence in _rate_change_window_rows(df, policy):
+                self._emit_temporal_policy_signal(signal_map, explain_map, row_i,
+                    policy.emission, policy.evidence_type, evidence,
+                    value=policy.emission.value*excess)
+
 
     def _apply_counted_signal_window_policies_sparse(
         self,
@@ -20856,6 +21214,12 @@ class ChronoSiftEngine:
             if definition.payload.target_context is not None
             and definition.payload.target_context.path_fields
         }
+        sequence_target_integral_values = {}
+        for definition in sequence_definitions:
+            context = definition.payload.target_context
+            if context is not None and context.integral_range is not None:
+                field = context.integral_range[0]
+                sequence_target_integral_values[definition.detector_id] = _column_values_or_none(df, field)
         sequence_target_context_text = {}
         for definition in sequence_definitions:
             context = definition.payload.target_context
@@ -20885,6 +21249,7 @@ class ChronoSiftEngine:
             str,
             Dict[str, List[Tuple[int, pd.Timestamp]]],
         ] = {definition.detector_id: {} for definition in sequence_definitions}
+        sequence_resets = {definition.detector_id: {} for definition in sequence_definitions}
         n_rows = len(df)
         _cached_download_host = [None] * n_rows
         _cached_sequence_keys: Dict[str, List[Optional[str]]] = {
@@ -20908,10 +21273,13 @@ class ChronoSiftEngine:
                     if definition.payload.key_scope == "deadbox_global"
                     else _safe_str(
                         sequence_key_vals[definition.detector_id][row_i]
-                    ).strip().lower()
+                    ).strip()
                 )
                 for definition in sequence_definitions
             }
+            for definition in sequence_definitions:
+                if not definition.payload.key_case_sensitive:
+                    sequence_keys[definition.detector_id] = sequence_keys[definition.detector_id].lower()
             download_path = download_path_norm[row_i]
             download_base = os.path.basename(download_path) if download_path else ""
             ts = ts_vals[row_i]
@@ -20931,6 +21299,8 @@ class ChronoSiftEngine:
                 sequence_key = sequence_keys[definition.detector_id]
                 if policy.key_scope == "field" and not sequence_key:
                     continue
+                if any(float(signals.get(name, 0.0) or 0.0) > 0 for name in policy.reset_signals):
+                    sequence_resets[definition.detector_id].setdefault(sequence_key, []).append(ts)
                 if any(
                     float(signals.get(name, 0.0) or 0.0)
                     > policy.source_minimum_signal_value_exclusive
@@ -20971,12 +21341,18 @@ class ChronoSiftEngine:
             selected = lo if download_policy.source_selection == "earliest_in_window" else hi - 1
             return True, download_events[key][selected]
 
-        def _configured_sequence_in_window(policy, ts_idx, events_dict, key, ts):
+        def _configured_sequence_in_window(policy, ts_idx, events_dict, resets, key, ts):
             """Apply a configured signal-sequence boundary and source selection."""
             sorted_ts = ts_idx.get(key)
             if not sorted_ts:
                 return False, None
             lo = bisect.bisect_left(sorted_ts, ts - pd.Timedelta(policy.lookback))
+            reset_times = resets.get(key, ())
+            reset_index = bisect.bisect_right(reset_times, ts) - 1
+            if reset_index >= 0:
+                # A reset invalidates all sources at or before its timestamp.
+                # Equal-time ordering is ambiguous, so admission fails closed.
+                lo = max(lo, bisect.bisect_right(sorted_ts, reset_times[reset_index]))
             if policy.ordering == "source_before_target":
                 hi = bisect.bisect_left(sorted_ts, ts)
             else:
@@ -21078,6 +21454,10 @@ class ChronoSiftEngine:
                             token in context_text
                             for token in target_context.combined_text_contains
                         ))
+                    if target_context.integral_range is not None:
+                        _, lower, upper = target_context.integral_range
+                        value = _normalise_integral_metadata_value(sequence_target_integral_values[definition.detector_id][row_i], strict=True)
+                        context_matches.append(value is not None and lower <= value < upper)
                     context_matched = (
                         all(context_matches)
                         if target_context.match == "all"
@@ -21093,6 +21473,7 @@ class ChronoSiftEngine:
                     policy,
                     sequence_ts_indexes[detector_id],
                     sequence_events[detector_id],
+                    sequence_resets[detector_id],
                     sequence_key,
                     ts,
                 )
@@ -21475,9 +21856,10 @@ class ChronoSiftEngine:
             hour_bin = hour_bins[row_i]
             quiet_hit = bool(
                 policy.emit_quiet_signal
-                and quiet_hours is not None
                 and pd.notna(hour_bin)
-                and int(hour_bin) in quiet_hours
+                and (bool(df["chronosift_profile_quiet_hour"].iloc[row_i])
+                     if df.attrs.get("_chronosift_monthly_profiles")
+                     else quiet_hours is not None and int(hour_bin) in quiet_hours)
             )
             activity_deficit_hit = (
                 policy.emit_activity_deficit_signal and activity_deficit > 0.0
@@ -21511,6 +21893,9 @@ class ChronoSiftEngine:
         signal_map: Dict[int, Dict[str, Any]],
         explain_map: Dict[int, List[Dict[str, Any]]],
     ) -> None:
+        if df.attrs.get("_chronosift_monthly_profiles"):
+            self._append_monthly_profile_explanations_sparse(df, signal_map, explain_map)
+            return
         policy = self.profiling_policy
         amplifier_policy = policy.score_amplifier
         if (
@@ -21793,6 +22178,11 @@ class ChronoSiftEngine:
                 "key_by": ",".join(tr.key_by),
                 "key": "|".join(key_tuple),
                 "lookback_seconds": int(tr.lookback.total_seconds()),
+                **({"deduplicate_by": list(tr.deduplicate_by)} if tr.deduplicate_by else {}),
+                **({"witness_match_fields": list(tr.witness_match_fields)} if tr.witness_match_fields else {}),
+                **({"match_signals_all": list(tr.match_signals_all)} if tr.match_signals_all else {}),
+                **({"match_signals_any": list(tr.match_signals_any)} if tr.match_signals_any else {}),
+                **({"consume_on_completion": True} if tr.consume_on_completion else {}),
                 **(supporting_evidence or {}),
             },
         })
@@ -21820,6 +22210,7 @@ class ChronoSiftEngine:
             elif tr.mode == "sequence":
                 temporal_inputs = [step.signal for step in tr.sequence if getattr(step, "signal", None)]
             temporal_inputs.extend(tr.reset_signals)
+            temporal_inputs.extend((*tr.match_signals_all, *tr.match_signals_any))
             if temporal_inputs and not all(self._is_temporal_eligible_signal(sig) for sig in temporal_inputs):
                 continue
             for signal_name in temporal_inputs:
@@ -21950,12 +22341,14 @@ class ChronoSiftEngine:
         for tr in self.temporal_rules:
             rule_start = time.perf_counter()
             emitted = 0
+            deduplicated_rows = missing_identity_rows = rejected_completions = 0
             temporal_inputs: List[str] = list(tr.condition_signals_any)
             if tr.mode == "cooccur":
                 temporal_inputs = [need.signal for need in tr.cooccur_all if getattr(need, "signal", None)]
             elif tr.mode == "sequence":
                 temporal_inputs = [step.signal for step in tr.sequence if getattr(step, "signal", None)]
             temporal_inputs.extend(tr.reset_signals)
+            temporal_inputs.extend((*tr.match_signals_all, *tr.match_signals_any))
             if temporal_inputs and not all(self._is_temporal_eligible_signal(sig) for sig in temporal_inputs):
                 continue
 
@@ -22058,6 +22451,13 @@ class ChronoSiftEngine:
                 ):
                     step_flags = [signal_hit_flags[key] for key in signal_keys]
                     reset_flags = [signal_hit_flags[(name, tr.minimum_signal_value_exclusive)] for name in tr.reset_signals]
+                    all_flags = [signal_hit_flags[(name, tr.minimum_signal_value_exclusive)] for name in tr.match_signals_all]
+                    any_flags = [signal_hit_flags[(name, tr.minimum_signal_value_exclusive)] for name in tr.match_signals_any]
+                    identity_codes = [(_normalised_codes(field) if field in cols_present
+                                       else np.full(nrows, -1, dtype=np.int64)) for field in tr.deduplicate_by]
+                    witness_codes = [(_normalised_codes(field) if field in cols_present
+                                      else np.full(nrows, -1, dtype=np.int64)) for field in tr.witness_match_fields]
+                    retain_paths = tr.include_supporting_rows or bool(witness_codes)
                     last_step = len(step_flags) - 1
                     witness_ids = _column_values_or_none(df, "chronosift_row_id") if tr.include_supporting_rows else None
 
@@ -22065,6 +22465,8 @@ class ChronoSiftEngine:
                         left = 0
                         latest_start = [-1] * len(step_flags)
                         latest_paths: List[Tuple[int, ...]] = [()] * len(step_flags)
+                        identity_last = {}
+                        identity_queue = deque()
                         idxs = ordered_rows[start:end]
 
                         for right, row_pos in enumerate(idxs):
@@ -22083,22 +22485,52 @@ class ChronoSiftEngine:
                             if any(flags[row_i] for flags in reset_flags):
                                 latest_start = [-1] * len(step_flags)
                                 latest_paths = [()] * len(step_flags)
+                                identity_last.clear()
+                                identity_queue.clear()
+                            if identity_codes and any(flags[row_i] for flags in step_flags):
+                                while identity_queue and outside_lookback(t_now - identity_queue[0][0]):
+                                    _, old_position, old_identity = identity_queue.popleft()
+                                    if identity_last.get(old_identity) == old_position:
+                                        identity_last.pop(old_identity, None)
+                                identity = tuple(int(codes[row_i]) for codes in identity_codes)
+                                if any(code < 0 for code in identity):
+                                    missing_identity_rows += 1
+                                    continue
+                                duplicate = identity in identity_last
+                                identity_last[identity] = right
+                                identity_queue.append((t_now, right, identity))
+                                if duplicate:
+                                    deduplicated_rows += 1
+                                    continue
                             for step_i in range(last_step, -1, -1):
                                 if not step_flags[step_i][row_i]:
                                     continue
                                 if step_i == 0:
                                     if right > latest_start[0]:
                                         latest_start[0] = right
-                                        if tr.include_supporting_rows:
+                                        if retain_paths:
                                             latest_paths[0] = (row_i,)
                                 else:
                                     prev_start = latest_start[step_i - 1]
                                     if prev_start >= 0 and prev_start >= latest_start[step_i]:
                                         latest_start[step_i] = prev_start
-                                        if tr.include_supporting_rows:
+                                        if retain_paths:
                                             latest_paths[step_i] = (*latest_paths[step_i - 1], row_i)
 
-                            if step_flags[last_step][row_i] and latest_start[last_step] >= left:
+                            complete = step_flags[last_step][row_i] and latest_start[last_step] >= left
+                            qualified = all(flags[row_i] for flags in all_flags) and (
+                                not any_flags or any(flags[row_i] for flags in any_flags))
+                            if complete and witness_codes:
+                                # Unknown failure identities may correlate with a
+                                # resolved success, but conflicting known values
+                                # must never be transferred to that account.
+                                qualified = qualified and all(
+                                    codes[row_i] < 0 or all(codes[p] < 0 or codes[p] == codes[row_i]
+                                                            for p in latest_paths[last_step])
+                                    for codes in witness_codes)
+                            if complete and not qualified:
+                                rejected_completions += 1
+                            if complete and qualified:
                                 emit_row_i = (
                                     int(idxs[latest_start[last_step]])
                                     if tr.emit_on == "sequence_start"
@@ -22121,6 +22553,12 @@ class ChronoSiftEngine:
                                 )
                                 _refresh_needed_signal_hits(emit_row_i)
                                 emitted += 1
+                            if complete and tr.consume_on_completion:
+                                # Consume the ordered attempt episode even if the
+                                # current-row qualifiers rejected its completion.
+                                # Ordinary later successes cannot reuse failures.
+                                latest_start = [-1] * len(step_flags)
+                                latest_paths = [()] * len(step_flags)
 
             elif tr.mode in {"first_seen_value", "change_detected"}:
                 if tr.field and tr.field in cols_present:
@@ -22243,12 +22681,15 @@ class ChronoSiftEngine:
 
             elapsed = time.perf_counter() - rule_start
             logger.info(
-                "Temporal rule stats | rule=%s mode=%s groups=%d largest_group=%d emitted=%d time=%.2fs",
+                "Temporal rule stats | rule=%s mode=%s groups=%d largest_group=%d emitted=%d deduplicated=%d missing_identity=%d rejected_completions=%d time=%.2fs",
                 tr.rule_id,
                 tr.mode,
                 groups_seen,
                 largest_group,
                 emitted,
+                deduplicated_rows,
+                missing_identity_rows,
+                rejected_completions,
                 elapsed,
             )
 
@@ -22803,12 +23244,15 @@ class ChronoSiftEngine:
             for k in tr.key_by:
                 if k:
                     fields.add(k)
+            fields.update((*tr.deduplicate_by, *tr.witness_match_fields))
             if tr.field:
                 fields.add(tr.field)
 
         for definition in self.detector_policy.definitions(enabled_only=True):
             fields.update(_detector_definition_required_fields(definition))
 
+        if self.monthly_profiling_policy.enabled:
+            fields.update(self.monthly_profiling_policy.request_fields)
         if self.profiling_policy.enabled:
             fields.update({
                 self.profiling_policy.parser_field,
@@ -23247,11 +23691,112 @@ class ChronoSiftEngine:
     # Profiling: dataset-wide hour-of-week activity deficit
     # -------------------------------------------------------------------------
 
+    def _apply_monthly_activity_profiling(self, df, manifest):
+        """Map lagged profiles by each event's UTC month, including overlap rows."""
+        dates = _ensure_datetime_series(df)
+        month_keys = _profile_month_codes(dates)
+        hours = dates.dt.hour.to_numpy(dtype=float, na_value=0).astype(int)
+        how = _hour_of_week(dates)
+        how_values = how.to_numpy(dtype=float, na_value=0).astype(int)
+        deficits = np.zeros(len(df), dtype=float)
+        web_deficits = np.zeros(len(df), dtype=float)
+        quiet = np.zeros(len(df), dtype=bool)
+        request = (df["chronosift_web_profile_eligible"].fillna(False).to_numpy(dtype=bool)
+                   if "chronosift_web_profile_eligible" in df
+                   else _monthly_web_request_mask(df, self.monthly_profiling_policy))
+        df["chronosift_web_profile_eligible"] = request
+        active_months = {}
+        for code in np.unique(month_keys):
+            if code == 0:
+                continue
+            key = f"{code // 100:04d}-{code % 100:02d}"
+            entry = manifest.get("months", {}).get(key, {})
+            active_months[key] = entry
+            positions = np.flatnonzero(month_keys == code)
+            fs = entry.get("filesystem", {})
+            if self.profiling_policy.enabled and fs.get("validation", {}).get("accepted", False):
+                profile = _profile_bin_array(fs, 168)
+                deficits[positions] = profile[how_values[positions]]
+                quiet[positions] = np.isin(how_values[positions], fs.get("quiet_hours", []))
+            web = entry.get("web", {})
+            if self.monthly_profiling_policy.web_enabled and web.get("validation", {}).get("accepted", False):
+                eligible = positions[request[positions]]
+                web_deficits[eligible] = _profile_bin_array(web, 24)[hours[eligible]]
+        # Access traffic owns its own temporal baseline. Never compound a web
+        # multiplier with quiet hours inferred from unrelated filesystem use.
+        if self.monthly_profiling_policy.web_enabled:
+            deficits[request] = 0.0
+            quiet[request] = False
+        df[self.profiling_policy.hour_of_week_field] = how
+        df[self.profiling_policy.activity_deficit_signal] = deficits
+        df["chronosift_web_activity_deficit"] = web_deficits
+        df["chronosift_web_quiet_multiplier"] = 1.0 + web_deficits
+        df["chronosift_profile_quiet_hour"] = quiet
+        # Pandas propagates/deep-copies attrs during subsets. Keep only the
+        # few months represented in this frame, not the full corpus manifest.
+        selected = {"schema": MONTHLY_PROFILE_SCHEMA, "months": active_months}
+        df.attrs["_chronosift_monthly_profiles"] = selected
+        df.attrs["_chronosift_profile_manifest"] = selected
+        df.attrs["_chronosift_profile_metadata"] = {
+            "selection_mode": "previous_calendar_month", "scoring_months": sorted(active_months)}
+        return df
+
+    def _append_monthly_profile_explanations_sparse(self, df, signal_map, explain_map):
+        dates = _ensure_datetime_series(df)
+        keys = _profile_month_codes(dates)
+        hours = dates.dt.hour.to_numpy()
+        bundle = df.attrs["_chronosift_monthly_profiles"]
+        policy = self.profiling_policy
+        for code in np.unique(keys):
+            if code == 0:
+                continue
+            key = f"{code // 100:04d}-{code % 100:02d}"
+            entry = bundle.get("months", {}).get(key, {})
+            positions = np.array([i for i in signal_map if keys[i] == code], dtype=int)
+            if len(positions) == 0:
+                continue
+            fs = entry.get("filesystem", {})
+            # Reuse the ordinary explanation owner on only scored rows.
+            if policy.enabled and policy.score_amplifier.enabled and fs.get("validation", {}).get("accepted", False):
+                frame = df.iloc[positions][[policy.hour_of_week_field, policy.activity_deficit_signal]].copy()
+                frame.attrs = {"_chronosift_profile_manifest": fs}
+                local_signals = {i: signal_map[int(pos)] for i, pos in enumerate(positions)}
+                local_explanations = {}
+                self._append_profile_score_amplifier_explanations_sparse(frame, local_signals, local_explanations)
+                for local, items in local_explanations.items():
+                    for item in items:
+                        item["evidence"]["training"] = fs["training"]
+                    self._sparse_explain_list(explain_map, int(positions[local])).extend(items)
+            web = entry.get("web", {})
+            if not self.monthly_profiling_policy.web_enabled or not web.get("validation", {}).get("accepted", False):
+                continue
+            for pos in positions:
+                deficit = float(df["chronosift_web_activity_deficit"].iloc[pos])
+                if deficit <= 0 or self._score_signals(signal_map[int(pos)]) <= 0:
+                    continue
+                hour = int(hours[pos])
+                self._sparse_explain_list(explain_map, int(pos)).append({
+                    "rule_id": self.monthly_profiling_policy.web_rule_id,
+                    "description": "Previous-month HTTP-200 activity profile amplified this web request",
+                    "confidence": "medium", "evidence_type": "profiling",
+                    "signals": sorted(signal_map[int(pos)]),
+                    "evidence": {"hour_of_day": hour, "activity_deficit": deficit,
+                                 "multiplier": 1.0 + deficit, "training": web["training"],
+                                 "activity_probability": web.get("probabilities", {}).get(str(hour), web.get("probabilities", {}).get(hour)),
+                                 "validation_lower_bound": web["validation"].get("lower_confidence_bound")},
+                })
+
     def _apply_hour_of_week_profiling(self, df: pd.DataFrame, profile_manifest: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         out = df
         policy = self.profiling_policy
         if not policy.enabled:
             return out
+
+        if self.monthly_profiling_policy.enabled:
+            if profile_manifest is None:
+                profile_manifest = build_monthly_activity_manifest_from_frame(self, out)
+            if (profile_manifest or {}).get("schema") == MONTHLY_PROFILE_SCHEMA:
+                return self._apply_monthly_activity_profiling(out, profile_manifest)
 
         dt_all = _ensure_datetime_series(out)
         how_all = _hour_of_week(dt_all)
@@ -23547,7 +24092,8 @@ class ChronoSiftEngine:
                     "lookback_lower_bound", "emit_on",
                     "minimum_signal_value_exclusive", "emit", "confidence",
                 },
-                optional={"sequence", "cooccur", "condition", "include_supporting_rows", "reset_signals"} | _attack_metadata.ANNOTATION_KEYS,
+                optional={"sequence", "cooccur", "condition", "include_supporting_rows", "reset_signals",
+                          "deduplicate_by", "witness_match_fields", "match_signals_all", "match_signals_any", "consume_on_completion"} | _attack_metadata.ANNOTATION_KEYS,
             )
             rid = _policy_string(tr["id"], f"{path}.id")
             if rid in seen_rule_ids:
@@ -23669,6 +24215,19 @@ class ChronoSiftEngine:
                     allowed_reference_selections,
                 )
 
+            sequence_options = {"deduplicate_by", "witness_match_fields", "match_signals_all", "match_signals_any", "consume_on_completion"}
+            if mode != "sequence" and sequence_options & tr.keys():
+                raise ValueError(f"{path}: sequence admission controls are supported only for sequence rules")
+            deduplicate_by = (_policy_string_list(tr["deduplicate_by"], f"{path}.deduplicate_by")
+                              if "deduplicate_by" in tr else ())
+            witness_match_fields = (_policy_string_list(tr["witness_match_fields"], f"{path}.witness_match_fields")
+                                    if "witness_match_fields" in tr else ())
+            match_signals_all = (_policy_signal_list(tr["match_signals_all"], f"{path}.match_signals_all")
+                                 if "match_signals_all" in tr else ())
+            match_signals_any = (_policy_signal_list(tr["match_signals_any"], f"{path}.match_signals_any")
+                                 if "match_signals_any" in tr else ())
+            consume_on_completion = (_policy_bool(tr["consume_on_completion"], f"{path}.consume_on_completion")
+                                     if "consume_on_completion" in tr else False)
             reset_signals = ()
             if "reset_signals" in tr:
                 if mode != "sequence":
@@ -23750,6 +24309,11 @@ class ChronoSiftEngine:
                 ),
                 condition_signals_any=condition_signals_any,
                 reset_signals=reset_signals,
+                deduplicate_by=deduplicate_by,
+                witness_match_fields=witness_match_fields,
+                match_signals_all=match_signals_all,
+                match_signals_any=match_signals_any,
+                consume_on_completion=consume_on_completion,
                 attack_ref=_attack_metadata.parse_annotation(tr, path),
             ))
 
@@ -24247,6 +24811,7 @@ class ChronoSiftEngine:
     def _configured_sidecar_output_columns(self) -> Tuple[str, ...]:
         """Return config-named derived columns that do not require a prefix."""
         return tuple(dict.fromkeys((
+            *(MONTHLY_PROFILE_COLUMNS if self.monthly_profiling_policy.enabled else ()),
             self.profiling_policy.hour_of_week_field,
             self.profiling_policy.activity_deficit_signal,
             self.profiling_policy.quiet_signal,
@@ -24489,11 +25054,12 @@ class ChronoSiftEngine:
                             value = old_explanations.get(i, []) + generated_explanations.get(int(pos), [])
                             if value:
                                 core_explanations[i] = value
-                        # Cache Parquets deliberately omit DataFrame attrs.
-                        # Restore exactly the global manifest fields consumed
-                        # by scoring/explanations, not a frame-local rebuild or
-                        # a copy of the full profile/provenance history.
-                        if self.profiling_policy.enabled:
+                        # Cache Parquets omit attrs. Restore causal per-row monthly
+                        # profile selection, or the legacy global profile.
+                        # Training is never repeated from the output batch.
+                        if (profile_manifest or {}).get("schema") == MONTHLY_PROFILE_SCHEMA:
+                            core = self._apply_monthly_activity_profiling(core, profile_manifest)
+                        elif self.profiling_policy.enabled:
                             core.attrs["_chronosift_profile_manifest"] = {
                                 key: (profile_manifest or {}).get(key, {})
                                 for key in ("validation", "probabilities", "upper_probability_bounds")
@@ -24689,10 +25255,23 @@ class ChronoSiftEngine:
                     profile_manifest = _disabled_hour_of_week_manifest(
                         self.profiling_policy
                     )
+                elif self.monthly_profiling_policy.enabled:
+                    expected = _monthly_profile_fingerprint(self, dataset_root, nsrl_parquet_path)
+                    if profile_manifest is None and profile_manifest_path and Path(profile_manifest_path).exists():
+                        profile_manifest = load_profile_manifest(profile_manifest_path)
+                    if not _monthly_manifest_matches(profile_manifest, expected):
+                        profile_manifest = build_monthly_activity_manifest(self, dataset_root, nsrl_parquet_path)
+                        if profile_manifest_path:
+                            save_profile_manifest(profile_manifest, profile_manifest_path)
                 elif profile_manifest is None:
                     if profile_manifest_path and Path(profile_manifest_path).exists():
                         profile_manifest = load_profile_manifest(profile_manifest_path)
-                    else:
+                        if (profile_manifest.get("validation", {}) or {}).get(
+                            "uncertainty_calibration"
+                        ) != PROFILE_UNCERTAINTY_CALIBRATION:
+                            logger.info("Profile manifest uses older uncertainty calibration; rebuilding")
+                            profile_manifest = None
+                    if profile_manifest is None:
                         profile_manifest = build_global_hour_of_week_manifest(
                             dataset_root,
                             profiling_policy=self.profiling_policy,
@@ -24736,6 +25315,19 @@ class ChronoSiftEngine:
                     "lower_confidence_bound"
                 ),
             }
+            if (profile_manifest or {}).get("schema") == MONTHLY_PROFILE_SCHEMA:
+                profile_summary["amplifiable_hour_count"] = sum(
+                    value["validation"].get("amplifiable_hour_count", 0)
+                    for entry in profile_manifest["months"].values() for kind, value in entry.items()
+                    if value["validation"].get("accepted", False)
+                    and (self.profiling_policy.enabled if kind == "filesystem" else self.monthly_profiling_policy.web_enabled))
+                profile_summary["engaged"] = bool(profile_summary["accepted"] and profile_summary["amplifiable_hour_count"])
+                profile_summary["months"] = {
+                    key: {kind: {"validation": value["validation"],
+                                 "training": value["training"]}
+                          for kind, value in entry.items()}
+                    for key, entry in profile_manifest["months"].items()
+                }
             logger.info(
                 "Profile validation | selection=%s accepted=%s reason=%s "
                 "complete_weeks=%d amplifiable_hours=%d lower_bound=%s",
@@ -25331,6 +25923,9 @@ def _merge_sidecar_columns(
 def _get_duckdb_connection():
     if ChronoSiftEngine._duckdb_conn is None:
         ChronoSiftEngine._duckdb_conn = duckdb.connect()
+    # EXTRACT, date_trunc and fetched TIMESTAMPTZ values must use the same UTC
+    # calendar as pandas profiling, regardless of the host or cached session.
+    ChronoSiftEngine._duckdb_conn.execute("SET TimeZone='UTC'")
     return ChronoSiftEngine._duckdb_conn
 
 
@@ -25385,6 +25980,9 @@ def _restore_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
             raise ValueError("DatetimeIndex must be timezone-aware (UTC expected)")
         if df.index.hasnans:
             raise ValueError("DatetimeIndex contains NaT values")
+        if str(df.index.tz) != "UTC":
+            df = df.copy(deep=False)
+            df.index = df.index.tz_convert("UTC")
         return _stable_sort_datetime_frame(df)
 
     for idx_col in ("datetime", "date_time", "__index_level_0__", "index"):
@@ -27104,6 +27702,328 @@ def build_global_referenced_file_hit_manifest(
             strong_yara_hashes.update(raw_yara_hashes)
 
     return finalise()
+
+
+# Native activity-profile lifecycle. No incident labels or detector outcomes enter training.
+MONTHLY_PROFILE_SCHEMA = "previous_month_activity_profiles_v1"
+MONTHLY_PROFILE_COLUMNS = (
+    "chronosift_web_activity_deficit", "chronosift_web_quiet_multiplier",
+    "chronosift_profile_quiet_hour", "chronosift_web_profile_eligible",
+)
+
+
+@dataclass(frozen=True)
+class MonthlyProfilingPolicy:
+    enabled: bool
+    web_enabled: bool
+    web_training_window_days: int
+    web_minimum_complete_days: int
+    web_rule_id: str
+    parser_adapters: Dict[str, str]
+    apache_request_field: str
+    iis_method_field: str
+    iis_target_fields: Tuple[str, ...]
+    status_fields: Dict[str, Tuple[str, ...]]
+
+    @property
+    def request_fields(self):
+        return ("parser", self.apache_request_field, self.iis_method_field,
+                *self.iis_target_fields,
+                *(field for fields in self.status_fields.values() for field in fields))
+
+
+def _parse_monthly_profiling_policy(raw):
+    defaults = dict(enabled=False, web_enabled=False, web_training_window_days=4,
+                    web_minimum_complete_days=3, web_rule_id="WEB_QUIET_HOURS_AMPLIFIER",
+                    parser_adapters={"text/apache_access": "apache", "text/winiis": "iis"},
+                    apache_request_field="http_request", iis_method_field="http_method",
+                    iis_target_fields=["requested_uri_stem", "cs_uri_stem"],
+                    status_fields={"apache": ["http_response_code"], "iis": ["http_status", "sc_status", "http_response_code"]})
+    cfg = defaults if raw is None else _policy_mapping(raw, "profiling.monthly")
+    _policy_keys(cfg, "profiling.monthly", required=set(defaults))
+    enabled = _policy_bool(cfg["enabled"], "profiling.monthly.enabled")
+    web_enabled = _policy_bool(cfg["web_enabled"], "profiling.monthly.web_enabled")
+    if web_enabled and not enabled:
+        raise ValueError("profiling.monthly.web_enabled requires monthly.enabled")
+    integers = {}
+    for name in ("web_training_window_days", "web_minimum_complete_days"):
+        value = cfg[name]
+        if isinstance(value, bool) or not isinstance(value, int) or not 3 <= value <= 28:
+            raise ValueError(f"profiling.monthly.{name}: expected integer from 3 to 28")
+        integers[name] = value
+    if integers["web_minimum_complete_days"] > integers["web_training_window_days"]:
+        raise ValueError("profiling.monthly: minimum days exceeds training window")
+    adapters = _policy_mapping(cfg["parser_adapters"], "profiling.monthly.parser_adapters")
+    if not adapters or any(v not in {"apache", "iis"} or not isinstance(k, str) or not k.strip() for k, v in adapters.items()):
+        raise ValueError("profiling.monthly.parser_adapters: exact nonempty parser IDs and apache/iis adapters required")
+    names = {name: _policy_string(cfg[name], f"profiling.monthly.{name}")
+             for name in ("web_rule_id", "apache_request_field", "iis_method_field")}
+    status_cfg = _policy_mapping(cfg["status_fields"], "profiling.monthly.status_fields")
+    _policy_keys(status_cfg, "profiling.monthly.status_fields", required={"apache", "iis"})
+    status_fields = {adapter: _policy_string_list(fields, f"profiling.monthly.status_fields.{adapter}")
+                     for adapter, fields in status_cfg.items()}
+    if any(not fields for fields in status_fields.values()):
+        raise ValueError("profiling.monthly.status_fields: each adapter requires status fields")
+    return MonthlyProfilingPolicy(enabled, web_enabled, **integers, **names,
+                                  parser_adapters=dict(adapters), status_fields=status_fields,
+                                  iis_target_fields=_policy_string_list(cfg["iis_target_fields"], "profiling.monthly.iis_target_fields"))
+
+
+def _profile_month_codes(dates):
+    """Bounded numeric UTC calendar keys; no per-event month string allocation."""
+    years = dates.dt.year.to_numpy(dtype=np.int64, na_value=0)
+    months = dates.dt.month.to_numpy(dtype=np.int64, na_value=0)
+    return years * 100 + months
+
+
+def _monthly_web_request_mask(df, policy):
+    def text(field):
+        if field not in df:
+            return pd.Series("", index=df.index, dtype="string")
+        return df[field].astype("string").fillna("").str.strip()
+    def present(field):
+        return ~text(field).isin(["", "-"])
+    parsers = text("parser").str.lower()
+    mask = np.zeros(len(df), dtype=bool)
+    for parser, adapter in policy.parser_adapters.items():
+        if adapter == "apache":
+            request = present(policy.apache_request_field)
+        else:
+            target = np.zeros(len(df), dtype=bool)
+            for field in policy.iis_target_fields:
+                target |= present(field).to_numpy(dtype=bool)
+            request = present(policy.iis_method_field) & target
+        mask |= ((parsers == parser.lower()) & request).to_numpy(dtype=bool)
+    return mask
+
+
+def _profile_bin_array(manifest, bins):
+    values = np.array([manifest.get("profile", {}).get(str(i), manifest.get("profile", {}).get(i, 0.0)) for i in range(bins)], dtype=float)
+    if not np.isfinite(values).all() or (values < 0).any() or (values > 1).any():
+        raise ValueError("Activity profile deficits must be finite values from zero to one")
+    return values
+
+
+def _monthly_profile_fingerprint(engine, dataset_root, nsrl_path=None):
+    files = sorted(Path(dataset_root).rglob("*.parquet"))
+    if nsrl_path:
+        files.append(Path(nsrl_path))
+    inventory = [(str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns) for path in files]
+    policy = engine.rules_doc["profiling"]
+    return hashlib.sha256(json.dumps({"inventory": inventory, "policy": policy,
+        "source": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "schema": MONTHLY_PROFILE_SCHEMA}, sort_keys=True).encode()).hexdigest()
+
+
+def _monthly_payload_digest(manifest):
+    canonical = json.loads(json.dumps(manifest.get("months", {})))
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+
+
+def _monthly_manifest_matches(manifest, fingerprint):
+    return bool(manifest and manifest.get("schema") == MONTHLY_PROFILE_SCHEMA
+                and manifest.get("fingerprint") == fingerprint
+                and manifest.get("payload_sha256") == _monthly_payload_digest(manifest))
+
+
+def _monthly_census_sql(engine, columns, source="source", os_lookup=None):
+    """One reduced aggregation; raw zero-score web rows remain in coverage."""
+    p = engine.profiling_policy
+    m = engine.monthly_profiling_policy
+    def quote(name):
+        return '"' + name.replace('"', '""') + '"'
+    def text(name):
+        return f"trim(coalesce(CAST(s.{quote(name)} AS VARCHAR),''))" if name in columns else "''"
+    def present(name):
+        return f"({text(name)} NOT IN ('','-'))"
+    filesystem = [f"regexp_matches({text(p.parser_field)}, {_duckdb_sql_string(p.include_parser_expression)}, 'i')"]
+    for field, tokens in ((p.parser_field, p.exclude_parser_contains), (p.filename_field, p.exclude_filename_contains)):
+        for token in tokens:
+            filesystem.append(f"NOT contains(lower({text(field)}), {_duckdb_sql_string(token.lower())})")
+    non_os = []
+    if p.nsrl_is_os_component_field in columns:
+        non_os.append(f"NOT coalesce(try_cast(s.{quote(p.nsrl_is_os_component_field)} AS BOOLEAN), FALSE)")
+    if p.nsrl_application_type_field in columns:
+        for token in p.exclude_nsrl_application_type_contains:
+            non_os.append(f"NOT contains(lower({text(p.nsrl_application_type_field)}), {_duckdb_sql_string(token.lower())})")
+    join = ""
+    if os_lookup and "sha256_hash" in columns:
+        join = f" LEFT JOIN {os_lookup} AS n ON lower({text('sha256_hash')})=n.sha256"
+        non_os.append("NOT coalesce(n.is_os, FALSE)")
+    non_os_sql = " AND ".join(non_os) or "TRUE"
+    fs_sql = " AND ".join(filesystem + [non_os_sql])
+    requests = []
+    successful_requests = []
+    for parser, adapter in m.parser_adapters.items():
+        request = present(m.apache_request_field) if adapter == "apache" else (
+            present(m.iis_method_field) + " AND (" + " OR ".join(present(f) for f in m.iis_target_fields) + ")")
+        scoped = f"(lower({text('parser')})={_duckdb_sql_string(parser.lower())} AND ({request}))"
+        requests.append(scoped)
+        # Parser-specific raw bindings, before normalisation; preserve integral
+        # equality so 200.5 is never silently truncated to a successful 200.
+        values = [f"try_cast(s.{quote(field)} AS DOUBLE)" for field in m.status_fields[adapter] if field in columns]
+        status = ("COALESCE(" + ",".join(values) + ")" if len(values) > 1 else values[0]) if values else "NULL"
+        successful_requests.append(f"({scoped} AND {status}=200)")
+    web_sql = " OR ".join(requests)
+    success_sql = " OR ".join(successful_requests)
+    dt = _dataset_datetime_column_from_names(columns)
+    if not dt:
+        raise ValueError("Monthly profiling requires a recognised datetime column")
+    dt = 's.' + quote(dt)
+    return f"""SELECT date_trunc('day', {dt}) AS day, hour({dt}) AS hour,
+        count(*) AS source_count,
+        count(*) FILTER (WHERE {fs_sql}) AS filesystem_count,
+        count(*) FILTER (WHERE ({web_sql})) AS web_count,
+        count(*) FILTER (WHERE ({success_sql}) AND ({non_os_sql})) AS web_200_count
+        FROM {source} AS s {join} WHERE {dt} IS NOT NULL GROUP BY 1,2 ORDER BY 1,2"""
+
+
+def _dataset_datetime_column_from_names(columns):
+    return next((f for f in ("datetime", "date_time", "__index_level_0__", "index", "timestamp", "date_time_iso") if f in columns), None)
+
+
+def _monthly_profiles_from_census(engine, census, fingerprint=None):
+    p = engine.profiling_policy
+    m = engine.monthly_profiling_policy
+    months = {}
+    # Calendar arithmetic stays within each observed month, never fills historical gaps.
+    groups = {}
+    for row in census:
+        day, hour, source_n, fs_n, web_n, success_n = row
+        day = pd.Timestamp(day).tz_localize("UTC") if pd.Timestamp(day).tzinfo is None else pd.Timestamp(day).tz_convert("UTC")
+        groups.setdefault((day.year, day.month), []).append((day, int(hour), int(source_n), int(fs_n), int(web_n), int(success_n)))
+    targets = set(groups)
+    for year, month in groups:
+        if year < 9999 or month < 12:
+            targets.add((year + (month == 12), month % 12 + 1))
+    for year, month in sorted(targets):
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+        start, end = _month_window_utc(year, month)
+        if prev_year < 1:
+            continue
+        train_start, train_end = _month_window_utc(prev_year, prev_month)
+        rows = groups.get((prev_year, prev_month), [])
+        training = {"month": f"{prev_year:04d}-{prev_month:02d}", "start_utc": str(train_start),
+                    "end_exclusive_utc": str(train_end), "scoring_start_utc": str(start),
+                    "scoring_end_exclusive_utc": str(end)}
+        fs_counts = {}
+        for day, hour, _, n, _, _ in rows:
+            week = day - pd.Timedelta(days=day.dayofweek)
+            if n and week >= train_start and week + pd.Timedelta(days=7) <= train_end:
+                fs_counts.setdefault(week, np.zeros(168))[day.dayofweek * 24 + hour] += n
+        matrix = pd.DataFrame([fs_counts[w] for w in sorted(fs_counts)], columns=range(168), dtype=float)
+        fs = _hour_of_week_manifest_from_weekly_counts(matrix, p,
+            selection_mode="previous_calendar_month_non_os", used_filtered_subset=True,
+            source_event_count=sum(r[2] for r in rows), selected_event_count=sum(r[3] for r in rows),
+            selection_filters=["previous UTC calendar month", "filesystem/non-routine policy", "NSRL OS excluded during training only", "observed complete calendar weeks"])
+        if matrix.to_numpy().sum() < p.min_profile_events:
+            fs.update(profile={}, probabilities={}, upper_probability_bounds={}, amplifiers={}, quiet_hours=[])
+            fs["validation"].update(accepted=False, status="inconclusive", reason="insufficient_profile_events", amplifiable_hour_count=0)
+        fs["training"] = dict(training, period_bins=168, selected_blocks=[str(w) for w in sorted(fs_counts)])
+        web_days = sorted({r[0] for r in rows if r[4] > 0})
+        # Exclude boundary days as potentially partial. Coverage comes from ALL
+        # access responses, not success counts (an observed zero-success day is valid).
+        interior = web_days[1:-1]
+        window = []
+        run = []
+        for day in interior:
+            run = run + [day] if not run or day == run[-1] + pd.Timedelta(days=1) else [day]
+            if len(run) == m.web_training_window_days:
+                window = run
+                break
+        daily = {day: np.zeros(24) for day in window}
+        for day, hour, _, _, _, n in rows:
+            if day in daily:
+                daily[day][hour] += n
+        validation = _validate_weekly_hour_profile(pd.DataFrame(list(daily.values()), columns=range(24), dtype=float),
+            alpha=p.smoothing_alpha, minimum_complete_weeks=m.web_minimum_complete_days,
+            confidence_level=p.validation.confidence_level, bootstrap_resamples=p.validation.bootstrap_resamples,
+            random_seed=p.validation.random_seed, amplification_gate=p.validation.amplification_gate, period_bins=24)
+        validation["complete_day_count"] = validation.pop("complete_week_count")
+        validation["minimum_complete_days"] = validation.pop("minimum_complete_weeks")
+        if "weekly_log_score_improvements" in validation:
+            validation["daily_log_score_improvements"] = validation.pop("weekly_log_score_improvements")
+        validation["reason"] = validation.get("reason", "").replace("complete_weeks", "complete_days")
+        validation.update(method="leave_one_UTC_day_out_log_score", reference="uniform_hour_of_day", block="observed_interior_UTC_day",
+                          uncertainty_calibration="hour_scaled_block_bootstrap_bonferroni_t_v1", period_bins=24)
+        if sum(sum(x) for x in daily.values()) < p.min_profile_events:
+            validation.update(accepted=False, status="inconclusive", reason="insufficient_profile_events", amplifiable_hour_count=0)
+        web = {"validation": validation, "profile": {}, "probabilities": {}, "upper_probability_bounds": {}, "quiet_hours": [],
+               "training": dict(training, period_bins=24, response_status=200, application_status="all",
+                   window_selection="first_consecutive_observed_interior_days", window_days=m.web_training_window_days,
+                   selected_blocks=[str(d) for d in window], coverage_basis="all registered access responses; observed boundary days excluded",
+                   selected_event_count=int(sum(sum(x) for x in daily.values())),
+                   nsrl_exclusion="training only", confidence_note="Approximate bounds conditional on representative daily blocks; retained log coverage is inferred, not proven")}
+        for target, source in (("profile", "activity_deficits"), ("probabilities", "probabilities"), ("upper_probability_bounds", "upper_probability_bounds")):
+            values = validation.pop(source, None)
+            if validation["accepted"] and values is not None:
+                web[target] = {i: float(v) for i, v in enumerate(values)}
+        months[f"{year:04d}-{month:02d}"] = {"filesystem": fs, "web": web}
+    manifest = {"schema": MONTHLY_PROFILE_SCHEMA, "fingerprint": fingerprint,
+                "selection_mode": "previous_calendar_month", "months": months,
+                "validation": {"accepted": any(entry[kind]["validation"]["accepted"]
+                    for entry in months.values() for kind in ("filesystem", "web")
+                    if (p.enabled if kind == "filesystem" else m.web_enabled)),
+                               "reason": "per_month_profiles; consult months for individual acceptance",
+                               "uncertainty_calibration": PROFILE_UNCERTAINTY_CALIBRATION},
+                "source_event_count": sum(sum(r[2] for r in rows) for rows in groups.values())}
+    manifest["payload_sha256"] = _monthly_payload_digest(manifest)
+    return manifest
+
+
+def build_monthly_activity_manifest_from_frame(engine, frame):
+    """Public in-memory path uses the same reduced aggregation as Parquet."""
+    dates = _ensure_datetime_series(frame)
+    policy = engine.profiling_policy
+    needed = {policy.parser_field, policy.filename_field, policy.nsrl_is_os_component_field,
+              policy.nsrl_application_type_field, *engine.monthly_profiling_policy.request_fields}
+    work = frame[[field for field in frame.columns if field in needed]].copy(deep=False)
+    work["datetime"] = dates.array
+    con = _get_duckdb_connection()
+    con.register("_chronosift_monthly_frame", work)
+    try:
+        rows = con.execute(_monthly_census_sql(engine, set(work.columns), "_chronosift_monthly_frame")).fetchall()
+    finally:
+        con.unregister("_chronosift_monthly_frame")
+    return _monthly_profiles_from_census(engine, rows)
+
+
+def build_monthly_activity_manifest(engine, dataset_root, nsrl_parquet_path=None):
+    """Native dataset profiler: thin columns, one grouped census, bounded matrices.
+
+    NSRL uses the existing unique-hash lookup, never enriches the full timeline
+    or creates an OS filter on scored events.
+    """
+    con = _get_duckdb_connection()
+    glob = _parquet_dataset_glob(dataset_root)
+    con.read_parquet(glob, hive_partitioning=True, union_by_name=True).create_view("_chronosift_monthly_source", replace=True)
+    columns = set(_duckdb_dataset_columns(dataset_root))
+    lookup = None
+    if nsrl_parquet_path and "sha256_hash" in columns:
+        p = engine.profiling_policy
+        if p.parser_field in columns:
+            parser = '"' + p.parser_field.replace('"', '""') + '"'
+            web_parsers = ",".join(_duckdb_sql_string(k.lower()) for k in engine.monthly_profiling_policy.parser_adapters)
+            hashes = con.execute(f"SELECT DISTINCT sha256_hash FROM _chronosift_monthly_source WHERE sha256_hash IS NOT NULL AND (regexp_matches(coalesce(CAST({parser} AS VARCHAR),''), ?, 'i') OR lower(CAST({parser} AS VARCHAR)) IN ({web_parsers}))", [p.include_parser_expression]).fetchnumpy()["sha256_hash"]
+            nsrl = _duckdb_lookup_nsrl_hashes(nsrl_parquet_path, hashes)
+            if len(nsrl):
+                is_os = nsrl["nsrl_is_os_component"].astype("boolean").fillna(False).to_numpy(dtype=bool)
+                for token in p.exclude_nsrl_application_type_contains:
+                    is_os |= nsrl["nsrl_application_type"].astype("string").fillna("").str.contains(token, case=False, regex=False).to_numpy(dtype=bool)
+                os_hashes = pd.DataFrame({"sha256": nsrl["sha256"].astype("string").str.lower(), "is_os": is_os})
+                os_hashes = os_hashes.groupby("sha256", as_index=False)["is_os"].max()
+                lookup = "_chronosift_monthly_os"
+                con.register(lookup, os_hashes)
+    try:
+        rows = con.execute(_monthly_census_sql(engine, columns, "_chronosift_monthly_source", lookup)).fetchall()
+    finally:
+        if lookup:
+            con.unregister(lookup)
+        con.execute("DROP VIEW _chronosift_monthly_source")
+    manifest = _monthly_profiles_from_census(engine, rows, _monthly_profile_fingerprint(engine, dataset_root, nsrl_parquet_path))
+    manifest["dataset_root"] = str(Path(dataset_root).resolve())
+    manifest["nsrl_source"] = str(Path(nsrl_parquet_path).resolve()) if nsrl_parquet_path else None
+    return manifest
 
 
 def _serialise_profile_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:

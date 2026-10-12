@@ -193,6 +193,27 @@ profiling:
         - multiplier
         - validation_lower_bound
         - complete_week_count
+  monthly:
+    enabled: true
+    web_enabled: true
+    web_training_window_days: 4
+    web_minimum_complete_days: 3
+    web_rule_id: WEB_QUIET_HOURS_AMPLIFIER
+    parser_adapters:
+      text/apache_access: apache
+      text/winiis: iis
+    apache_request_field: http_request
+    iis_method_field: http_method
+    iis_target_fields:
+    - requested_uri_stem
+    - cs_uri_stem
+    status_fields:
+      apache:
+      - http_response_code
+      iis:
+      - http_status
+      - sc_status
+      - http_response_code
 geoip_enrichment:
   outputs:
     city_geoname_id: geo_city_geoname_id
@@ -1762,6 +1783,65 @@ normalisation:
   selector:
     field: parser
     pattern: (?i)^(?:text/syslog_traditional|syslog|systemd_journal)$
+- name: auth_record_number
+  method: regex_first
+  from: record_number
+  pattern: ^\s*(\d+)(?:\.0+)?\s*$
+  group: 1
+- name: auth_xml_record_number
+  method: regex_first
+  from: xml_string
+  pattern: <EventRecordID(?:\s[^>]*)?>\s*(\d+)\s*</EventRecordID>
+  group: 1
+- name: auth_native_record_number
+  method: coalesce
+  fields:
+  - auth_record_number
+  - auth_xml_record_number
+- name: auth_native_log_source
+  method: coalesce
+  fields:
+  - pathspec
+  - source_path
+  - source_file
+  - filename
+- name: auth_native_record_key
+  method: join_fields
+  fields:
+  - continuity_scope
+  - identity_event_provider
+  - auth_native_log_source
+  - auth_native_record_number
+  separator: '|'
+- name: auth_episode_principal_raw
+  method: coalesce
+  fields:
+  - actor_principal
+- name: auth_episode_realm_raw
+  method: regex_first
+  from: identity_authenticated_account
+  pattern: ^([^\\]+)\\
+  group: 1
+- name: auth_episode_realm
+  method: casefold
+  from: auth_episode_realm_raw
+- name: auth_episode_sid_raw
+  method: regex_first
+  from: identity_authenticated_sid
+  pattern: (?i)^(S-1-(?!0-0$)\d+(?:-\d+)+)$
+  group: 1
+- name: auth_episode_sid
+  method: casefold
+  from: auth_episode_sid_raw
+- name: auth_episode_principal
+  method: casefold
+  from: auth_episode_principal_raw
+- name: auth_episode_account_key
+  method: join_fields
+  fields:
+  - continuity_scope
+  - auth_episode_principal
+  separator: '|'
 rule_signal_merge:
   atomic_rules: maximum
   temporal_rules: maximum
@@ -4808,6 +4888,473 @@ temporal_rules:
   attack_basis: contextual_inference
   attack_note: Allowed sudo by a recently created local account links escalation context with valid-account use; this is not
     proof of one malicious operator.
+- id: WINDOWS_RISKY_CREATOR_TRAVEL_ACCOUNT_USE
+  description: Successful use of a recently created account with risky creator provenance; privileged membership is not required
+  priority: 77
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_created_by_risky_travel_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_risky_creator_travel_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Successful account use follows creation with risky creator evidence in the same asset/SID scope within seven
+    days; no permanent trust label, recursive inheritance or proof of the same operator/session.
+- id: WINDOWS_RISKY_CREATOR_TRAVEL_PRIVILEGED_ACCOUNT_USE
+  description: Successful use of a recently created account with risky creator provenance; privileged membership is also established
+    for the same scoped SID
+  priority: 77
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_risky_creator_travel_privileged_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_risky_creator_travel_privileged_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Successful account use follows creation with risky creator evidence in the same asset/SID scope within seven
+    days; no permanent trust label, recursive inheritance or proof of the same operator/session.
+- id: WINDOWS_RISKY_CREATOR_AUTHENTICATION_ACCOUNT_USE
+  description: Successful use of a recently created account with risky creator provenance; privileged membership is not required
+  priority: 77
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_created_by_risky_authentication_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_risky_creator_authentication_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Successful account use follows creation with risky creator evidence in the same asset/SID scope within seven
+    days; no permanent trust label, recursive inheritance or proof of the same operator/session.
+- id: WINDOWS_RISKY_CREATOR_AUTHENTICATION_PRIVILEGED_ACCOUNT_USE
+  description: Successful use of a recently created account with risky creator provenance; privileged membership is also established
+    for the same scoped SID
+  priority: 77
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_risky_creator_authentication_privileged_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_risky_creator_authentication_privileged_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Successful account use follows creation with risky creator evidence in the same asset/SID scope within seven
+    days; no permanent trust label, recursive inheritance or proof of the same operator/session.
+- id: AUTH_SUSTAINED_BRUTEFORCE_SUCCESS
+  description: At least ten distinct native account/source failures followed by success within thirty minutes; the first completion
+    consumes the attempt episode
+  priority: 78
+  key_by:
+  - auth_episode_account_key
+  - src_ip
+  lookback: 30m
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_remote_failure
+    min_count: 10
+  - signal: auth_remote_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_sustained_bruteforce_success
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1110
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+  deduplicate_by:
+  - auth_native_record_key
+  consume_on_completion: true
+  witness_match_fields:
+  - auth_episode_realm
+  - auth_episode_sid
+- id: AUTH_CORROBORATED_BRUTEFORCE_SUCCESS
+  description: At least ten distinct native account/source failures followed by success within thirty minutes; the first completion
+    consumes the attempt episode; impossible travel corroborates the sustained account/source attempt episode
+  priority: 78
+  key_by:
+  - auth_episode_account_key
+  - src_ip
+  lookback: 30m
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_remote_failure
+    min_count: 10
+  - signal: auth_remote_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_corroborated_bruteforce_success
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1110
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+  deduplicate_by:
+  - auth_native_record_key
+  consume_on_completion: true
+  witness_match_fields:
+  - auth_episode_realm
+  - auth_episode_sid
+  match_signals_all:
+  - impossible_travel
+- id: AUTH_ACCOUNT_COMPROMISE_CONTEXT
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_sustained_bruteforce_success
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_account_compromise_context
+      value: 1
+  confidence: medium
+  attack_ids: []
+  attack_basis: unmapped
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: AUTH_SUSPECTED_COMPROMISE_SOURCE_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  - src_ip
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_sustained_bruteforce_success
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_suspected_compromise_source_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: AUTH_SUSPECTED_COMPROMISE_NOVEL_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_sustained_bruteforce_success
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_suspected_compromise_novel_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+  match_signals_any:
+  - windows_account_new_source
+  - new_country
+  - new_asn
+- id: AUTH_CORROBORATED_COMPROMISE_SOURCE_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  - src_ip
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_corroborated_bruteforce_success
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_corroborated_compromise_source_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: AUTH_CORROBORATED_COMPROMISE_NOVEL_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_corroborated_bruteforce_success
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_corroborated_compromise_novel_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+  match_signals_any:
+  - windows_account_new_source
+  - new_country
+  - new_asn
+- id: AUTH_CORROBORATED_COMPROMISE_SENSITIVE_ACTION
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - continuity_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_corroborated_bruteforce_success
+    min_count: 1
+  - signal: windows_contextual_action
+    min_count: 1
+  emit:
+    signals:
+    - name: auth_corroborated_compromise_sensitive_action
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: WINDOWS_CREATED_BY_COMPROMISED_ACCOUNT
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 76
+  key_by:
+  - win_creator_chain_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: auth_corroborated_bruteforce_success
+    min_count: 1
+  - signal: windows_account_creation_target
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_created_by_compromised_account
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1136
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: WINDOWS_COMPROMISED_CREATOR_PRIVILEGED_ACCOUNT
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 75
+  key_by:
+  - win_scoped_account_key
+  lookback: 1h
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_created_by_compromised_account
+    min_count: 1
+  - signal: windows_new_privileged_account
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_compromised_creator_privileged_account
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1098.007
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: WINDOWS_COMPROMISED_CREATOR_ACCOUNT_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 74
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_created_by_compromised_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_compromised_creator_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: WINDOWS_COMPROMISED_CREATOR_PRIVILEGED_ACCOUNT_USE
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 74
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_compromised_creator_privileged_account
+    min_count: 1
+  - signal: auth_success
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_compromised_creator_privileged_account_use
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
+- id: WINDOWS_COMPROMISED_CREATOR_ACTION
+  description: Bounded account-compromise evidence; seed witnesses and subsequent use remain separate, with no assumption
+    that every operator using the account is malicious
+  priority: 74
+  key_by:
+  - win_scoped_account_key
+  lookback: 7d
+  lookback_lower_bound: inclusive
+  emit_on: sequence_completion
+  minimum_signal_value_exclusive: 0
+  include_supporting_rows: true
+  sequence:
+  - signal: windows_compromised_creator_privileged_account
+    min_count: 1
+  - signal: windows_contextual_action
+    min_count: 1
+  emit:
+    signals:
+    - name: windows_compromised_creator_action
+      value: 1
+  confidence: medium
+  attack_ids:
+  - T1078
+  attack_basis: contextual_inference
+  attack_note: Qualified evidence is scoped to the account and asset; carry expires from the original seed, ordinary uses
+    do not reseed, and password changes alone do not establish remediation.
 detector_policy:
   version: 1
   mode: authoritative
@@ -10280,6 +10827,30 @@ detector_policy:
         evidence:
         - web_file_relative
         - path
+      - id: evidence_web_file_deleted
+        when:
+          all:
+          - input: linked_web_file
+            op: nonempty
+          - any:
+            - input: timestamp_kind
+              op: equals_any
+              values:
+              - delete
+            - input: message
+              op: contains_any
+              values:
+              - USN_REASON_FILE_DELETE
+        emission: evidence_web_file_deleted
+        description: Observed deletion of an unambiguously mapped web file ends earlier file context
+        confidence: medium
+        evidence:
+        - linked_web_file
+        - web_target
+        - win_path
+        - win_sid
+        - message
+        - win_event
       emissions:
         authorized_keys_root_persistence:
           name: authorized_keys_root_persistence
@@ -10811,6 +11382,16 @@ detector_policy:
           attack_ids: []
           attack_basis: unmapped
           attack_note: Protocol context only; retain direct administrative-share observations as the T1021.002 evidence path.
+        evidence_web_file_deleted:
+          name: evidence_web_file_deleted
+          value: 1
+          rule_id: EVIDENCE_WEB_FILE_DELETED
+          description: Observed deletion of an unambiguously mapped web file ends earlier file context
+          confidence: medium
+          attack_ids: []
+          attack_basis: unmapped
+          attack_note: Generic context, supporting evidence or a broad behaviour family does not identify one ATT&CK technique;
+            use the qualified source explanation where available.
       evidence:
         path:
           resolver: input
@@ -13040,6 +13621,7 @@ detector_policy:
       key:
         scope: field
         field: evidence_web_identity
+        case_sensitive: true
       source:
         any_signals:
         - webshell_artifact
@@ -13049,9 +13631,9 @@ detector_policy:
         - evidence_web_linked_request
         minimum_signal_value_exclusive: 0
       emissions:
-      - name: webshell_activity
+      - name: webshell_activity_recent
         value: 1
-        rule_id: WEBSHELL_ACTIVITY
+        rule_id: WEBSHELL_ACTIVITY_RECENT
         description: Request to the same unambiguously mapped web-shell-like file observed within the configured window; request
           is not proof of command execution (ATT&CK T1505.003 candidate)
         confidence: medium
@@ -13070,6 +13652,8 @@ detector_policy:
         file_identity:
           resolver: target_field
           field: evidence_web_identity
+      reset_signals:
+      - evidence_web_file_deleted
     web_upload_execution_chain:
       stage: temporal
       executor: signal_sequence
@@ -13160,6 +13744,9 @@ detector_policy:
           signals:
           - windows_recent_privileged_action
           - windows_recent_privileged_host_action
+          - windows_risky_creator_travel_privileged_account_use
+          - windows_risky_creator_authentication_privileged_account_use
+          - windows_compromised_creator_privileged_account_use
         conditions:
           match: any
           minimum_value_exclusive: 0
@@ -13294,6 +13881,15 @@ detector_policy:
           - windows_created_by_risky_authentication_account
           - windows_risky_creator_authentication_privileged_account
           - windows_risky_creator_authentication_action
+          - windows_risky_creator_travel_account_use
+          - windows_risky_creator_travel_privileged_account_use
+          - windows_risky_creator_authentication_account_use
+          - windows_risky_creator_authentication_privileged_account_use
+          - windows_created_by_compromised_account
+          - windows_compromised_creator_privileged_account
+          - windows_compromised_creator_account_use
+          - windows_compromised_creator_privileged_account_use
+          - windows_compromised_creator_action
         conditions:
           match: any
           minimum_value_exclusive: 0
@@ -13613,38 +14209,95 @@ detector_policy:
           - auth_failure_success_episode
           - impossible_travel
           - auth_remote_success
+          - auth_corroborated_bruteforce_success
+          - auth_corroborated_compromise_source_use
+          - auth_corroborated_compromise_novel_use
+          - auth_corroborated_compromise_sensitive_action
         conditions:
-          match: all
+          match: any
           minimum_value_exclusive: 0
+          all_of_any:
+          - - auth_failure_success_episode
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
+          - - impossible_travel
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
+          - - auth_remote_success
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
         strength: maximum_matched_times_emission_value
         emissions:
         - name: auth_takeover_candidate
           value: 1
           rule_id: AUTH_TAKEOVER_CANDIDATE
-          description: 'Source-linked failures followed by success with impossible travel: combined account-takeover candidate,
-            not independent votes for protocol labels'
+          description: One takeover-priority contribution from qualified fresh or corroborated carried compromise evidence
           confidence: medium
           attack_ids:
-          - T1110
           - T1078
           attack_basis: contextual_inference
           attack_note: Behavioural triage context, not a compromise verdict, operator attribution or country-based suspicion.
       - inputs:
           signals:
-          - auth_failure_success_episode
-          - impossible_travel
-          - auth_remote_success
           - privileged_login
         conditions:
           match: all
           minimum_value_exclusive: 0
+          all_of_any:
+          - - auth_failure_success_episode
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
+          - - impossible_travel
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
+          - - auth_remote_success
+            - auth_corroborated_bruteforce_success
+            - auth_corroborated_compromise_source_use
+            - auth_corroborated_compromise_novel_use
+            - auth_corroborated_compromise_sensitive_action
         strength: maximum_matched_times_emission_value
         emissions:
         - name: auth_privileged_takeover
           value: 1
           rule_id: AUTH_PRIVILEGED_TAKEOVER
-          description: Privileged account increases severity of the qualified takeover candidate; privilege alone adds no
-            login danger
+          description: Privilege increases severity of qualified fresh or carried takeover evidence; privilege alone adds
+            no login danger
+          confidence: medium
+          attack_ids:
+          - T1078
+          attack_basis: contextual_inference
+          attack_note: Behavioural triage context, not a compromise verdict, operator attribution or country-based suspicion.
+      - inputs:
+          signals:
+          - auth_suspected_compromise_source_use
+          - auth_suspected_compromise_novel_use
+        conditions:
+          match: any
+          minimum_value_exclusive: 0
+          none:
+          - auth_corroborated_bruteforce_success
+          - auth_corroborated_compromise_source_use
+          - auth_corroborated_compromise_novel_use
+          - auth_corroborated_compromise_sensitive_action
+          - auth_failure_success_episode
+          - fail_then_success_user
+          - fail_then_success_ip
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: auth_suspected_compromise_priority
+          value: 1
+          rule_id: AUTH_SUSPECTED_COMPROMISE_PRIORITY
+          description: Bounded suspected compromise use from a sustained native-record burst without travel corroboration
           confidence: medium
           attack_ids:
           - T1078
@@ -13653,15 +14306,173 @@ detector_policy:
       evidence:
         derived_from:
           resolver: matched_signals
+    webshell_created_artifact:
+      stage: contextual
+      executor: signal_gate
+      enabled: true
+      evidence_type: contextual
+      inputs:
+        signals:
+        - web_script_artifact_candidate
+        - av_webshell
+        - yara_webshell
+        - evidence_web_file_created
+      conditions:
+        match: all
+        minimum_value_exclusive: 0
+        groups:
+        - match: all
+          signals:
+          - web_script_artifact_candidate
+          - evidence_web_file_created
+        - match: any
+          signals:
+          - av_webshell
+          - yara_webshell
+      emissions:
+      - name: webshell_created_artifact
+        value: 1
+        rule_id: WEBSHELL_CREATED_ARTIFACT
+        description: Newly created web-root script has direct AV/YARA web-shell category support; bounded file-context seed,
+          not execution proof
+        confidence: medium
+        attack_ids:
+        - T1505.003
+        attack_basis: artefact_capability
+        attack_note: A web-shell-classified artefact supports capability or presence, not local execution or successful command
+          effects.
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    webshell_created_file_activity:
+      stage: temporal
+      executor: signal_sequence
+      enabled: true
+      evidence_type: contextual
+      lookback: 7d
+      ordering: source_at_or_before_target
+      window_bounds: closed
+      source_selection: earliest_in_window
+      emit_on: target
+      key:
+        scope: field
+        field: evidence_web_identity
+        case_sensitive: true
+      source:
+        any_signals:
+        - webshell_created_artifact
+        minimum_signal_value_exclusive: 0
+      target:
+        any_signals:
+        - evidence_web_linked_request
+        minimum_signal_value_exclusive: 0
+        where:
+          match: all
+          integral_range:
+            field: chronosift_web_status_code
+            minimum: 200
+            maximum_exclusive: 300
+      emissions:
+      - name: webshell_created_file_context
+        value: 1
+        rule_id: WEBSHELL_CREATED_FILE_ACTIVITY
+        description: Successful HTTP response from the same created, web-shell-classified script within the bounded file-context
+          window; request is not proof of command execution
+        confidence: medium
+        attack_ids:
+        - T1505.003
+        attack_basis: contextual_inference
+        attack_note: File-qualified web request or subsequent execution context supports a web-shell candidate; request success
+          is not command-execution proof.
+      evidence:
+        hostname:
+          resolver: target_field
+          field: hostname
+        artifact_timestamp:
+          resolver: source_timestamp
+        request_timestamp:
+          resolver: target_timestamp
+        file_identity:
+          resolver: target_field
+          field: evidence_web_identity
+        http_status:
+          resolver: target_field
+          field: chronosift_web_status_code
+      reset_signals:
+      - evidence_web_file_deleted
+    webshell_activity_priority:
+      stage: temporal
+      executor: signal_projection
+      enabled: true
+      evidence_type: contextual
+      projections:
+      - inputs:
+          signals:
+          - webshell_activity_recent
+          - webshell_created_file_context
+        conditions:
+          match: any
+          minimum_value_exclusive: 0
+        strength: maximum_matched_times_emission_value
+        emissions:
+        - name: webshell_activity
+          value: 1
+          rule_id: WEBSHELL_ACTIVITY
+          description: File-linked web-shell request context counted once across recent-artifact and bounded created-file
+            routes; command execution remains unproved
+          confidence: medium
+          attack_ids:
+          - T1505.003
+          attack_basis: contextual_inference
+          attack_note: Qualified file-linked request context supports a web-shell candidate, not proven local command execution
+      evidence:
+        derived_from:
+          resolver: matched_signals
+    web_service_disruption:
+      stage: temporal
+      executor: rate_change_window
+      enabled: true
+      evidence_type: contextual
+      bucket_period: 1m
+      recent_window: 15m
+      reference_window: 60m
+      value_field: chronosift_web_status_code
+      key:
+        fields:
+        - hostname
+        - chronosift_web_host
+        - chronosift_web_endpoint
+        required_fields:
+        - chronosift_web_endpoint
+      numerator_range:
+        minimum: 500
+        maximum_exclusive: 600
+      denominator_ranges:
+      - minimum: 200
+        maximum_exclusive: 300
+      - minimum: 500
+        maximum_exclusive: 600
+      minimum_recent_count: 10
+      minimum_reference_count: 30
+      minimum_numerator_count: 3
+      minimum_recent_buckets: 2
+      minimum_rate_increase: 0.2
+      emit_on: numerator
+      emissions:
+      - name: web_service_disruption
+        value: 1
+        rule_id: WEB_SERVICE_DISRUPTION
+        description: Route-scoped increase in server-error response fraction relative to preceding observed traffic; retrospective
+          service-impact context, not a client attribution
+        confidence: medium
+        attack_ids: []
+        attack_basis: unmapped
+        attack_note: Service disruption may corroborate post-breach impact; status alone does not identify an attacker or
+          establish an ATT&CK technique.
 engine_notes:
-  temporal_profiling: ChronoSift first attempts a host-resident hour-of-week profile, then falls back to the full dataset.
-    The 100-event floor is retained. A profile must predict held-out complete calendar weeks better than a uniform 168-bin
-    reference, with a positive deterministic whole-week-bootstrap lower bound. At least one simultaneous upper probability
-    bound must also lie below the reference; otherwise full-dataset fallback continues. Accepted profiles derive deficit(h)
-    = max(0, 1 - p_upper(h)/(1/168)) and a single bounded event-score factor 1 + deficit(h). The factor runs after trust dampening
-    and before max_event_score. Failed or inconclusive validation is neutral. Optional out_of_hours_activity_deficit and quiet_time_event
-    sparse emissions remain disabled and quiet membership does not gate amplification. Profiling uses UTC bins; the factor
-    is evidence-volume-sensitive and intended for within-dataset prioritisation rather than direct cross-dataset comparison.
+  temporal_profiling: Previous UTC calendar month only; filtered non-OS filesystem complete weeks, no full-dataset fallback.
+    Separate HTTP200 web profile uses the first four consecutive observed interior UTC days; all access responses receive
+    the validated daily multiplier. Missing/rejected profiles are neutral; expiry is the following month end.
   geoip_metadata: When GeoLite2 City/ASN databases are provided, ChronoSift records input DB paths and file modification times
     in df.attrs['chronosift_metadata']['geoip'] for reproducibility.
   config_hygiene: ChronoSift lowercases signal keys during scoring to avoid case drift. Config validation checks (optional)

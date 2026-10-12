@@ -185,6 +185,11 @@
         "contextual"
       ]
     },
+    "rate_change_window": {
+      "stages": [
+        "temporal"
+      ]
+    },
     "signal_gate": {
       "stages": [
         "atomic",
@@ -227,6 +232,22 @@
     },
     "web_recent_geo_download_projection": {
       "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "web_service_disruption": {
+      "executor": "rate_change_window",
+      "stage": "temporal"
+    },
+    "webshell_activity_priority": {
+      "executor": "signal_projection",
+      "stage": "temporal"
+    },
+    "webshell_created_artifact": {
+      "executor": "signal_gate",
+      "stage": "contextual"
+    },
+    "webshell_created_file_activity": {
+      "executor": "signal_sequence",
       "stage": "temporal"
     },
     "windows_archive_ftp_projection": {

@@ -272,6 +272,10 @@ temporal_rules:
 | `sequence` | Ordered signal requirements. |
 | `include_supporting_rows` | Optional boolean, default false. Sequence explanations include witness `supporting_row_ids` and `supporting_timestamps` in order; IDs come from `chronosift_row_id`, never timestamp joins. |
 | `reset_signals` | Optional non-empty list of unique declared lowercase signals, sequence mode only. An admitted reset clears the current key's sequence before processing that row; the row may then seed a new lifetime. Resets share the input threshold and temporal eligibility guards and are retained as replay/candidate dependencies. Omitted means no reset. |
+| `deduplicate_by` | Optional non-empty list of identity fields, sequence mode only. Only the first observation of a complete identity within the rule window enters the sequence. Missing or placeholder identities fail closed; excluded and missing counts appear in rule statistics. Rows and other rules remain intact. |
+| `witness_match_fields` | Optional non-empty list of fields, sequence mode only. Known values on the ordered witnesses must agree with a known value on the completion row. Missing/placeholder values are unknown, not conflicting evidence. This preserves a candidate correlation when failed logons lack a SID/realm while rejecting explicit conflicting identity evidence. These fields are retained in native and compact history. |
+| `match_signals_all` / `match_signals_any` | Optional non-empty lists of declared, temporally eligible signals, sequence mode only. Require all / at least one on the completing row before emission. These are dependencies for input admission and overlap planning. They do not seed or renew a sequence. |
+| `consume_on_completion` | Optional boolean, sequence mode only, default false. Consume the ordered sequence at its first completion, including a completion rejected by current-row qualifiers. Subsequent successes need a fresh qualifying sequence. Native deduplication remains active; an explicit sequence reset clears it. |
 | `cooccur.all` | Signal requirements that may occur in any order. |
 | `condition.kind` / `condition.field` | Value-state rule: `first_seen_value` or `change_detected`, and the field to observe. |
 | `condition.empty_value_behavior` | Mandatory `ignore` or `observe` treatment of normalised empty/placeholder values. |
@@ -444,7 +448,29 @@ dependent observations (Künsch, 1989,
 
 For an accepted profile,
 `uncertainty_band: simultaneous_bootstrap_upper_probability` provides
-`p_upper(h)`. The configured amplifier method is mechanically fixed as:
+`p_upper(h)`. Its `uncertainty_calibration` is
+`hour_scaled_week_bootstrap_bonferroni_t_v1`: delete-one-week jackknife standard
+errors give each hour its own scale; the one-sided basic-bootstrap maximum of
+standardized errors jointly calibrates the 168 hours. The critical value is
+at least the one-sided Bonferroni Student-t quantile with `weeks - 1` degrees
+of freedom and tail `(1-confidence_level)/168`. This small-block guard follows
+the multiple-comparison principle described by
+[NIST](https://www.itl.nist.gov/div898/handbook/prc/section4/prc463.htm).
+All resampling and standard errors use whole weeks, not individual event rows.
+Bounds target the pooled hour-of-week probability; a fixed hourly profile is
+therefore still weighted by observed event volume across weeks.
+
+Coverage is approximate: Student-t calibration assumes approximately regular
+block-level ratio-estimator errors, and a few weeks cannot establish that
+assumption or represent unobserved regimes. Constant bootstrap/jackknife cells
+have zero empirical margin; `zero_empirical_variance_hour_count` makes this
+degeneracy explicit rather than presenting it as distribution-free certainty.
+The bootstrap maximum principle is discussed in
+[Cheng (2005)](https://informs-sim.org/wsc05papers/025.pdf); this particular
+jackknife/Bonferroni combination is an engine design, not that paper's method.
+Saved manifests from older calibrations are rebuilt on automatic cache reuse.
+
+The configured amplifier method is mechanically fixed as:
 
 ```text
 activity_deficit(h) = max(0, 1 - p_upper(h) / (1/168))
@@ -463,7 +489,9 @@ family-specific `k` coefficients are intentionally unsupported.
 
 The persisted profile manifest exposes whether the method was operationally
 active as well as statistically predictive. Its `validation` object includes
-`amplifiable_hour_count` and `simultaneous_upper_radius`; per-hour
+`amplifiable_hour_count` and `simultaneous_upper_radius` (the maximum of the
+actual hour-specific margins, not a margin applied to every hour), plus
+calibration, critical-value and hour-standard-error diagnostics; per-hour
 `probabilities`, `upper_probability_bounds`, `activity_deficits`, and
 `amplifiers` describe the accepted profile. The dataset-wide builder's
 `validation_attempts` preserves a rejected filtered-selection outcome before
@@ -1488,3 +1516,109 @@ Rules should prioritise **behavioural semantics** rather than static
 signatures. Any future typed executor should preserve the same boundary:
 configuration declares auditable policy, while Python supplies tested
 mechanics.
+
+
+### Account-compromise episodes
+
+The current generated authentication policy uses the generic sequence executor for bounded account-compromise episodes. It does not maintain a separate account trust database. Ten distinct native failures for the same scoped account name and source followed by remote success within thirty minutes establish a suspected episode. Native record identity combines evidence scope, provider, log source and record number; an unavailable identity cannot create a sustained episode. The first success consumes the ordered failures, so repeated successes and duplicate timestamp emissions cannot create new seeds from that burst. The existing weaker failure/success indicators remain available for event-level triage and do not alone create a persistent compromise episode.
+
+A successful sustained burst accompanied by impossible travel also establishes a corroborated episode. The account/source-linked burst supplies the corroboration even when the source was seen before; a familiar-source return without a fresh sustained burst does not create a seed. Failed Windows logons may lack the account SID, so the burst is grouped by scoped account name and source, with known realm/SID witness binding. Known SID or domain conflicts between failure witnesses and the success reject the episode. Missing failure identity remains an explicit contextual correlation; it is not treated as proof of SID equality. The successful anchor then carries context through the canonical scoped account identity, preferring its SID. A new source can consequently reference the same compromised account without repeating the original failures. Source-only failures against other accounts do not seed this account's episode.
+
+Episode context is informational. Corroborated use from the seed source, novel-source/geographic use or a source-qualified sensitive action can receive the existing twenty-point takeover-priority contribution, with the existing four-point privilege contribution where applicable. Suspected source/novel use can receive an eight-point contribution when current failure or stronger takeover evidence does not already own the priority. A familiar-source return can retain account context without receiving takeover priority. Fresh and carried takeover inputs share one projection owner; policy projections consume earlier raw producers and never depend on another projection in the same phase.
+
+Carry windows are configured in YAML and default to seven days from the seed. Ordinary use cannot renew them, and a password change alone is not a remediation signal. Only a new qualified failure/success burst can create another seed. Creator provenance may reference a corroborated seed when linking subsequent account creation, elevation and use; inherited creator context is not itself a fresh brute-force seed. Generic overlap planning includes every composed rule and qualifier dependency, and both full and compact history retain native deduplication fields. Supporting row IDs and timestamps preserve the seed/use witness chain; the seed's own explanation identifies its distinct failure witnesses.
+
+
+Created web-shell file context
+-----------------------------
+
+The current policy preserves the existing 30-minute `webshell_activity` lead.
+`webshell_created_artifact` additionally requires native creation evidence and
+web-root script plus direct AV/YARA web-shell category support. The generic
+`signal_sequence` detector `webshell_created_file_activity` links that seed to
+unambiguously mapped HTTP requests returning 2xx for up to seven days. The
+original seed time bounds expiry; requests do not become new seeds. Observed
+file deletion invalidates earlier seeds; later qualified creation can seed a
+new episode. This is candidate file context, not proof of local execution,
+continuous file presence, or an unchanged historical file version.
+
+The recent and created-file paths emit separate zero-weight provenance signals.
+A later `signal_projection` emits `webshell_activity`, whose score is counted once. No generic
+YARA propagation threshold or existing score weight is increased. Policy-only
+creation/deletion signals have zero weight.
+
+Generic `signal_sequence` controls: optional `key.case_sensitive` (boolean,
+field scope only; default false for compatibility) preserves canonical POSIX
+file identities. Optional `reset_signals` lists earlier-phase producers whose
+positive observations invalidate sources at or before that timestamp in the
+same key. `target.where.integral_range` binds `field`, integer `minimum` and
+integer `maximum_exclusive`; missing, non-integral and out-of-range values fail
+closed. It combines with existing path/text predicates using `where.match`.
+Reset rows and range fields participate in full and compact history IO and
+candidate admission. No executor contains web-shell names, paths or thresholds.
+
+Content-classified DVWA scripts remain eligible even when deliberately installed.
+Deployment intent and ground-truth labels do not suppress observed web-shell
+capability or the subsequent exact-file request context. An upload is not a
+prerequisite; requests still do not establish actual command execution.
+
+Deliberate deployment of insecure demonstration code is attack-timeline context,
+not attacker activity. A classified file and an ordinary request can contribute
+contextual risk without proving abuse. Ground truth remains independently
+labelled; detections outside attacker ranges still count as evaluation false
+positives, and must not be relabelled to improve metrics.
+
+### Paired rate-change windows (`rate_change_window`)
+
+This optional typed temporal executor measures retrospective changes in the
+fraction of integral observations belonging to a configured numerator range.
+It has no HTTP-specific Python rules. The generated `web_service_disruption`
+instance uses 5xx as numerator and 2xx plus 5xx as denominator, keyed by asset,
+canonical web host and query-free endpoint. A route is required; missing asset
+or virtual-host metadata shares the dataset's empty namespace. DNS host and
+route canonicalisation remains owned by the existing web feature producer.
+
+The complete schema requires `stage: temporal`, `enabled`,
+`evidence_type: contextual`, `bucket_period`, `recent_window`,
+`reference_window`, `value_field`, `key.fields`, `key.required_fields`,
+`numerator_range`, `denominator_ranges`, `minimum_recent_count`,
+`minimum_reference_count`, `minimum_numerator_count`,
+`minimum_recent_buckets`, `minimum_rate_increase`, `emit_on`, and one emission.
+Ranges have integer `minimum` and `maximum_exclusive`; denominator ranges must
+be disjoint and contain the numerator. Windows are positive whole multiples of
+the bucket period. Required key fields must be a nonempty subset. `emit_on` is
+`numerator` or `denominator`. Missing, nonintegral, nonfinite and boolean values
+are excluded, as are observations outside the denominator ranges.
+
+For bucket B, recent observations cover B minus the recent-window length plus
+one bucket through B inclusive. The immediately preceding reference window
+ends one recent-window length before B. The two windows do not overlap.
+Occupied buckets, not calendar zero-fill, determine support. Insufficient
+support or an increase at or below `minimum_rate_increase` emits nothing.
+Otherwise signal strength is `emission.value * max(0, recent_rate-reference_rate)`;
+the ordinary weight owns the contribution and normal score caps still apply.
+Each explanation includes grouping fields, UTC bucket start, periods, both
+numerator/denominator counts, both rates and their increase.
+
+The current web policy uses 1-minute buckets, a 15-minute recent window and
+60-minute reference, support of 10 recent and 30 reference observations,
+3 recent server errors across at least 2 occupied buckets, and a rate increase
+above 0.20. It emits on server-error rows only; weight 8 bounds the additive
+contribution to 8 points. These are initial configurable settings, not an
+assertion of calibrated attack probability. The signal represents service-impact
+context and carries no invented ATT&CK attribution. Sustained unchanged failure
+rates eventually cease to be a *change* relative to the moving reference.
+
+Current buckets include all retained observations within that UTC bucket. This
+is explicitly retrospective bucket evidence, not an online request-time
+predictor. Later buckets cannot affect an earlier bucket. Partition boundaries
+must retain the whole recent plus reference horizon. Compact and pruned history
+retain unscored denominator observations; the executor runs on that baseline
+before hydration of signal-only composites. Processing aggregates occupied
+key/bucket pairs once and uses prefix sums; it never rescans requests for each
+target, or allocates missing timestamp ranges.
+
+
+## Previous-month quiet-hours lifecycle
+
+Current v27 defaults enable `profiling.monthly` for separate filesystem and HTTP-200 web baselines. Selection, validation, scope, expiry and manifest/cache semantics are documented in [MONTHLY_ACTIVITY_PROFILES.md](MONTHLY_ACTIVITY_PROFILES.md). The lifecycle belongs to the profiling domain, rather than a detector executor or post-processing script.

@@ -25,15 +25,16 @@ class DetectorContractTest(unittest.TestCase):
         for path,expected in contract.outputs().items():self.assertEqual(path.read_text(),expected,str(path))
         self.assertEqual(self.published['kind'],'published_interface_not_runtime_policy')
 
-    def test_current_counts_and_four_extension_families(self):
+    def test_current_counts_and_five_extension_families(self):
         self.assertEqual(len(self.published['required_detectors']),35)
-        self.assertEqual(len(self.published['example_additional_detectors']),10)
-        self.assertEqual(len(self.parse(self.rules).detectors),45)
+        self.assertEqual(len(self.published['example_additional_detectors']),14)
+        self.assertEqual(len(self.parse(self.rules).detectors),49)
         self.assertEqual(self.published['additional_executor_families'],{
             'signal_gate':{'stages':['atomic','contextual']},
             'signal_sequence':{'stages':['temporal']},
             'signal_projection':{'stages':['contextual','temporal']},
-            'qualified_artifact_command':{'stages':['contextual']}})
+            'qualified_artifact_command':{'stages':['contextual']},
+            'rate_change_window':{'stages':['temporal']}})
 
     def test_every_required_id_is_really_required(self):
         for ident in self.published['required_detectors']:

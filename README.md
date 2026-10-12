@@ -467,3 +467,32 @@ Copyright © 2026 Benjamin Donnachie.
 ChronoSIFT is licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International Licence](https://creativecommons.org/licenses/by-nc-sa/4.0/) (CC BY-NC-SA 4.0). See [LICENSE.md](LICENSE.md).
 
 Third-party tools, databases, datasets, rule collections, and marks referenced by this project are not relicensed by this repository and remain subject to their respective terms.
+
+Hour-of-week uncertainty uses whole-week jackknife scales and a joint
+standardized bootstrap maximum, with a Bonferroni Student-t small-block guard.
+`simultaneous_upper_radius` reports the largest resulting hour-specific margin;
+it is not added to all bins. See `docs/RULE_LANGUAGE.md` for assumptions,
+calibration diagnostics and small-sample limitations.
+
+
+Deployment-specific AV and web-root configuration
+------------------------------------------------
+
+The normal runner accepts repeated `--web-document-root` evidence paths.
+`ChronoSiftEngine.from_yaml(..., web_document_roots=[...])` applies the existing
+`configure_web_roots` helper before typed policy validation, updating normalisation,
+file lifecycle, referenced-file correlation and web-shell context together.
+Mappings describe server deployment, independently of ground truth; exact path,
+case and ambiguity protections remain active. No basename-only fallback is added.
+
+`--require-av-behaviour-context` (or the corresponding `from_yaml` keyword)
+sets the existing behaviour policy's `require_enriched_csv` field. The runner
+verifies the actual resource and report digests before loading evidence. Generic
+AV remains optional for callers that have not requested this requirement.
+The runner saves the effective YAML policy, including these deployment settings,
+for provenance. Weights and detector score ownership remain unchanged.
+
+
+### Previous-month quiet-hours profiles
+
+The default policy now builds separate non-OS filesystem and HTTP-200 web profiles from the previous UTC month. Validated profiles amplify normal danger scoring in the following month; missing/rejected profiles stay neutral. Web requests use their own profile for every response status. See [monthly profile configuration and verification](docs/MONTHLY_ACTIVITY_PROFILES.md).
