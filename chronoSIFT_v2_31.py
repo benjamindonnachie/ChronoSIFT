@@ -24672,6 +24672,7 @@ class ChronoSiftEngine:
         columns: Optional[List[str]] = None,
         *,
         build_position_map: bool = True,
+        prefer_contiguous_slice: bool = False,
     ) -> Tuple[pd.DataFrame, Dict[int, Dict[str, Any]], Dict[int, List[Dict[str, Any]]], Dict[int, int]]:
         """Subset and remap sparse state; core output can omit the unused position map."""
         if len(mask) != len(df):
@@ -24682,11 +24683,24 @@ class ChronoSiftEngine:
         # Slice from an attrs-free shallow wrapper so pandas does not propagate
         # large sparse-state attrs during boolean indexing on big partitions.
         source = _drop_dataframe_attrs(df)
-        if cols is not None:
+        # History preparation owns the source frame and discards it after
+        # projection. Its sorted month core is contiguous: a slice keeps the
+        # same values without allocating a second whole-month data frame.
+        # Other callers retain their existing positional-selection behaviour.
+        row_selector = selected_old
+        if prefer_contiguous_slice and (
+            len(selected_old) == 0
+            or int(selected_old[-1]) - int(selected_old[0]) + 1 == len(selected_old)
+        ):
+            lower = int(selected_old[0]) if len(selected_old) else 0
+            row_selector = slice(lower, lower + len(selected_old))
+        if cols is not None and not (
+            prefer_contiguous_slice and cols == list(source.columns)
+        ):
             col_positions = [source.columns.get_loc(c) for c in cols]
-            sub = source.iloc[selected_old, col_positions]
+            sub = source.iloc[row_selector, col_positions]
         else:
-            sub = source.iloc[selected_old]
+            sub = source.iloc[row_selector]
         new_signal_map: Dict[int, Dict[str, Any]] = {}
         new_explain_map: Dict[int, List[Dict[str, Any]]] = {}
         old_to_new: Dict[int, int] = {}
@@ -24945,23 +24959,28 @@ class ChronoSiftEngine:
             self._mark_compact_temporal_payload_candidates(atomic)
             core, signals, explanations, _ = self._subset_sparse_state(
                 atomic, signals, explanations, (atomic.index >= start) & (atomic.index < end),
-                columns=list(atomic.columns), build_position_map=False)
+                columns=list(atomic.columns), build_position_map=False,
+                prefer_contiguous_slice=True)
             del atomic, sparse, _
             destination = Path(cache_root) / f"year={year}" / f"month={month:02d}"
             destination.mkdir(parents=True, exist_ok=False)
             files = []
             # Keep schema-bearing empty partitions: they can be meaningful
             # continuity checkpoints in the original monthly layout.
-            for lower in range(0, max(1, len(core)), 65_536):
-                upper = min(len(core), lower + 65_536)
-                batch = core.iloc[lower:upper]
-                batch["chronosift_signals"] = [signals.get(i) for i in range(lower, upper)]
-                batch["chronosift_explain"] = [explanations.get(i) for i in range(lower, upper)]
-                target = destination / f"part-{len(files):05d}.parquet"
-                _write_parquet_subchunk(batch, target, dict(compression="zstd", index=True),
-                                       nested_columns_encoding="arrow")
-                files.append(str(target))
-                del batch
+            # The sparse payload is supplied explicitly below. Pandas would
+            # otherwise recursively copy the entire month's attrs for every
+            # small slice, defeating bounded persistence and exhausting memory.
+            with _detached_sparse_state(core):
+                for lower in range(0, max(1, len(core)), 65_536):
+                    upper = min(len(core), lower + 65_536)
+                    batch = core.iloc[lower:upper]
+                    batch["chronosift_signals"] = [signals.get(i) for i in range(lower, upper)]
+                    batch["chronosift_explain"] = [explanations.get(i) for i in range(lower, upper)]
+                    target = destination / f"part-{len(files):05d}.parquet"
+                    _write_parquet_subchunk(batch, target, dict(compression="zstd", index=True),
+                                           nested_columns_encoding="arrow")
+                    files.append(str(target))
+                    del batch
             receipt = dict(year=year, month=month, rows_loaded=loaded, rows=len(core), files=files,
                            columns=list(core.columns), feature_seconds=plan["feature_seconds"])
             with (destination / "complete.json").open("x") as handle:
