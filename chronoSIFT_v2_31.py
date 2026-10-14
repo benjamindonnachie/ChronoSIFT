@@ -27932,7 +27932,7 @@ def _monthly_census_sql(engine, columns, source="source", os_lookup=None):
     if not dt:
         raise ValueError("Monthly profiling requires a recognised datetime column")
     dt = 's.' + quote(dt)
-    return f"""SELECT date_trunc('day', {dt}) AS day, hour({dt}) AS hour,
+    return f"""SELECT epoch_us(date_trunc('day', {dt})) AS day_us, hour({dt}) AS hour,
         count(*) AS source_count,
         count(*) FILTER (WHERE {fs_sql}) AS filesystem_count,
         count(*) FILTER (WHERE ({web_sql})) AS web_count,
@@ -27951,13 +27951,15 @@ def _monthly_profiles_from_census(engine, census, fingerprint=None):
     # Calendar arithmetic stays within each observed month, never fills historical gaps.
     groups = {}
     for row in census:
-        day, hour, source_n, fs_n, web_n, success_n = row
-        day = pd.Timestamp(day).tz_localize("UTC") if pd.Timestamp(day).tzinfo is None else pd.Timestamp(day).tz_convert("UTC")
+        day_us, hour, source_n, fs_n, web_n, success_n = row
+        # DuckDB returns extended-year dates as strings, whose pandas parser
+        # falls back to Python's year-9999 limit. UTC integer microseconds
+        # preserve the same native precision as forensic Parquet timestamps.
+        day = pd.Timestamp(day_us, unit="us", tz="UTC")
         groups.setdefault((day.year, day.month), []).append((day, int(hour), int(source_n), int(fs_n), int(web_n), int(success_n)))
     targets = set(groups)
     for year, month in groups:
-        if year < 9999 or month < 12:
-            targets.add((year + (month == 12), month % 12 + 1))
+        targets.add(_next_year_month(year, month))
     for year, month in sorted(targets):
         prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
         start, end = _month_window_utc(year, month)
