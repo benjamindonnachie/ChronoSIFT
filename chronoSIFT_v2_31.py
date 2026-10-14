@@ -14577,6 +14577,9 @@ def _column_values_or_none(df: "pd.DataFrame", column: str) -> np.ndarray:
     return np.broadcast_to(np.array([None], dtype=object), (len(df),))
 
 
+_ROW_POLICY_BATCH_ROWS = 65_536
+
+
 def _normalised_text_array(
     df: "pd.DataFrame",
     column: str,
@@ -16893,6 +16896,32 @@ class ChronoSiftEngine:
             f"unsupported ordered-row predicate: {predicate.operator}"
         )
 
+    def _apply_row_local_policy_in_batches(
+        self, df, signal_map, explain_map, *, executor, detector_id,
+    ) -> None:
+        """Bound disposable row-policy text arrays without partitioning history.
+
+        Ordered row rules and adjustments inspect and mutate only the current
+        row. Preserve their per-row rule order while translating sparse keys
+        between batch positions and the original frame positions. Temporal and
+        grouped executors continue to receive the complete contextual frame.
+        """
+        with _detached_sparse_state(df):
+            for start in range(0, len(df), _ROW_POLICY_BATCH_ROWS):
+                stop = min(len(df), start + _ROW_POLICY_BATCH_ROWS)
+                positions = range(start, stop)
+                signals = {i - start: signal_map[i] for i in positions if i in signal_map}
+                explanations = {i - start: explain_map[i] for i in positions if i in explain_map}
+                try:
+                    executor(df.iloc[start:stop], signals, explanations, {}, detector_id=detector_id)
+                finally:
+                    # Executors mutate their caller's sparse state incrementally.
+                    # Preserve those changes even when a later operation fails.
+                    for i, value in signals.items():
+                        signal_map[start + i] = value
+                    for i, value in explanations.items():
+                        explain_map[start + i] = value
+
     def _apply_ordered_row_rules_sparse(
         self,
         df: pd.DataFrame,
@@ -16906,6 +16935,13 @@ class ChronoSiftEngine:
         policy = definition.payload
         nrows = len(df)
         if nrows == 0 or not policy.enabled:
+            return
+
+        if nrows > _ROW_POLICY_BATCH_ROWS:
+            self._apply_row_local_policy_in_batches(
+                df, signal_map, explain_map,
+                executor=self._apply_ordered_row_rules_sparse, detector_id=detector_id,
+            )
             return
 
         input_values = self._resolve_row_policy_inputs(
@@ -16969,6 +17005,13 @@ class ChronoSiftEngine:
         nrows = len(df)
         if nrows == 0 or not policy.enabled:
             return
+        if nrows > _ROW_POLICY_BATCH_ROWS:
+            self._apply_row_local_policy_in_batches(
+                df, signal_map, explain_map,
+                executor=self._apply_ordered_signal_adjustments_sparse, detector_id=detector_id,
+            )
+            return
+
         input_values = self._resolve_row_policy_inputs(
             df, policy.inputs, contextual_cache
         )
